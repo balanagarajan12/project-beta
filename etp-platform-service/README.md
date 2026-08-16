@@ -1,6 +1,64 @@
 # ETP Platform Service
 
-Backend foundation for the Enterprise Technology Platform (ETP). This service establishes the core Spring Boot structure, API conventions, security baseline, and operational endpoints for the platform.
+Backend foundation for the Enterprise Technology Platform (ETP). This service is the primary developer entry point for the ETP platform backend.
+
+## ETP Purpose
+
+ETP is an **enterprise technology composition platform**. It provides reusable technology capabilities that business applications can consume, so teams can build on a consistent technology foundation instead of re-implementing platform concerns in every project.
+
+ETP is **not**:
+
+- a business application
+- a low-code replacement
+- an IDE
+- a replacement for source control
+- a generic business-process platform
+
+**Core principle:**
+
+> ETP owns reusable technology capabilities. Business applications own business logic.
+
+## Architecture Boundary
+
+### ETP owns
+
+- reusable technology capabilities (catalog, versions, contracts, implementations, dependencies)
+- capability contracts
+- platform metadata
+- common APIs and error conventions
+- security/IAM integration patterns (foundation only in Week 1)
+- workflow, integration, and messaging patterns (planned capabilities)
+- configuration patterns
+- audit foundations
+- observability foundations
+- application composition (future)
+
+### Business applications own
+
+- business domain model
+- business rules
+- business workflows
+- business transactions
+- business-specific screens
+- business data
+
+## Current Platform Foundation
+
+Implemented in this repository today:
+
+- **Spring Boot 4.1** on **Java 21**
+- **PostgreSQL 17** (`etp_platform` database)
+- **Flyway** schema migrations (11 tables, no seed data)
+- **JPA/Hibernate** entities with `ddl-auto=validate`
+- **REST APIs** — health and platform information endpoints
+- **Spring Boot Actuator** — operational health
+- **Docker Compose** — local PostgreSQL
+- **Common API/error model** — `ApiResponse`, `ErrorResponse`, `GlobalExceptionHandler`
+- **Platform metadata persistence** — customer, application, capability, and audit entity model
+- **Spring Security** baseline with OAuth2 Resource Server dependency (Keycloak not integrated)
+- **OpenAPI/Swagger** via SpringDoc
+
+**Not implemented yet** (planned capabilities and services): Capability Registry APIs/UI, Application Registry APIs, Application Initializer, Application Composer, Keycloak integration, workflow, Kafka, RabbitMQ, SFTP, AI, generated applications, and ETP UI.
 
 ## Technology Stack
 
@@ -10,10 +68,10 @@ Backend foundation for the Enterprise Technology Platform (ETP). This service es
 - Spring Web MVC
 - Spring Data JPA
 - PostgreSQL 17 (platform database)
-- H2 (optional `local` profile for lightweight development)
+- Flyway
+- H2 (optional `local` profile for lightweight development without PostgreSQL)
 - Spring Validation
-- Spring Security
-- OAuth2 Resource Server (dependency present; Keycloak integration deferred)
+- Spring Security + OAuth2 Resource Server (dependency present; Keycloak integration deferred)
 - Spring Boot Actuator
 - OpenAPI / Swagger (springdoc-openapi 3.x)
 
@@ -65,18 +123,74 @@ Stop PostgreSQL:
 docker compose down
 ```
 
-## Package Structure
+## Current Package Structure
 
 ```
 com.etp.platform
-├── core              # Platform-level REST endpoints (health, info)
-├── application       # Business application domain (future)
-├── capability        # Platform capabilities (future)
-├── environment       # Environment and infrastructure (database health)
-├── composition       # Application composition (future)
-├── security          # Security configuration
-└── common            # Shared API models and exception handling
+├── EtpPlatformServiceApplication.java
+├── core                    # Platform REST endpoints and platform_version entity
+│   ├── dto                 # HealthResponse, PlatformInfoResponse
+│   ├── HealthController.java
+│   ├── PlatformController.java
+│   └── PlatformVersion.java
+├── application             # Customer/application metadata JPA entities
+├── capability              # Capability catalog JPA entities
+├── common                  # Shared API models, exceptions, audit entity
+│   ├── api
+│   ├── exception
+│   └── audit
+├── environment             # Infrastructure health (database connectivity)
+└── security                # Security configuration
 ```
+
+Reserved for future work (no Java packages yet): `composition`.
+
+## Data Ownership
+
+- **ETP Platform database (`etp_platform`)** stores **platform metadata** — customers, applications, application definitions, capability catalog, capability versions, contracts, dependencies, platform versions, and audit events.
+- **Business application databases** own **business/domain data** for each deployed application.
+- **Application Definition** represents **what** an application needs (technology composition, capability versions, configuration references).
+- **Application Instance** (future) will represent **where/how** an application runs. It is not implemented in Week 1.
+
+Platform metadata tables must not become a store for business-domain data.
+
+## Architecture Guardrails
+
+1. ETP owns technology capabilities; applications own business logic.
+2. Capabilities have explicit versions.
+3. Capability dependencies are explicit and version-aware.
+4. Capability contracts should be machine-readable where applicable.
+5. Platform metadata must not become business data.
+6. UI communicates through APIs, not directly with databases.
+7. Underlying technology should remain behind capability abstractions where practical.
+8. Security cannot be bypassed.
+9. Significant distributed transactions should carry correlation context.
+10. Logical component boundaries do not automatically imply microservices.
+11. Avoid premature microservice decomposition.
+12. Generated applications remain standard maintainable source code.
+13. Secrets must never be embedded in generated artifacts.
+14. Validation is required before future application composition/publication.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for engineering detail and [docs/API_CONVENTIONS.md](docs/API_CONVENTIONS.md) for API conventions.
+
+## Phase Boundary (Week 1)
+
+Intentionally **not** implemented in Week 1:
+
+- Application Initializer
+- Application Builder / Composer
+- Capability Registry UI
+- full ETP UI
+- Keycloak implementation integration
+- Workflow implementation
+- Kafka implementation
+- RabbitMQ implementation
+- SFTP implementation
+- AI capability discovery
+- generated applications
+- managed-services / customer operational functionality
+
+These are future roadmap items, not Week 1 gaps.
 
 ## Build
 
@@ -99,11 +213,11 @@ docker compose up -d
 mvn spring-boot:run
 ```
 
-Hibernate schema validation is enabled (`spring.jpa.hibernate.ddl-auto=validate`). No business tables exist yet; an empty database is sufficient for connectivity validation.
+Flyway applies schema migrations on startup. Hibernate schema validation is enabled (`spring.jpa.hibernate.ddl-auto=validate`).
 
 ### Local profile (in-memory H2)
 
-For lightweight local development without PostgreSQL:
+For lightweight local development without PostgreSQL (Flyway disabled; JPA validation not enforced against PostgreSQL schema):
 
 ```bash
 mvn spring-boot:run -Dspring-boot.run.profiles=local
@@ -156,4 +270,10 @@ The service starts on port `8080` by default (`ETP_SERVER_PORT` overrides).
 mvn test
 ```
 
-Tests use in-memory H2. The `local` profile integration test verifies the application starts with the local development database configuration.
+PostgreSQL integration tests use Testcontainers when Docker is available. The `local` profile test verifies startup with in-memory H2.
+
+## Further Reading
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — engineering architecture reference
+- [CAPABILITY_DEFINITION_OF_DONE.md](CAPABILITY_DEFINITION_OF_DONE.md) — capability delivery standard
+- [docs/API_CONVENTIONS.md](docs/API_CONVENTIONS.md) — REST API conventions
