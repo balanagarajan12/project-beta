@@ -1,0 +1,21 @@
+services:
+  etp-platform-postgres:
+    image: postgres:17
+    container_name: etp-platform-postgres
+    environment:
+      POSTGRES_DB: etp_platform
+      POSTGRES_USER: etp_admin
+      POSTGRES_PASSWORD: ${ETP_DB_PASSWORD:?ETP_DB_PASSWORD is required}
+    ports:
+      - "${ETP_DB_PORT:-5434}:5432"
+    volumes:
+      - etp_platform_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U etp_admin -d etp_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  etp_platform_pgdata:
