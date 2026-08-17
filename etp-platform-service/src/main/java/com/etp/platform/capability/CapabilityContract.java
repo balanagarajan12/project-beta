@@ -1,5 +1,6 @@
 package com.etp.platform.capability;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.FetchType;
@@ -7,6 +8,8 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -34,6 +37,10 @@ public class CapabilityContract {
 
     @Column(name = "contract_location", length = 500)
     private String contractLocation;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "contract_document", columnDefinition = "jsonb")
+    private JsonNode contractDocument;
 
     @Column(name = "description")
     private String description;
@@ -93,6 +100,14 @@ public class CapabilityContract {
 
     public void setContractLocation(String contractLocation) {
         this.contractLocation = contractLocation;
+    }
+
+    public JsonNode getContractDocument() {
+        return contractDocument;
+    }
+
+    public void setContractDocument(JsonNode contractDocument) {
+        this.contractDocument = contractDocument;
     }
 
     public String getDescription() {

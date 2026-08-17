@@ -9,6 +9,7 @@ import com.etp.platform.capability.CapabilityVersion;
 import jakarta.persistence.EntityManager;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
+import org.testcontainers.junit.jupiter.Testcontainers;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,6 +21,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest
+@Testcontainers(disabledWithoutDocker = true)
 class PostgreSQLSchemaIntegrationTest extends AbstractPostgreSqlIntegrationTest {
 
     @Autowired
@@ -30,7 +32,7 @@ class PostgreSQLSchemaIntegrationTest extends AbstractPostgreSqlIntegrationTest 
 
     @Test
     void flywayMigrationsExecuteSuccessfully() {
-        assertThat(flyway.info().applied().length).isEqualTo(11);
+        assertThat(flyway.info().applied().length).isEqualTo(13);
     }
 
     @Test

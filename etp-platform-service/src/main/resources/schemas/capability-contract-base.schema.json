@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "functional": { "type": "object" },
+    "interfaces": { "type": "object" },
+    "configuration": { "type": "object" },
+    "dependencies": { "type": "object" },
+    "security": { "type": "object" },
+    "nfr": { "type": "object" },
+    "deployment": { "type": "object" },
+    "operations": { "type": "object" },
+    "compatibility": { "type": "object" }
+  }
+}

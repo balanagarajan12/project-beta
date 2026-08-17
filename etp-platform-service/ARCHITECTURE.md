@@ -104,7 +104,7 @@ All tables live in `etp_platform`. UUID primary keys. No seed data in migrations
 | **ApplicationCapability** | Exact capability version used by an application definition |
 | **Capability** | ETP-owned reusable technology capability (e.g. `etp.iam`) |
 | **CapabilityVersion** | Version of a capability |
-| **CapabilityContract** | Contract artifacts for a capability version (API, event, config, etc.) |
+| **CapabilityContract** | Contract artifacts for a capability version — inline JSONB (`contract_document`) or external references (`contract_location` + `contract_format`) |
 | **CapabilityImplementation** | Technology implementation behind a capability version |
 | **CapabilityDependency** | Version-aware dependency between capability versions |
 | **PlatformVersion** | Version of ETP itself |
@@ -159,7 +159,7 @@ Keycloak (or compatible identity provider)
 | Application | Port `8080` (`ETP_SERVER_PORT`) |
 | PostgreSQL | Host port `5434` → container `5432` (`ETP_DB_PORT`) |
 | Database | `etp_platform`, user `etp_admin` |
-| Schema | Flyway `classpath:db/migration` (11 migrations) |
+| Schema | Flyway `classpath:db/migration` (12 migrations) |
 | JPA | `ddl-auto=validate` (default profile) |
 | Timezone | JDBC `TimeZone=UTC` |
 
