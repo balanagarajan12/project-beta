@@ -13,8 +13,25 @@ A capability is considered complete only when the applicable items below are add
 
 - Capability code and name defined
 - Version defined
-- Lifecycle status defined
+- Lifecycle status defined and documented (capability and version lifecycles are separate; see [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md))
 - Description and purpose documented
+
+### Lifecycle expectations (ETP platform capabilities)
+
+Where a capability exposes versioned resources through the platform registry:
+
+| Level | V1 reference lifecycle |
+|-------|------------------------|
+| Capability | `DRAFT` → `ACTIVE` → `DEPRECATED` → `RETIRED` |
+| Capability version | `DRAFT` → `VALIDATED` → `ACTIVE` → `DEPRECATED` → `RETIRED`; `DRAFT`/`VALIDATED` → `CANCELLED` (never activated) |
+
+Implemented registry behavior:
+
+- POST creates capability + first version in `DRAFT`.
+- PATCH handles metadata, capability lifecycle, new versions, and version lifecycle.
+- No DELETE — deprecation, retirement, and cancellation are lifecycle transitions.
+- Lifecycle changes produce audit events (`STATUS_CHANGE`, etc.).
+- Invalid transitions return HTTP 409 / `INVALID_LIFECYCLE_TRANSITION`.
 
 ## 3. Capability Contract
 
@@ -99,7 +116,7 @@ Testcontainers is not required for every capability unless PostgreSQL or contain
 
 - README or capability documentation updated
 - Configuration documented
-- API usage documented
+- API usage documented (for registry capabilities, see [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md))
 - Architecture decisions recorded where relevant
 
 ## 12. Versioning & Compatibility
@@ -121,6 +138,7 @@ Where applicable:
 Where applicable:
 
 - Significant configuration and lifecycle changes are auditable
+- Capability Registry V1 records `AuditEvent` rows for create, metadata update, version create, and status changes (no audit query API yet)
 
 ## 15. Review
 

@@ -48,9 +48,10 @@ Implemented in this repository today:
 
 - **Spring Boot 4.1** on **Java 21**
 - **PostgreSQL 17** (`etp_platform` database)
-- **Flyway** schema migrations (11 tables, no seed data)
+- **Flyway** schema migrations (13 migrations, 11 tables, no seed data)
 - **JPA/Hibernate** entities with `ddl-auto=validate`
-- **REST APIs** — health and platform information endpoints
+- **REST APIs** — platform health/info (`com.etp.platform.core`) and **Capability Registry V1** (`/api/v1/capabilities`)
+- **Capability Registry V1** — create, list, retrieve, and PATCH capabilities with version lifecycle, inline JSONB contracts, audit on lifecycle changes, and single-ACTIVE-version enforcement
 - **Spring Boot Actuator** — operational health
 - **Docker Compose** — local PostgreSQL
 - **Common API/error model** — `ApiResponse`, `ErrorResponse`, `GlobalExceptionHandler`
@@ -58,7 +59,9 @@ Implemented in this repository today:
 - **Spring Security** baseline with OAuth2 Resource Server dependency (Keycloak not integrated)
 - **OpenAPI/Swagger** via SpringDoc
 
-**Not implemented yet** (planned capabilities and services): Capability Registry APIs/UI, Application Registry APIs, Application Initializer, Application Composer, Keycloak integration, workflow, Kafka, RabbitMQ, SFTP, AI, generated applications, and ETP UI.
+**Not implemented yet** (planned capabilities and services): Capability Registry UI, Application Registry APIs, Application Initializer, Application Composer, Keycloak integration, workflow, Kafka, RabbitMQ, SFTP, AI, generated applications, and ETP UI.
+
+**Implemented:** Capability Registry **REST APIs** and lifecycle (see [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md)). IAM token enforcement on capability APIs is deferred.
 
 ## Technology Stack
 
@@ -134,8 +137,13 @@ com.etp.platform
 │   ├── PlatformController.java
 │   └── PlatformVersion.java
 ├── application             # Customer/application metadata JPA entities
-├── capability              # Capability catalog JPA entities
-├── common                  # Shared API models, exceptions, audit entity
+├── capability              # Capability catalog entities, APIs, lifecycle, validation
+│   ├── api                 # CapabilityController, request/response DTOs
+│   ├── domain              # Lifecycle enums and validators
+│   ├── repository
+│   ├── service
+│   └── validation          # JSON Schema contract document validation
+├── common                  # Shared API models, exceptions, audit
 │   ├── api
 │   ├── exception
 │   └── audit
@@ -173,9 +181,11 @@ Platform metadata tables must not become a store for business-domain data.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for engineering detail and [docs/API_CONVENTIONS.md](docs/API_CONVENTIONS.md) for API conventions.
 
-## Phase Boundary (Week 1)
+## Phase Boundary
 
-Intentionally **not** implemented in Week 1:
+**Implemented:** Capability Registry REST APIs and lifecycle (see [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md)).
+
+Intentionally **not** implemented:
 
 - Application Initializer
 - Application Builder / Composer
@@ -190,7 +200,7 @@ Intentionally **not** implemented in Week 1:
 - generated applications
 - managed-services / customer operational functionality
 
-These are future roadmap items, not Week 1 gaps.
+These are future roadmap items.
 
 ## Build
 
@@ -227,6 +237,8 @@ The service starts on port `8080` by default (`ETP_SERVER_PORT` overrides).
 
 ## Available APIs
 
+### Platform (`com.etp.platform.core`)
+
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/v1/health` | Application health status |
@@ -234,6 +246,24 @@ The service starts on port `8080` by default (`ETP_SERVER_PORT` overrides).
 | GET | `/actuator/health` | Spring Boot Actuator health (includes database connectivity) |
 | GET | `/api/v1/openapi` | OpenAPI specification |
 | GET | `/api/v1/swagger-ui` | Swagger UI |
+
+### Capability Registry V1
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/capabilities` | Create capability with first version (DRAFT) |
+| GET | `/api/v1/capabilities` | List capabilities (`category`, `status` optional) |
+| GET | `/api/v1/capabilities/{id}` | Retrieve full capability aggregate |
+| PATCH | `/api/v1/capabilities/{id}` | Update metadata, lifecycle, new version, or version status |
+
+There is no DELETE endpoint. Deprecation, retirement, and cancellation are lifecycle operations via PATCH.
+
+Lifecycle summary:
+
+- **Capability:** `DRAFT` → `ACTIVE` → `DEPRECATED` → `RETIRED`
+- **Version:** `DRAFT` → `VALIDATED` → `ACTIVE` → `DEPRECATED` → `RETIRED`; `DRAFT`/`VALIDATED` → `CANCELLED` (terminal; only if never ACTIVE)
+
+See [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md) for full lifecycle rules and examples.
 
 ### Example responses
 
@@ -270,10 +300,11 @@ The service starts on port `8080` by default (`ETP_SERVER_PORT` overrides).
 mvn test
 ```
 
-PostgreSQL integration tests use Testcontainers when Docker is available. The `local` profile test verifies startup with in-memory H2.
+PostgreSQL integration tests use Testcontainers when Docker is available. `CapabilityVersionLifecyclePostgreSQLTest` and `CapabilityPostLocalPostgreSQLTest` exercise the registry against real PostgreSQL on `localhost:5434` when available. The `local` profile test verifies startup with in-memory H2.
 
 ## Further Reading
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — engineering architecture reference
+- [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md) — Capability Registry V1 APIs and lifecycle
 - [CAPABILITY_DEFINITION_OF_DONE.md](CAPABILITY_DEFINITION_OF_DONE.md) — capability delivery standard
 - [docs/API_CONVENTIONS.md](docs/API_CONVENTIONS.md) — REST API conventions

@@ -12,8 +12,10 @@ All public business APIs use a versioned prefix:
 
 Examples in this service:
 
-- `GET /api/v1/health`
-- `GET /api/v1/platform/info`
+- `GET /api/v1/health` — platform health (`com.etp.platform.core`)
+- `GET /api/v1/platform/info` — platform metadata (`com.etp.platform.core`)
+- `GET /api/v1/capabilities` — capability registry list
+- `GET /api/v1/capabilities/{id}` — capability aggregate detail
 
 ## Resource Naming
 
@@ -22,8 +24,11 @@ Use **resource-oriented nouns**, not verbs in the path.
 ```
 GET /api/v1/applications
 GET /api/v1/applications/{id}
-GET /api/v1/capabilities/{capabilityId}/versions
+GET /api/v1/capabilities
+GET /api/v1/capabilities/{id}
 ```
+
+Capability **versions** are nested in the capability aggregate in V1 (returned on GET, created/updated via PATCH on the capability). There is no separate `/capabilities/{id}/versions` collection endpoint.
 
 Avoid verb-oriented URLs unless an explicit non-CRUD action is required (e.g. a future `POST /api/v1/application-definitions/{id}/validate`).
 
@@ -36,6 +41,8 @@ Avoid verb-oriented URLs unless an explicit non-CRUD action is required (e.g. a 
 | `PUT` | Full replacement of a resource |
 | `PATCH` | Partial update of a resource |
 | `DELETE` | Remove or retire a resource |
+
+**Capability Registry V1:** There is no DELETE for capabilities. Deprecation, retirement, and cancellation are **lifecycle transitions** via `PATCH /api/v1/capabilities/{id}` (`status` or `versionStatus`).
 
 ## Response Model
 
@@ -66,10 +73,20 @@ Use the existing error model — do not introduce a parallel structure:
 
 Errors return `ErrorResponse` with code, message, timestamp, and optional field-level `details`.
 
+### Lifecycle conflicts
+
+Invalid capability or capability-version lifecycle transitions return:
+
+- HTTP **409**
+- Error code **`INVALID_LIFECYCLE_TRANSITION`**
+
+Other common capability registry conflicts use **409** with codes such as `DUPLICATE_CAPABILITY_CODE`, `DUPLICATE_CAPABILITY_VERSION`, and `ACTIVE_VERSION_IMMUTABLE`.
+
 ## Validation
 
 - Validate requests at the API boundary (`@Valid`, Jakarta Validation).
 - Return consistent validation errors via `GlobalExceptionHandler` (`VALIDATION_ERROR` with `ErrorDetail` list).
+- Inline capability contract documents are validated against the V1 base JSON Schema at the API boundary.
 - Do not rely on database constraints alone for user-facing validation.
 
 ## HTTP Status Codes
@@ -88,13 +105,14 @@ Errors return `ErrorResponse` with code, message, timestamp, and optional field-
 | `422` | Use only when semantically appropriate and consistently applied |
 | `500` | Unexpected server error |
 
-The current `GlobalExceptionHandler` maps `BusinessException` and validation failures to `400`, and unhandled exceptions to `500`.
+`BusinessException` maps to **400** or **409** depending on the error code. Validation failures map to **400**. Unhandled exceptions map to **500**.
 
 ## API Documentation
 
 - OpenAPI/Swagger is provided via SpringDoc.
 - Specification: `/api/v1/openapi`
 - UI: `/api/v1/swagger-ui`
+- Capability Registry operations are tagged **Capability Management** in OpenAPI.
 - Do not disable OpenAPI for local development unless explicitly required for a deployment profile.
 
 ## Actuator
@@ -109,9 +127,20 @@ Examples: `/actuator/health`, `/actuator/info`.
 
 Do not expose actuator paths under `/api/v1`. Do not mix actuator and business API semantics.
 
+## Capability APIs (implemented)
+
+See [CAPABILITY_REGISTRY.md](CAPABILITY_REGISTRY.md) for lifecycle rules, aggregate model, and PATCH semantics.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/v1/capabilities` | Create capability + first version (DRAFT) |
+| `GET` | `/api/v1/capabilities` | List capabilities (`category`, `status` filters) |
+| `GET` | `/api/v1/capabilities/{id}` | Retrieve full aggregate |
+| `PATCH` | `/api/v1/capabilities/{id}` | Metadata, lifecycle, new version, version lifecycle |
+
 ## Future API Principles
 
-As ETP capabilities are added:
+As additional ETP capabilities are added:
 
 - APIs become stable **capability boundaries**
 - Capabilities should not expose internal database structure
