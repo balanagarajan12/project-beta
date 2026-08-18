@@ -1,0 +1,29 @@
+.checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--etp-space-2);
+  cursor: pointer;
+  font-size: var(--etp-font-size-body);
+  color: var(--etp-color-text-primary);
+}
+
+.input {
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  accent-color: var(--etp-color-action-primary);
+  cursor: pointer;
+}
+
+.input:disabled {
+  cursor: not-allowed;
+}
+
+.label {
+  line-height: var(--etp-line-height-body);
+}
+
+.disabled {
+  opacity: var(--etp-opacity-disabled);
+  cursor: not-allowed;
+}

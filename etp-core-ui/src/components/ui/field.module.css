@@ -1,0 +1,118 @@
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--etp-space-2);
+}
+
+.label {
+  font-size: var(--etp-font-size-label);
+  font-weight: var(--etp-font-weight-medium);
+  line-height: var(--etp-line-height-label);
+  color: var(--etp-color-text-primary);
+}
+
+.control {
+  width: 100%;
+  padding: var(--etp-space-2) var(--etp-space-3);
+  border: 1px solid var(--etp-color-border);
+  border-radius: var(--etp-radius-sm);
+  background-color: var(--etp-color-surface-raised);
+  color: var(--etp-color-text-primary);
+  transition:
+    border-color var(--etp-duration-fast) var(--etp-easing-default),
+    box-shadow var(--etp-duration-fast) var(--etp-easing-default);
+}
+
+.control::placeholder {
+  color: var(--etp-color-neutral-400);
+}
+
+.control:hover:not(:disabled) {
+  border-color: var(--etp-color-neutral-300);
+}
+
+.control:focus-visible {
+  border-color: var(--etp-color-action-primary);
+  box-shadow: 0 0 0 3px var(--etp-color-focus-ring);
+}
+
+.error {
+  border-color: var(--etp-color-error);
+}
+
+.error:focus-visible {
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.35);
+}
+
+.success {
+  border-color: var(--etp-color-success);
+}
+
+.hint {
+  font-size: var(--etp-font-size-caption);
+  color: var(--etp-color-text-secondary);
+}
+
+.errorText {
+  font-size: var(--etp-font-size-caption);
+  color: var(--etp-color-error);
+}
+
+.withIcon {
+  padding-left: var(--etp-space-10);
+}
+
+.iconSlot {
+  position: absolute;
+  left: var(--etp-space-3);
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--etp-color-text-secondary);
+  display: flex;
+  pointer-events: none;
+}
+
+.withTrailingIcon {
+  padding-right: var(--etp-space-10);
+}
+
+.trailingSlot {
+  position: absolute;
+  right: var(--etp-space-3);
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--etp-color-text-secondary);
+  display: flex;
+}
+
+.trailingButton {
+  border: none;
+  background: none;
+  padding: var(--etp-space-1);
+  cursor: pointer;
+  color: var(--etp-color-text-secondary);
+  border-radius: var(--etp-radius-sm);
+  display: flex;
+  align-items: center;
+}
+
+.trailingButton:hover {
+  color: var(--etp-color-text-primary);
+  background-color: var(--etp-color-surface-subtle);
+}
+
+.controlLg {
+  padding: var(--etp-space-3) var(--etp-space-4);
+}
+
+.withIcon.controlLg {
+  padding-left: var(--etp-space-10);
+}
+
+.withTrailingIcon.controlLg {
+  padding-right: var(--etp-space-10);
+}
+
+.wrapper {
+  position: relative;
+}

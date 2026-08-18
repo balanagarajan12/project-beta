@@ -1,0 +1,29 @@
+.wrapper {
+  position: relative;
+  max-width: 24rem;
+}
+
+.input {
+  width: 100%;
+  padding: var(--etp-space-2) var(--etp-space-3);
+  padding-left: var(--etp-space-10);
+  border: 1px solid var(--etp-color-border);
+  border-radius: var(--etp-radius-sm);
+  background-color: var(--etp-color-surface-raised);
+  font-size: var(--etp-font-size-body);
+  color: var(--etp-color-text-primary);
+}
+
+.input:focus-visible {
+  border-color: var(--etp-color-action-primary);
+  box-shadow: 0 0 0 3px var(--etp-color-focus-ring);
+}
+
+.icon {
+  position: absolute;
+  left: var(--etp-space-3);
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--etp-color-text-secondary);
+  pointer-events: none;
+}

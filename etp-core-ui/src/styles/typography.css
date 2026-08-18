@@ -1,0 +1,83 @@
+/**
+ * ETP semantic typography classes — use tokens only.
+ */
+
+.etp-text-display {
+  font-family: var(--etp-font-family);
+  font-size: var(--etp-font-size-display);
+  font-weight: var(--etp-font-weight-bold);
+  line-height: var(--etp-line-height-display);
+  color: var(--etp-color-text-primary);
+}
+
+.etp-text-h1 {
+  font-family: var(--etp-font-family);
+  font-size: var(--etp-font-size-h1);
+  font-weight: var(--etp-font-weight-semibold);
+  line-height: var(--etp-line-height-h1);
+  color: var(--etp-color-text-primary);
+}
+
+.etp-text-h2 {
+  font-family: var(--etp-font-family);
+  font-size: var(--etp-font-size-h2);
+  font-weight: var(--etp-font-weight-semibold);
+  line-height: var(--etp-line-height-h2);
+  color: var(--etp-color-text-primary);
+}
+
+.etp-text-h3 {
+  font-family: var(--etp-font-family);
+  font-size: var(--etp-font-size-h3);
+  font-weight: var(--etp-font-weight-semibold);
+  line-height: var(--etp-line-height-h3);
+  color: var(--etp-color-text-primary);
+}
+
+.etp-text-h4 {
+  font-family: var(--etp-font-family);
+  font-size: var(--etp-font-size-h4);
+  font-weight: var(--etp-font-weight-semibold);
+  line-height: var(--etp-line-height-h4);
+  color: var(--etp-color-text-primary);
+}
+
+.etp-text-body-lg {
+  font-family: var(--etp-font-family);
+  font-size: var(--etp-font-size-body-lg);
+  font-weight: var(--etp-font-weight-regular);
+  line-height: var(--etp-line-height-body-lg);
+  color: var(--etp-color-text-primary);
+}
+
+.etp-text-body {
+  font-family: var(--etp-font-family);
+  font-size: var(--etp-font-size-body);
+  font-weight: var(--etp-font-weight-regular);
+  line-height: var(--etp-line-height-body);
+  color: var(--etp-color-text-primary);
+}
+
+.etp-text-body-sm {
+  font-family: var(--etp-font-family);
+  font-size: var(--etp-font-size-body-sm);
+  font-weight: var(--etp-font-weight-regular);
+  line-height: var(--etp-line-height-body-sm);
+  color: var(--etp-color-text-secondary);
+}
+
+.etp-text-label {
+  font-family: var(--etp-font-family);
+  font-size: var(--etp-font-size-label);
+  font-weight: var(--etp-font-weight-medium);
+  line-height: var(--etp-line-height-label);
+  color: var(--etp-color-text-primary);
+}
+
+.etp-text-caption {
+  font-family: var(--etp-font-family);
+  font-size: var(--etp-font-size-caption);
+  font-weight: var(--etp-font-weight-regular);
+  line-height: var(--etp-line-height-caption);
+  color: var(--etp-color-text-secondary);
+}

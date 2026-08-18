@@ -1,0 +1,35 @@
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--etp-space-4);
+  margin-bottom: var(--etp-space-6);
+}
+
+.titleBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--etp-space-2);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--etp-font-size-h1);
+  font-weight: var(--etp-font-weight-semibold);
+  line-height: var(--etp-line-height-h1);
+  color: var(--etp-color-text-primary);
+}
+
+.description {
+  margin: 0;
+  font-size: var(--etp-font-size-body);
+  color: var(--etp-color-text-secondary);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--etp-space-2);
+}

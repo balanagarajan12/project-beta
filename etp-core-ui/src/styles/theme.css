@@ -1,0 +1,95 @@
+/**
+ * ETP global theme — consumes design tokens.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-family: var(--etp-font-family);
+  font-size: var(--etp-font-size-body);
+  line-height: var(--etp-line-height-body);
+  color: var(--etp-color-text-primary);
+  background-color: var(--etp-color-surface);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: var(--etp-viewport-height);
+}
+
+@supports (height: 100dvh) {
+  :root {
+    --etp-viewport-height: 100dvh;
+  }
+}
+
+body {
+  margin: 0;
+  min-height: var(--etp-viewport-height);
+  background-color: var(--etp-color-surface);
+  color: var(--etp-color-text-primary);
+}
+
+#root {
+  min-height: var(--etp-viewport-height);
+}
+
+a {
+  color: var(--etp-color-action-primary);
+  text-decoration: none;
+  transition: color var(--etp-duration-fast) var(--etp-easing-default);
+}
+
+a:hover {
+  color: var(--etp-color-action-primary-hover);
+}
+
+a:focus-visible {
+  outline: var(--etp-focus-ring-width) solid var(--etp-color-focus-ring);
+  outline-offset: var(--etp-focus-ring-offset);
+  border-radius: var(--etp-radius-sm);
+}
+
+::selection {
+  background-color: var(--etp-color-info-subtle);
+  color: var(--etp-color-text-primary);
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: var(--etp-focus-ring-width) solid var(--etp-color-focus-ring);
+  outline-offset: var(--etp-focus-ring-offset);
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+button:disabled,
+input:disabled,
+select:disabled,
+textarea:disabled {
+  cursor: not-allowed;
+  opacity: var(--etp-opacity-disabled);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,42 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(3, 7, 18, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--etp-space-4);
+  z-index: 1000;
+}
+
+.dialog {
+  width: 100%;
+  max-width: 32rem;
+  background-color: var(--etp-color-surface-raised);
+  border: 1px solid var(--etp-color-border);
+  border-radius: var(--etp-radius-lg);
+  box-shadow: var(--etp-shadow-lg);
+}
+
+.header {
+  padding: var(--etp-space-4) var(--etp-space-6);
+  border-bottom: 1px solid var(--etp-color-border);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--etp-font-size-h3);
+  font-weight: var(--etp-font-weight-semibold);
+}
+
+.body {
+  padding: var(--etp-space-6);
+}
+
+.footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--etp-space-2);
+  padding: var(--etp-space-4) var(--etp-space-6);
+  border-top: 1px solid var(--etp-color-border);
+}

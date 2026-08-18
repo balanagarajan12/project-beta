@@ -1,0 +1,12 @@
+.brandHeader {
+  flex-shrink: 0;
+}
+
+.logo {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: var(--etp-login-logo-max-width);
+  max-height: var(--etp-login-logo-max-height);
+  object-fit: contain;
+}

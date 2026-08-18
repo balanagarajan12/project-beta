@@ -1,0 +1,44 @@
+.tabs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--etp-space-4);
+}
+
+.list {
+  display: flex;
+  gap: var(--etp-space-2);
+  border-bottom: 1px solid var(--etp-color-border);
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.tab {
+  padding: var(--etp-space-2) var(--etp-space-4);
+  margin-bottom: -1px;
+  border: none;
+  background: none;
+  font-size: var(--etp-font-size-body);
+  font-weight: var(--etp-font-weight-medium);
+  color: var(--etp-color-text-secondary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color var(--etp-duration-fast) var(--etp-easing-default);
+}
+
+.tab:hover {
+  color: var(--etp-color-text-primary);
+}
+
+.tab[aria-selected='true'] {
+  color: var(--etp-color-action-primary);
+  border-bottom-color: var(--etp-color-action-primary);
+}
+
+.panel {
+  display: block;
+}
+
+.panelHidden {
+  display: none;
+}

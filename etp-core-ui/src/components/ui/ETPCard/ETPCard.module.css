@@ -1,0 +1,28 @@
+.card {
+  background-color: var(--etp-color-surface-raised);
+  border: 1px solid var(--etp-color-border);
+  border-radius: var(--etp-radius-md);
+  box-shadow: var(--etp-shadow-sm);
+}
+
+.padding-none {
+  padding: 0;
+}
+
+.padding-md {
+  padding: var(--etp-space-6);
+}
+
+.header {
+  padding: var(--etp-space-4) var(--etp-space-6);
+  border-bottom: 1px solid var(--etp-color-border);
+}
+
+.body {
+  padding: var(--etp-space-6);
+}
+
+.footer {
+  padding: var(--etp-space-4) var(--etp-space-6);
+  border-top: 1px solid var(--etp-color-border);
+}
