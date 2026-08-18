@@ -1,0 +1,45 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest
+    container_name: etp-iam-keycloak
+    command: start-dev
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${ETP_IAM_KEYCLOAK_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${ETP_IAM_KEYCLOAK_ADMIN_PASSWORD:?Set ETP_IAM_KEYCLOAK_ADMIN_PASSWORD}
+    ports:
+      - "${ETP_IAM_KEYCLOAK_PORT:-8180}:8080"
+    volumes:
+      - etp-keycloak-data:/opt/keycloak/data
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17
+    container_name: etp-iam-postgres
+    environment:
+      POSTGRES_USER: ${ETP_IAM_DB_USERNAME:-etp_admin}
+      POSTGRES_PASSWORD: ${ETP_IAM_DB_PASSWORD:?Set ETP_IAM_DB_PASSWORD}
+      POSTGRES_DB: etp_iam
+    ports:
+      - "${ETP_IAM_DB_PORT:-55432}:5432"
+    volumes:
+      - etp-postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: etp-iam-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${ETP_IAM_PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${ETP_IAM_PGADMIN_PASSWORD:?Set ETP_IAM_PGADMIN_PASSWORD}
+    ports:
+      - "${ETP_IAM_PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+
+volumes:
+  etp-postgres-data:
+  etp-keycloak-data:
+  pgadmin_data:
