@@ -1,22 +1,32 @@
-import { Navigate } from 'react-router-dom';
+import { AuthAwareRedirect } from '@/features/auth/AuthAwareRedirect';
+import { GuestOnly } from '@/features/auth/GuestOnly';
 import { LoginPage } from '@/features/auth/LoginPage';
+import { RequireAuth } from '@/features/auth/RequireAuth';
 import { DashboardPlaceholderPage } from '@/features/dashboard/DashboardPlaceholderPage';
 
 export const routes = [
   {
     path: '/login',
-    element: <LoginPage />,
+    element: (
+      <GuestOnly>
+        <LoginPage />
+      </GuestOnly>
+    ),
   },
   {
     path: '/dashboard',
-    element: <DashboardPlaceholderPage />,
+    element: (
+      <RequireAuth>
+        <DashboardPlaceholderPage />
+      </RequireAuth>
+    ),
   },
   {
     path: '/',
-    element: <Navigate to="/login" replace />,
+    element: <AuthAwareRedirect />,
   },
   {
     path: '*',
-    element: <Navigate to="/login" replace />,
+    element: <AuthAwareRedirect />,
   },
 ];

@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Box,
   Building2,
@@ -24,7 +25,10 @@ import {
   useETPToast,
 } from '@/components/ui';
 import { iconSizes, iconStroke } from '@/lib/iconSizes';
+import { useAuth } from './AuthContext';
 import { validateLoginForm, type LoginFormValues } from './loginValidation';
+import { sanitizeReturnTo } from './returnTo';
+import { isAuthError } from './types';
 import styles from './LoginPage.module.css';
 
 const LOGIN_HERO_SRC = '/assets/etp-login-hero.png';
@@ -40,11 +44,14 @@ const PILLARS = [
 /**
  * ETP Core UI login screen.
  *
- * Authentication is not integrated yet — Sign In performs client-side validation
- * and shows a placeholder message. No session is created.
+ * Sign In uses the auth service abstraction (development mock in Step 1A).
+ * Route protection and post-login redirect are Step 1B.
  */
 export function LoginPage() {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { showToast } = useETPToast();
+  const { login } = useAuth();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(false);
@@ -64,15 +71,24 @@ export function LoginPage() {
     }
 
     setLoading(true);
+    setErrors({});
 
-    // Placeholder: no authentication API exists on etp-platform-service yet.
-    await new Promise((resolve) => window.setTimeout(resolve, 600));
-
-    setLoading(false);
-    showToast(
-      'Authentication is not configured yet. Sign-in will be enabled when IAM integration is available.',
-      'info',
-    );
+    try {
+      await login({
+        username: values.username,
+        password: values.password,
+        rememberMe: values.rememberMe,
+      });
+      navigate(sanitizeReturnTo(searchParams.get('returnTo')), { replace: true });
+    } catch (error) {
+      if (isAuthError(error)) {
+        showToast(error.message, 'error');
+      } else {
+        showToast('An unexpected error occurred. Please try again.', 'error');
+      }
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleSsoClick = () => {
