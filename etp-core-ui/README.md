@@ -112,6 +112,7 @@ This foundation includes:
 
 ## Related documentation
 
-- [ETP Core UI Design Guidelines](../etp-platform-service/docs/ETP_CORE_UI_DESIGN_GUIDELINES.md)
+- [ETP Core UI Design Guidelines](../etp-platform-service/docs/ETP_CORE_UI_DESIGN_GUIDELINES.md) — design system, three UI layers, authentication phases (Step 1A–1C)
+- [ETP Architecture](../etp-platform-service/ARCHITECTURE.md) — IAM as capability, repository structure
 - [Capability Registry API](../etp-platform-service/docs/CAPABILITY_REGISTRY.md)
 - [API Conventions](../etp-platform-service/docs/API_CONVENTIONS.md)

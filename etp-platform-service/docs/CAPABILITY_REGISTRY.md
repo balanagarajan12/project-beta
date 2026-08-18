@@ -38,6 +38,10 @@ Do not assume these exist when using the registry:
 
 An ETP-owned reusable technology capability (for example `etp.iam`). Identified by a unique lowercase dotted `code`, category, name, and **capability lifecycle status**.
 
+**Capability ≠ business application.** A capability is a reusable platform building block. A business application is composed from selected capabilities and contains customer/business-specific behavior. Capabilities must not automatically become business applications.
+
+**ETP IAM** (`etp.iam`) is a capability — not a business application. IAM can be selected during composition and consumed by multiple business applications and ETP Customer UI where appropriate.
+
 Capabilities are created in **DRAFT** when the first version is registered via POST.
 
 ### Capability Version

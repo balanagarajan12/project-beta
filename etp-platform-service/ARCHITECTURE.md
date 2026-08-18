@@ -31,7 +31,29 @@ The foundation and metadata model are in place; **Capability Registry V1** provi
 | **Application Instance** | **Where/how** an application runs (future; not implemented) |
 | **Source Code** | **How** business behavior is implemented in generated or custom application code |
 
+**Hard rule:** **Capability ≠ Business Application.** A capability is a reusable platform building block. A business application is composed from selected capabilities and owns customer/business-specific behavior. Capabilities must not automatically become business applications. See [docs/ETP_CORE_UI_DESIGN_GUIDELINES.md](docs/ETP_CORE_UI_DESIGN_GUIDELINES.md) §3.
+
 Capability catalog data is **platform-owned** and populated before customer applications exist. Customer and application records are populated when customers use the Application Initializer (future).
+
+### Application composition model
+
+```
+Customer selects capabilities
+          ↓
+Application Composition
+          ↓
+ETP Customer UI
+          ↓
+Configured / composed application
+          ↓
+Build / Package
+          ↓
+Deployable runtime artifacts (container images)
+          ↓
+Business Application runtime
+```
+
+Customer-specific business rules and logic belong to the customer/application layer, not ETP Core UI.
 
 ## 3. Logical Platform Components
 
@@ -47,7 +69,7 @@ Logical ETP components (not necessarily separate deployables):
 | Platform Metadata Store | PostgreSQL `etp_platform` database |
 | Application Composition / Builder | Compose definitions into deployable foundations (future) |
 | Capability Validation | Compatibility, security, NFR checks (base JSON Schema for inline contracts in V1) |
-| IAM | Identity and access via ETP IAM capability (future integration) |
+| IAM | Identity and access via **ETP IAM capability** (`etp.iam`) — a reusable capability, not a business application |
 | Workflow | Workflow capability (future) |
 | Integration / Messaging | Kafka, RabbitMQ, SFTP, etc. (future capabilities) |
 | Observability | Metrics, tracing, logging integration (future) |
@@ -55,6 +77,40 @@ Logical ETP components (not necessarily separate deployables):
 | Deployment / Runtime Integration | Runtime placement and operations (future / Phase 2) |
 
 **Important:** These are logical boundaries. They do **not** imply one microservice per component.
+
+### Repository structure (conceptual target)
+
+Intended separation under `etp-foundation/` — **architectural target only**; directories are created by implementation work, not by documentation:
+
+```
+etp-foundation/
+│
+├── etp-core-ui/              # Internal ETP Core UI (platform console)
+├── etp-platform-service/     # Platform metadata APIs and registry
+└── capabilities/             # Reusable capability implementations
+    ├── etp-iam/
+    ├── etp-workflow/
+    ├── etp-rules-engine/
+    ├── etp-react-ui/
+    ├── etp-email/
+    └── etp-kafka/
+```
+
+`etp-core-ui` and `etp-platform-service` exist today. Capability projects under `capabilities/` are the intended home for reusable capability code such as IAM, workflow, and rules engine.
+
+### Capability reusability
+
+Capabilities are designed for reuse across multiple consumers. Example — ETP IAM consumed by several business applications:
+
+```
+                  ETP IAM Capability
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+     Business App A  Business App B  Business App C
+```
+
+Do not implement capabilities (including IAM) as owned by a single business application.
 
 ## 4. Current Implementation
 
@@ -183,15 +239,40 @@ Detailed conventions: [docs/API_CONVENTIONS.md](docs/API_CONVENTIONS.md). Capabi
 
 ## 8. Security Boundary
 
-Intended architecture:
+### ETP IAM as a capability
+
+**ETP IAM is a capability**, not a business application. It provides authentication and authorization platform services, can be selected during application composition, and may be consumed by multiple business applications and by ETP Customer UI where appropriate.
+
+Intended integration architecture:
 
 ```
-ETP IAM capability
+ETP IAM capability (etp.iam)
         ↓
-OAuth2 / OIDC
+OAuth2 / OIDC contracts
         ↓
 Keycloak (or compatible identity provider)
 ```
+
+### ETP Core UI authentication vs IAM capability
+
+**ETP Core UI authentication integration ≠ ETP IAM capability implementation.**
+
+- ETP Core UI **consumes** authentication services through the IAM capability.
+- ETP Core UI must **not** embed customer-specific IAM business logic.
+- During early development, ETP Core UI may use **temporary development/mock authentication** until the real IAM capability is available.
+- Mock authentication is **not** production authentication and must be **replaceable** without redesigning the approved Login UI.
+
+### ETP Core UI authentication phases
+
+Frontend progression (see [docs/ETP_CORE_UI_DESIGN_GUIDELINES.md](docs/ETP_CORE_UI_DESIGN_GUIDELINES.md) §3 for detail). **Steps 1A and 1B do not implement the IAM capability.**
+
+| Step | Focus |
+|------|--------|
+| **1A** | Auth contracts, session/storage abstraction, `AuthProvider`, mock auth, Remember Me, session restoration, logout |
+| **1B** | Route protection, guest-only login, post-login redirect, logout handling |
+| **1C** | Replace mock auth with real ETP IAM capability integration |
+
+### Platform API security (current)
 
 **Current status:** `spring-boot-starter-security-oauth2-resource-server` is on the classpath. `SecurityConfig` permits health, platform info, actuator health, OpenAPI paths, and **capability registry APIs** until IAM integration. **Keycloak is not integrated.** No token validation against a live issuer is configured.
 
@@ -210,7 +291,7 @@ Keycloak (or compatible identity provider)
 
 ## 10. Architecture Guardrails
 
-1. **Capability ownership** — ETP owns reusable technology capabilities; business applications own business logic and domain data.
+1. **Capability ownership** — ETP owns reusable technology capabilities; business applications own business logic and domain data. **Capability ≠ business application** — capabilities must not automatically become business applications.
 2. **Explicit versions** — Capabilities and application definitions are versioned; dependencies reference specific capability versions.
 3. **Explicit contracts** — Capability contracts should be machine-readable (OpenAPI, AsyncAPI, JSON Schema, etc.) where applicable.
 4. **Metadata vs business data** — `etp_platform` holds platform metadata only.
@@ -229,6 +310,6 @@ Keycloak (or compatible identity provider)
 
 **Capability Registry V1 (current):** REST APIs, lifecycle (including `CANCELLED`), inline JSONB contracts, audit on lifecycle changes, single-ACTIVE enforcement.
 
-**Next major work:** Application Registry APIs, Application Initializer, IAM integration on platform APIs, Capability Registry UI, and composition workflows.
+**Next major work:** Application Registry APIs, Application Initializer, ETP Core UI authentication foundation (Steps 1A–1B), IAM capability integration (Step 1C for Core UI; IAM capability implementation separately), Capability Registry UI, and composition workflows.
 
 This document does not restate the full multi-week ETP roadmap.

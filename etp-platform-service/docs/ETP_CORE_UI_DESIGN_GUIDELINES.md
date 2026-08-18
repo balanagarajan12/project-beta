@@ -33,7 +33,7 @@ ETP has three distinct UI layers with different ownership, audience, and deploym
 
 **Audience:** Internal ETP platform team.
 
-**Purpose:** Operate and evolve the platform.
+**Purpose:** Operate and evolve the platform — the **heart of the platform** for internal ETP/platform management.
 
 | Responsibility | Examples |
 |----------------|----------|
@@ -52,7 +52,7 @@ ETP Core UI uses **this design system** and ETP Core branding.
 
 **Audience:** Customer technical teams operating their ETP workspace.
 
-**Purpose:** Configure and extend capabilities within customer boundaries.
+**Purpose:** Configure and manage **selected capabilities** within customer boundaries. ETP Customer UI is **generated or configured based on composed capabilities** — it is not ETP Core UI and not a business application runtime.
 
 | Responsibility | Examples |
 |----------------|----------|
@@ -68,7 +68,7 @@ ETP Customer UI may use a **customer-specific design system** (see §27). It is 
 
 **Audience:** End users of a deployed business application.
 
-**Purpose:** Execute business workflows and tasks in production.
+**Purpose:** Execute business workflows and tasks in production. Business applications **consume composed capabilities** and run as **deployable runtime artifacts** — not as ETP Core UI source code.
 
 | Characteristic | Detail |
 |----------------|--------|
@@ -107,20 +107,24 @@ ETP Customer UI may use a **customer-specific design system** (see §27). It is 
 ### Conceptual flow
 
 ```
-ETP CORE
-   ↓
+Customer selects capabilities
+          ↓
 Application Composition
-   ↓
-ETP CUSTOMER
-   ↓
-Customer Configuration / Logic
-   ↓
+          ↓
+ETP Customer UI
+          ↓
+Configured / composed application
+          ↓
+Customer configuration / business rules (customer layer)
+          ↓
 Build / Package
-   ↓
-Container Images
-   ↓
+          ↓
+Container images / deployable artifacts
+          ↓
 Business Application Runtime
 ```
+
+Customer-specific business rules and business-specific logic belong to the **customer/application layer**, not ETP Core UI.
 
 ---
 
@@ -145,6 +149,74 @@ The Capability Registry UI treats **Overview, Versions, Contract, Implementation
 **Do not** create separate top-level navigation for Versions, Contracts, Implementations, or Dependencies.
 
 Align terminology and lifecycle behavior with [CAPABILITY_REGISTRY.md](CAPABILITY_REGISTRY.md).
+
+### Capabilities are not business applications
+
+**Hard architectural rule:** **Capability ≠ Business Application.**
+
+| | Capability | Business application |
+|---|------------|----------------------|
+| Nature | Reusable platform building block | Composed runtime application |
+| Ownership | ETP platform catalog metadata | Customer application + business behavior |
+| Composition | Registered and versioned in the Capability Registry | Built from one or more **selected** capabilities |
+| UI layer | Managed via platform experiences (e.g. Capability Registry) — **not** automatic nav roots | Business Application UI at runtime |
+
+Capabilities must **not** automatically become business applications.
+
+### IAM as a platform capability
+
+**ETP IAM is a capability**, not a business application.
+
+| Principle | Detail |
+|-----------|--------|
+| Classification | Reusable ETP capability (for example `etp.iam`) |
+| Composition | Can be selected during application composition |
+| Consumption | Multiple business applications; ETP Customer UI where appropriate |
+| Services | Authentication and authorization-related platform services |
+| Reuse | Must not be implemented for a single business application |
+
+```
+Business Application
+        │
+        ├── IAM Capability
+        ├── React UI Capability
+        ├── Workflow Capability
+        ├── Rules Engine Capability
+        └── Other selected capabilities
+```
+
+### ETP Core UI authentication vs ETP IAM
+
+**ETP Core UI authentication integration ≠ ETP IAM capability implementation.**
+
+| Topic | Rule |
+|-------|------|
+| Consumption | ETP Core UI consumes authentication services through the **IAM capability** |
+| Customer logic | ETP Core UI must **not** contain customer-specific IAM business logic |
+| Early development | Temporary **development/mock authentication** is allowed until the real IAM capability is available |
+| Replaceability | Mock authentication is **temporary** and must be replaceable by the real IAM capability **without redesigning the approved Login UI** |
+
+### Authentication implementation phases (ETP Core UI)
+
+Agreed frontend progression. **Step 1A and Step 1B are not IAM capability implementation.**
+
+| Step | Name | Purpose |
+|------|------|---------|
+| **1A** | ETP Core UI Authentication Foundation | Auth contracts; session abstraction; storage abstraction; `AuthProvider` / `useAuth`; development/mock authentication; Remember Me; session restoration; logout |
+| **1B** | Authentication Route Protection | Protect authenticated routes; guest-only login route; redirect after successful authentication; logout and session handling |
+| **1C** | Real IAM Capability Integration | Replace mock authentication with the ETP IAM capability; real authentication, session, and token behavior; IAM integration contract |
+
+### Capability reusability
+
+Capabilities are designed for independent reuse. Do not design IAM (or any capability) as owned by a single business application.
+
+```
+                  ETP IAM Capability
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+     Business App A  Business App B  Business App C
+```
 
 ---
 
@@ -649,6 +721,8 @@ The **approved login screenshot** is the authoritative visual reference for unau
 - Login and Core Shell must feel like **one product**.
 - **Do not** require Tenant or Environment selection on login unless future authentication architecture explicitly requires it.
 - Tenant and Environment are **post-login context** (header selectors).
+- Approved Login UI is the visual baseline; authentication **behavior** is integrated in phases (see §3 — Authentication implementation phases).
+- Development/mock authentication is **temporary** until IAM capability integration (Step 1C); it is **not** production authentication.
 
 ### Login vs Core density
 
@@ -875,9 +949,9 @@ After this document is approved:
 2. Theme / global styling
 3. Reusable components
 4. ETP logo / assets
-5. Login
+5. Login (visual baseline approved; auth behavior — Step 1A–1C in §3)
 6. Core Shell
-7. Routing
+7. Routing (Step 1B — route protection)
 8. Capability Registry list
 9. Capability detail (aggregate)
 10. Backend integration (`/api/v1/capabilities`)
@@ -885,7 +959,7 @@ After this document is approved:
 
 **Out of scope for initial Core UI implementation:**
 
-- IAM integration UI
+- ETP IAM **capability** implementation (Step 1C integrates with it; does not build it)
 - Event/Kafka UI
 - ETP Customer UI
 - Business Application UIs
@@ -928,5 +1002,7 @@ When backend lifecycle or API behavior changes, update **§25** and [CAPABILITY_
 
 When navigation scope changes, update **§23** and **§4** together.
 
-**Version:** 1.0  
+When ETP Core UI authentication scope or IAM integration approach changes, update **§3** (Authentication implementation phases) and [ARCHITECTURE.md](../ARCHITECTURE.md) §8 together.
+
+**Version:** 1.1  
 **Last updated:** 2026-08-18

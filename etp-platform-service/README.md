@@ -304,7 +304,8 @@ PostgreSQL integration tests use Testcontainers when Docker is available. `Capab
 
 ## Further Reading
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — engineering architecture reference
+- [ARCHITECTURE.md](ARCHITECTURE.md) — platform architecture, IAM as capability, repository structure, authentication phases
+- [docs/ETP_CORE_UI_DESIGN_GUIDELINES.md](docs/ETP_CORE_UI_DESIGN_GUIDELINES.md) — ETP Core UI design system, three UI layers, authentication phases (Step 1A–1C)
 - [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md) — Capability Registry V1 APIs and lifecycle
 - [CAPABILITY_DEFINITION_OF_DONE.md](CAPABILITY_DEFINITION_OF_DONE.md) — capability delivery standard
 - [docs/API_CONVENTIONS.md](docs/API_CONVENTIONS.md) — REST API conventions

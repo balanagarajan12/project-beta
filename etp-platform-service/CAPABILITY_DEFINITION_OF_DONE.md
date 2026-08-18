@@ -7,6 +7,7 @@ A capability is considered complete only when the applicable items below are add
 - Clear capability boundary defined
 - Purpose and scope documented
 - ETP vs application ownership documented
+- **Capability ≠ business application** — capabilities are reusable building blocks; business applications are composed from capabilities and own business behavior
 - No business-domain logic in generic capability code
 
 ## 2. Capability Identity
