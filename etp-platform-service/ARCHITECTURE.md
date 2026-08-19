@@ -96,7 +96,7 @@ etp-foundation/
     └── etp-kafka/
 ```
 
-`etp-core-ui` and `etp-platform-service` exist today. Capability projects under `capabilities/` are the intended home for reusable capability code such as IAM, workflow, and rules engine.
+`etp-core-ui`, `etp-platform-service`, and **`capabilities/etp-iam/`** exist today. Capability projects under `capabilities/` are the intended home for reusable capability code such as IAM, workflow, and rules engine.
 
 ### Capability reusability
 
@@ -241,40 +241,119 @@ Detailed conventions: [docs/API_CONVENTIONS.md](docs/API_CONVENTIONS.md). Capabi
 
 ### ETP IAM as a capability
 
-**ETP IAM is a capability**, not a business application. It provides authentication and authorization platform services, can be selected during application composition, and may be consumed by multiple business applications and by ETP Customer UI where appropriate.
+**ETP IAM is a capability**, not a business application. It is an **independently deployable** reusable service (`capabilities/etp-iam/`). It provides authentication and authorization platform services, can be selected during application composition, and may be consumed by multiple business applications and by ETP Customer UI where appropriate.
 
-Intended integration architecture:
+**ETP IAM does not depend on ETP Core UI at runtime.** Core UI is one consumer in the internal ETP deployment.
+
+ETP IAM provides:
+
+- Authentication (human and service-to-service)
+- Identity mapping (Keycloak JWT → IAM `principals`)
+- Authorization (`POST /api/v1/authorization/check`)
+- Principal, group, role, and permission management (PostgreSQL `etp_iam`)
+- Tenant-aware authorization (via `group_tenant_assignments`)
+
+Integration with Keycloak:
 
 ```
 ETP IAM capability (etp.iam)
         ↓
-OAuth2 / OIDC contracts
-        ↓
-Keycloak (or compatible identity provider)
+Keycloak (identity provider — realm `etp`)
 ```
+
+Human and service authentication use **different IAM APIs** (see below). Phase 1 does **not** use browser OIDC redirect or a second Keycloak login screen for Core UI.
+
+### Deployment principle
+
+**Same capability, same authentication contract, different deployment / configuration.**
+
+The ETP IAM capability code and API contract are reusable. Each environment deploys its own IAM + Keycloak instance with independent users, principals, tenants, and Keycloak configuration.
+
+| Environment (example) | Runtime consumers | IAM + Keycloak |
+|------------------------|-------------------|----------------|
+| ETP internal (Phase 1) | ETP Core UI | ETP IAM → Keycloak (internal instance) |
+| Customer AWS (future) | ETP Customer UI, business applications | Customer ETP IAM → Keycloak (customer instance) |
+
+There is **no runtime dependency** between customer deployments and ETP Core UI or ETP's internal IAM instance.
+
+### Future customer deployment (not implemented)
+
+In future customer AWS environments, authentication is **independent** of ETP Core UI:
+
+```
+ETP Customer UI → ETP IAM → Keycloak
+Business Application → ETP IAM → Keycloak
+```
+
+The customer's IAM and Keycloak are deployed in the customer's environment. They have **no** runtime dependency on ETP Core UI. ETP Core UI is **not** part of the customer authentication flow.
+
+### Phase 1 scope
+
+**In scope:** development user; IAM hierarchy; username/password auth; Core UI → IAM → Keycloak; authentication session; Remember Me; logout; protected routes; basic authorization foundation; development validation.
+
+**Out of scope (Phase 2+):** SSO; cross-application SSO; Customer UI auth; business application auth; MFA; external IdPs; federation; passwordless auth; OIDC Authorization Code + PKCE; token refresh; advanced production session management.
+
+### Phase 1 authentication (implemented — ETP Core UI)
+
+**Current Phase 1** authenticates internal platform users with **one login screen** on the approved ETP Core UI login page (username + password). There is **no** second Keycloak-hosted login screen.
+
+```
+ETP Core UI (Sign In)
+      ↓  POST /api/v1/auth/login { username, password }
+ETP IAM
+      ↓  server-side Direct Access Grant (confidential client)
+Keycloak
+      ↓  JWT access token
+ETP IAM → Core UI (AuthSession) → /dashboard
+```
+
+| API | Purpose | Caller (Phase 1) |
+|-----|---------|------------------|
+| `POST /api/v1/auth/login` | **Human** username/password authentication | ETP Core UI |
+| `POST /api/v1/auth/token` | **Service** `client_credentials` authentication | Backend/services — **not** human login |
+
+Phase 1 uses **Direct Access Grant / password grant on the IAM server only** as a **development-phase choice** for single-screen login. It is **not** the planned Phase 2+ SSO architecture (OIDC Authorization Code + PKCE, federation, cross-application SSO).
+
+Detail: [capabilities/etp-iam/README.md](../capabilities/etp-iam/README.md).
+
+### Session and security (Phase 1)
+
+- Password is never persisted by Core UI, IAM, or browser storage after login.
+- Password is not returned in the login response.
+- Keycloak confidential client secret remains server-side in IAM only.
+- Core UI stores the access token in `AuthSession` (Remember Me selects `localStorage` vs `sessionStorage`).
+- Session expires per Keycloak token expiry; token refresh is **not** implemented in Phase 1.
+- Phase 1 logout clears the local application session; Keycloak end-session logout is deferred.
+
+### ETP Core UI (internal platform UI)
+
+ETP Core UI is an **internal** platform console for the ETP technical team, platform administrators, and engineering/operations users. It is **not** the customer-facing business application platform.
+
+Phase 1 runtime: **ETP Core UI → ETP IAM → Keycloak**. Core UI does **not** call Keycloak directly and does **not** hold Keycloak client secrets.
 
 ### ETP Core UI authentication vs IAM capability
 
 **ETP Core UI authentication integration ≠ ETP IAM capability implementation.**
 
-- ETP Core UI **consumes** authentication services through the IAM capability.
-- ETP Core UI must **not** embed customer-specific IAM business logic.
-- During early development, ETP Core UI may use **temporary development/mock authentication** until the real IAM capability is available.
-- Mock authentication is **not** production authentication and must be **replaceable** without redesigning the approved Login UI.
+- ETP Core UI **consumes** authentication through the **IAM capability** (`POST /api/v1/auth/login`).
+- ETP Core UI must **not** embed customer-specific IAM business logic or Keycloak protocol logic.
+- The approved Login UI visual design remains frozen; authentication behavior is integrated behind `authService`.
 
 ### ETP Core UI authentication phases
 
-Frontend progression (see [docs/ETP_CORE_UI_DESIGN_GUIDELINES.md](docs/ETP_CORE_UI_DESIGN_GUIDELINES.md) §3 for detail). **Steps 1A and 1B do not implement the IAM capability.**
+Frontend progression (see [docs/ETP_CORE_UI_DESIGN_GUIDELINES.md](docs/ETP_CORE_UI_DESIGN_GUIDELINES.md) §3). IAM capability implementation lives in `capabilities/etp-iam/`.
 
-| Step | Focus |
-|------|--------|
-| **1A** | Auth contracts, session/storage abstraction, `AuthProvider`, mock auth, Remember Me, session restoration, logout |
-| **1B** | Route protection, guest-only login, post-login redirect, logout handling |
-| **1C** | Replace mock auth with real ETP IAM capability integration |
+| Step | Focus | Status |
+|------|--------|--------|
+| **1A** | Auth contracts, session/storage, `AuthProvider`, Remember Me, session restoration, logout | Complete |
+| **1B** | Route protection, guest-only login, `returnTo`, post-login redirect | Complete |
+| **1C Phase 1** | Real username/password auth: Core UI → IAM → Keycloak; `POST /auth/login`; protected dashboard | **Implemented** (development validation) |
+
+**Phase 2+ (not implemented):** SSO, OIDC Authorization Code + PKCE, cross-application SSO, Customer UI auth, business application auth, MFA, external IdPs, federation, token refresh, Keycloak end-session logout.
 
 ### Platform API security (current)
 
-**Current status:** `spring-boot-starter-security-oauth2-resource-server` is on the classpath. `SecurityConfig` permits health, platform info, actuator health, OpenAPI paths, and **capability registry APIs** until IAM integration. **Keycloak is not integrated.** No token validation against a live issuer is configured.
+**Current status:** `spring-boot-starter-security-oauth2-resource-server` is on the classpath. `SecurityConfig` permits health, platform info, actuator health, OpenAPI paths, and **capability registry APIs** until platform JWT enforcement. **ETP IAM and Keycloak are integrated for Core UI login** via `capabilities/etp-iam`. **Platform service APIs do not yet validate IAM/Keycloak JWTs** on business routes.
 
 ## 9. Local Runtime
 
@@ -310,6 +389,8 @@ Frontend progression (see [docs/ETP_CORE_UI_DESIGN_GUIDELINES.md](docs/ETP_CORE_
 
 **Capability Registry V1 (current):** REST APIs, lifecycle (including `CANCELLED`), inline JSONB contracts, audit on lifecycle changes, single-ACTIVE enforcement.
 
-**Next major work:** Application Registry APIs, Application Initializer, ETP Core UI authentication foundation (Steps 1A–1B), IAM capability integration (Step 1C for Core UI; IAM capability implementation separately), Capability Registry UI, and composition workflows.
+**Next major work:** Application Registry APIs, Application Initializer, Capability Registry UI, platform JWT enforcement, IAM Phase 2 (SSO/OIDC/PKCE, refresh, `/me`), and composition workflows.
+
+Step 1C Phase 1 (Core UI username/password via ETP IAM) is implemented — see §8.
 
 This document does not restate the full multi-week ETP roadmap.

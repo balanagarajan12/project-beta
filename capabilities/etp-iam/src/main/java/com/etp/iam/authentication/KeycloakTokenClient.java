@@ -29,6 +29,25 @@ public class KeycloakTokenClient {
 		formData.add("client_id", clientId);
 		formData.add("client_secret", clientSecret);
 
+		return postTokenForm(formData);
+	}
+
+	public TokenResponse requestPasswordToken(
+			String clientId,
+			String clientSecret,
+			String username,
+			String password) {
+		MultiValueMap<String, String> formData = new LinkedMultiValueMap<>();
+		formData.add("grant_type", "password");
+		formData.add("client_id", clientId);
+		formData.add("client_secret", clientSecret);
+		formData.add("username", username);
+		formData.add("password", password);
+
+		return postTokenForm(formData);
+	}
+
+	private TokenResponse postTokenForm(MultiValueMap<String, String> formData) {
 		try {
 			return restClient.post()
 					.uri(tokenUrl)
@@ -47,9 +66,10 @@ public class KeycloakTokenClient {
 		String description = extractOAuthErrorDescription(ex);
 
 		if (ex.getStatusCode() == HttpStatus.UNAUTHORIZED || ex.getStatusCode() == HttpStatus.BAD_REQUEST) {
-			return new KeycloakAuthenticationException(
-					description != null ? description : "Authentication failed",
-					error);
+			String message = "invalid_grant".equals(error)
+					? "Invalid email or username, or password."
+					: (description != null ? description : "Authentication failed");
+			return new KeycloakAuthenticationException(message, error);
 		}
 
 		return new KeycloakTokenException(

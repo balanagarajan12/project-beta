@@ -2,6 +2,9 @@ package com.etp.iam.authorization;
 
 import com.etp.iam.authorization.dto.AuthorizationCheckRequest;
 import com.etp.iam.authorization.dto.AuthorizationCheckResponse;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -13,6 +16,8 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequestMapping("/api/v1/authorization")
+@Tag(name = "Authorization", description = "JWT-backed authorization checks")
+@SecurityRequirement(name = "bearer-jwt")
 public class AuthorizationController {
 
 	private final AuthorizationService authorizationService;
@@ -21,6 +26,7 @@ public class AuthorizationController {
 		this.authorizationService = authorizationService;
 	}
 
+	@Operation(summary = "Check authorization", description = "Evaluates whether the Bearer JWT principal is authorized for the requested application permission.")
 	@PostMapping(value = "/check", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
 	public AuthorizationCheckResponse check(
 			@AuthenticationPrincipal Jwt jwt,

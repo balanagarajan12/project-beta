@@ -7,7 +7,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.etp.iam.authentication.dto.LoginResponse;
 import com.etp.iam.authentication.dto.TokenResponse;
+import com.etp.iam.authentication.dto.UserResponse;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -27,6 +30,42 @@ class AuthControllerTest {
 
 	@MockitoBean
 	private AuthService authService;
+
+	@Test
+	void login_returnsLoginResponse() throws Exception {
+		when(authService.login(any())).thenReturn(
+				new LoginResponse(
+						new UserResponse("user-1", "alice", "Alice", "alice@etp.local", List.of("platform-admin")),
+						"jwt-token",
+						"2026-08-18T12:00:00Z"));
+
+		mockMvc.perform(post("/api/v1/auth/login")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("""
+								{
+								  "username": "alice",
+								  "password": "secret"
+								}
+								"""))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.accessToken").value("jwt-token"))
+				.andExpect(jsonPath("$.user.username").value("alice"))
+				.andExpect(jsonPath("$.expiresAt").value("2026-08-18T12:00:00Z"));
+	}
+
+	@Test
+	void login_returnsBadRequestWhenPasswordMissing() throws Exception {
+		mockMvc.perform(post("/api/v1/auth/login")
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("""
+								{
+								  "username": "alice"
+								}
+								"""))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.error").value("invalid_request"))
+				.andExpect(jsonPath("$.details.password").value("password is required"));
+	}
 
 	@Test
 	void requestToken_returnsTokenResponse() throws Exception {

@@ -13,7 +13,10 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 @SpringBootTest(properties = {
 		"spring.autoconfigure.exclude="
 				+ "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration,"
-				+ "org.springframework.boot.hibernate.autoconfigure.HibernateJpaAutoConfiguration"
+				+ "org.springframework.boot.hibernate.autoconfigure.HibernateJpaAutoConfiguration",
+		"keycloak.login-client-id=test-login-client",
+		"keycloak.login-client-secret=test-login-secret",
+		"etp.iam.cors.allowed-origins=http://localhost:5173"
 })
 class IamServiceApplicationTests {
 

@@ -56,12 +56,14 @@ Implemented in this repository today:
 - **Docker Compose** — local PostgreSQL
 - **Common API/error model** — `ApiResponse`, `ErrorResponse`, `GlobalExceptionHandler`
 - **Platform metadata persistence** — customer, application, capability, and audit entity model
-- **Spring Security** baseline with OAuth2 Resource Server dependency (Keycloak not integrated)
+- **Spring Security** baseline with OAuth2 Resource Server dependency (platform JWT enforcement deferred; ETP IAM integrates with Keycloak separately in `capabilities/etp-iam/`)
 - **OpenAPI/Swagger** via SpringDoc
 
-**Not implemented yet** (planned capabilities and services): Capability Registry UI, Application Registry APIs, Application Initializer, Application Composer, Keycloak integration, workflow, Kafka, RabbitMQ, SFTP, AI, generated applications, and ETP UI.
+**Not implemented yet** (planned capabilities and services): Capability Registry UI, Application Registry APIs, Application Initializer, Application Composer, platform-service JWT enforcement, workflow, Kafka, RabbitMQ, SFTP, AI, generated applications, and full ETP UI shell.
 
-**Implemented:** Capability Registry **REST APIs** and lifecycle (see [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md)). IAM token enforcement on capability APIs is deferred.
+**Implemented elsewhere:** ETP IAM capability (`capabilities/etp-iam/`) with Keycloak for Core UI Phase 1 login. Customer UI and business application authentication are **not** implemented.
+
+**Implemented in platform-service:** Capability Registry **REST APIs** and lifecycle (see [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md)).
 
 ## Technology Stack
 
@@ -74,7 +76,7 @@ Implemented in this repository today:
 - Flyway
 - H2 (optional `local` profile for lightweight development without PostgreSQL)
 - Spring Validation
-- Spring Security + OAuth2 Resource Server (dependency present; Keycloak integration deferred)
+- Spring Security + OAuth2 Resource Server (dependency present; platform JWT enforcement deferred; IAM capability handles auth separately)
 - Spring Boot Actuator
 - OpenAPI / Swagger (springdoc-openapi 3.x)
 
@@ -190,8 +192,8 @@ Intentionally **not** implemented:
 - Application Initializer
 - Application Builder / Composer
 - Capability Registry UI
-- full ETP UI
-- Keycloak implementation integration
+- full ETP UI shell
+- platform-service Keycloak/JWT enforcement on capability APIs
 - Workflow implementation
 - Kafka implementation
 - RabbitMQ implementation

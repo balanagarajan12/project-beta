@@ -33,6 +33,24 @@ class KeycloakTokenClientTest {
 	}
 
 	@Test
+	void requestToken_mapsInvalidGrantToAuthenticationException() {
+		mockServer.expect(requestTo(TOKEN_URL))
+				.andExpect(method(HttpMethod.POST))
+				.andRespond(withBadRequest().body("""
+						{
+						  "error": "invalid_grant",
+						  "error_description": "Invalid user credentials"
+						}
+						"""));
+
+		assertThatThrownBy(() -> keycloakTokenClient.requestPasswordToken("login-client", "secret", "alice", "wrong"))
+				.isInstanceOf(KeycloakAuthenticationException.class)
+				.hasMessage("Invalid email or username, or password.");
+
+		mockServer.verify();
+	}
+
+	@Test
 	void requestToken_returnsTokenResponseWhenKeycloakSucceeds() {
 		mockServer.expect(requestTo(TOKEN_URL))
 				.andExpect(method(HttpMethod.POST))

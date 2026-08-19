@@ -1,13 +1,13 @@
 /**
  * ETP Core UI authentication service.
  *
- * Step 1A uses development/mock authentication only. This module is the
- * integration boundary — the implementation will be replaced by the ETP IAM
- * capability in Step 1C without redesigning the Login UI.
+ * Integrates with the ETP IAM capability for username/password login.
+ * Development mock authentication remains available when explicitly enabled.
  */
 
-import { env } from '@/config/env';
+import { env, getIamBaseUrl } from '@/config/env';
 import * as authStorage from './authStorage';
+import { loginWithIam } from './iamAuthClient';
 import { AuthError, type AuthSession, type LoginCredentials } from './types';
 
 const MOCK_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
@@ -15,7 +15,9 @@ const MOCK_REMEMBER_ME_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MOCK_LOGIN_DELAY_MS = 400;
 
 export async function login(credentials: LoginCredentials): Promise<AuthSession> {
-  const session = await mockLogin(credentials);
+  const session = env.mockAuthEnabled
+    ? await mockLogin(credentials)
+    : await loginWithIam(getIamBaseUrl(), credentials);
   authStorage.saveSession(session);
   return session;
 }
@@ -47,13 +49,6 @@ export function isAuthenticated(): boolean {
  * Validates credentials against VITE_MOCK_AUTH_* environment variables.
  */
 async function mockLogin(credentials: LoginCredentials): Promise<AuthSession> {
-  if (!env.mockAuthEnabled) {
-    throw new AuthError(
-      'AUTH_DISABLED',
-      'Development authentication is not enabled.',
-    );
-  }
-
   if (!env.mockAuthUsername || !env.mockAuthPassword) {
     throw new AuthError(
       'AUTH_DISABLED',

@@ -85,6 +85,8 @@ Where applicable:
 - No credentials committed
 - Security cannot be bypassed by composition or configuration
 
+For the **ETP IAM capability** (`etp.iam`), Phase 1 human authentication uses `POST /api/v1/auth/login` (Core UI → IAM → Keycloak). Service authentication uses `POST /api/v1/auth/token` (`client_credentials`). These are **distinct APIs**. Passwords are never persisted by IAM or returned in responses. See [capabilities/etp-iam/README.md](../capabilities/etp-iam/README.md).
+
 ## 8. Configuration
 
 - Non-secret configuration externalized

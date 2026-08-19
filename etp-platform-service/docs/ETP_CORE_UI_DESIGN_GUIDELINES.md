@@ -191,20 +191,31 @@ Business Application
 
 | Topic | Rule |
 |-------|------|
-| Consumption | ETP Core UI consumes authentication services through the **IAM capability** |
+| Consumption | ETP Core UI consumes authentication through the **IAM capability** (`POST /api/v1/auth/login`) |
 | Customer logic | ETP Core UI must **not** contain customer-specific IAM business logic |
-| Early development | Temporary **development/mock authentication** is allowed until the real IAM capability is available |
-| Replaceability | Mock authentication is **temporary** and must be replaceable by the real IAM capability **without redesigning the approved Login UI** |
+| Keycloak | Core UI must **not** call Keycloak directly or hold Keycloak client secrets |
+| Login UX | **One** approved login screen — username + password on Core UI; **no** second Keycloak login screen (Phase 1) |
+| Visual baseline | Approved Login UI remains frozen; only authentication **logic** integrates behind `authService` |
+
+ETP Core UI is an **internal** platform UI (ETP technical team, platform administrators, engineering/operations). It is **not** the customer-facing business application platform.
 
 ### Authentication implementation phases (ETP Core UI)
 
-Agreed frontend progression. **Step 1A and Step 1B are not IAM capability implementation.**
+| Step | Name | Purpose | Status |
+|------|------|---------|--------|
+| **1A** | ETP Core UI Authentication Foundation | Auth contracts; session/storage; `AuthProvider` / `useAuth`; Remember Me; session restoration; logout | Complete |
+| **1B** | Authentication Route Protection | `RequireAuth`, `GuestOnly`, `returnTo`, post-login redirect, logout routing | Complete |
+| **1C Phase 1** | Real username/password authentication | Core UI → ETP IAM → Keycloak; one login screen; dashboard access | **Implemented** |
 
-| Step | Name | Purpose |
-|------|------|---------|
-| **1A** | ETP Core UI Authentication Foundation | Auth contracts; session abstraction; storage abstraction; `AuthProvider` / `useAuth`; development/mock authentication; Remember Me; session restoration; logout |
-| **1B** | Authentication Route Protection | Protect authenticated routes; guest-only login route; redirect after successful authentication; logout and session handling |
-| **1C** | Real IAM Capability Integration | Replace mock authentication with the ETP IAM capability; real authentication, session, and token behavior; IAM integration contract |
+**Phase 1 runtime:**
+
+```
+ETP Core UI → POST /api/v1/auth/login → ETP IAM → Keycloak → AuthSession → /dashboard
+```
+
+**Phase 2+ (not implemented):** SSO, OIDC Authorization Code + PKCE, cross-application SSO, Customer UI authentication, business application authentication, MFA, external IdPs, federation, passwordless auth, token refresh, advanced production session management.
+
+See [ARCHITECTURE.md](../ARCHITECTURE.md) §8 and [capabilities/etp-iam/README.md](../../capabilities/etp-iam/README.md).
 
 ### Capability reusability
 
@@ -721,8 +732,9 @@ The **approved login screenshot** is the authoritative visual reference for unau
 - Login and Core Shell must feel like **one product**.
 - **Do not** require Tenant or Environment selection on login unless future authentication architecture explicitly requires it.
 - Tenant and Environment are **post-login context** (header selectors).
-- Approved Login UI is the visual baseline; authentication **behavior** is integrated in phases (see §3 — Authentication implementation phases).
-- Development/mock authentication is **temporary** until IAM capability integration (Step 1C); it is **not** production authentication.
+- Approved Login UI is the visual baseline; Phase 1 authentication uses **username + password on this screen** via ETP IAM (see §3).
+- **Sign in with SSO** is a visual placeholder — SSO is **not** implemented (Phase 2+).
+- Development/mock authentication may remain as an optional dev fallback when `VITE_MOCK_AUTH_ENABLED=true`; production path is ETP IAM `POST /api/v1/auth/login`.
 
 ### Login vs Core density
 
@@ -949,9 +961,9 @@ After this document is approved:
 2. Theme / global styling
 3. Reusable components
 4. ETP logo / assets
-5. Login (visual baseline approved; auth behavior — Step 1A–1C in §3)
+5. Login (visual baseline approved; Phase 1 auth implemented — see §3)
 6. Core Shell
-7. Routing (Step 1B — route protection)
+7. Routing and route protection (Step 1B — complete)
 8. Capability Registry list
 9. Capability detail (aggregate)
 10. Backend integration (`/api/v1/capabilities`)
@@ -959,7 +971,7 @@ After this document is approved:
 
 **Out of scope for initial Core UI implementation:**
 
-- ETP IAM **capability** implementation (Step 1C integrates with it; does not build it)
+- ETP IAM **capability** service implementation (lives in `capabilities/etp-iam/`; Core UI consumes it)
 - Event/Kafka UI
 - ETP Customer UI
 - Business Application UIs

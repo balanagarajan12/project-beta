@@ -1,5 +1,6 @@
 import type { ApiClientError, ErrorResponse } from '@/types/api';
 import { getApiBaseUrl } from '@/config/env';
+import * as authStorage from '@/features/auth/authStorage';
 
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
@@ -51,6 +52,11 @@ export class ApiClient {
       ...this.defaultHeaders,
       ...options.headers,
     };
+
+    const session = authStorage.getSession();
+    if (session?.accessToken) {
+      headers.Authorization = `Bearer ${session.accessToken}`;
+    }
 
     const init: RequestInit = {
       method,

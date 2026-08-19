@@ -18,19 +18,20 @@ Reference for the implemented Capability Registry in `etp-platform-service`. Thi
 | Lifecycle audit events (`AuditEvent` table) | Implemented |
 | OpenAPI / Swagger documentation | Implemented |
 
-### Not implemented (future ETP work)
+### Not implemented in platform-service (future ETP work)
 
-Do not assume these exist when using the registry:
+Do not assume these exist in **etp-platform-service** when using the registry:
 
-- ETP IAM integration / OAuth2 token enforcement on capability APIs
+- OAuth2 JWT enforcement on platform capability registry APIs (deferred)
 - Capability Registry UI or React UI Capability
 - Application Registry APIs
 - Application Initializer / Composer / Builder
-- Keycloak (or other IdP) as a live integrated capability
 - Business application runtime or generated application deployment
 - Audit query APIs (events are recorded; no read API yet)
 - Capability-specific JSON Schemas beyond the V1 base schema
 - DELETE endpoints (deprecation, retirement, and cancellation are lifecycle operations via PATCH)
+
+**Note:** The **ETP IAM capability** (`capabilities/etp-iam/`) is implemented separately and integrates with Keycloak for authentication. Customer UI and business application authentication are **not** implemented. See [capabilities/etp-iam/README.md](../../capabilities/etp-iam/README.md).
 
 ## Concepts
 

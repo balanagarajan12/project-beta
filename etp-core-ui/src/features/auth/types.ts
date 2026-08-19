@@ -23,6 +23,8 @@ export type AuthErrorCode =
   | 'INVALID_CREDENTIALS'
   | 'AUTH_DISABLED'
   | 'SESSION_EXPIRED'
+  | 'SERVICE_UNAVAILABLE'
+  | 'NETWORK_ERROR'
   | 'UNKNOWN';
 
 export class AuthError extends Error {

@@ -87,6 +87,7 @@ export function LoginPage() {
         showToast('An unexpected error occurred. Please try again.', 'error');
       }
     } finally {
+      setPassword('');
       setLoading(false);
     }
   };

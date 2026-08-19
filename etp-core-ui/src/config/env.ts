@@ -32,8 +32,13 @@ export const env = {
   apiBaseUrl: optionalEnv(import.meta.env.VITE_API_BASE_URL, ''),
 
   /**
-   * Development-only mock authentication (Step 1A).
-   * Must NOT be used as production authentication — replaced by ETP IAM in Step 1C.
+   * Base URL for ETP IAM capability API (no trailing slash).
+   */
+  iamBaseUrl: optionalEnv(import.meta.env.VITE_IAM_BASE_URL, ''),
+
+  /**
+   * Development-only mock authentication (Step 1A fallback).
+   * Disabled by default when using real IAM login.
    */
   mockAuthEnabled: parseBool(import.meta.env.VITE_MOCK_AUTH_ENABLED, false),
   mockAuthUsername: optionalEnv(import.meta.env.VITE_MOCK_AUTH_USERNAME, ''),
@@ -49,4 +54,12 @@ export const env = {
  */
 export function getApiBaseUrl(): string {
   return requireEnv('VITE_API_BASE_URL', import.meta.env.VITE_API_BASE_URL);
+}
+
+/**
+ * Returns IAM base URL or throws if not configured.
+ * Use when initiating IAM authentication requests.
+ */
+export function getIamBaseUrl(): string {
+  return requireEnv('VITE_IAM_BASE_URL', import.meta.env.VITE_IAM_BASE_URL);
 }
