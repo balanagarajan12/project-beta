@@ -1,0 +1,19 @@
+.shell {
+  display: flex;
+  flex-direction: column;
+  min-height: var(--etp-viewport-height);
+  background: var(--etp-color-surface);
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background: var(--etp-color-surface);
+}

@@ -47,10 +47,13 @@ public class CapabilityMapper {
         response.setId(capability.getCapabilityId());
         response.setCode(capability.getCapabilityCode());
         response.setName(capability.getCapabilityName());
+        response.setDescription(capability.getDescription());
         response.setCategory(capability.getCategory());
         response.setStatus(capability.getLifecycleStatus());
+        response.setCreatedAt(capability.getCreatedAt());
+        response.setUpdatedAt(capability.getUpdatedAt());
         capabilityVersionRepository.findFirstByCapabilityCapabilityIdOrderByCreatedAtDesc(capability.getCapabilityId())
-                .ifPresent(version -> response.setLatestVersion(version.getVersion()));
+                .ifPresent(version -> response.setVersion(version.getVersion()));
         return response;
     }
 
@@ -63,9 +66,14 @@ public class CapabilityMapper {
         response.setDescription(capability.getDescription());
         response.setCategory(capability.getCategory());
         response.setStatus(capability.getLifecycleStatus());
+        response.setCreatedAt(capability.getCreatedAt());
+        response.setUpdatedAt(capability.getUpdatedAt());
 
         List<CapabilityVersion> versions =
                 capabilityVersionRepository.findByCapabilityCapabilityIdOrderByCreatedAtDesc(capability.getCapabilityId());
+        if (!versions.isEmpty()) {
+            response.setVersion(versions.getFirst().getVersion());
+        }
         response.setVersions(versions.stream().map(this::toVersionDetail).toList());
         return response;
     }

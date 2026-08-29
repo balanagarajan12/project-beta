@@ -10,3 +10,6 @@ etp:
   platform:
     name: Enterprise Technology Platform
     version: 0.1.0-SNAPSHOT
+    cors:
+      allowed-origins:
+        - http://localhost:5173

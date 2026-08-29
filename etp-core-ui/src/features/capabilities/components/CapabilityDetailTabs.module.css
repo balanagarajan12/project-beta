@@ -1,0 +1,144 @@
+.tabContent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--etp-space-5);
+  padding-top: var(--etp-space-4);
+}
+
+.tabToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--etp-space-3);
+}
+
+.viewToggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--etp-space-1);
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--etp-space-2);
+}
+
+.blockTitle {
+  margin: 0;
+  font-size: var(--etp-font-size-body);
+  font-weight: var(--etp-font-weight-semibold);
+  color: var(--etp-color-text-primary);
+}
+
+.bodyText {
+  margin: 0;
+  font-size: var(--etp-font-size-body-sm);
+  color: var(--etp-color-text-primary);
+  line-height: var(--etp-line-height-body);
+}
+
+.emptyTitle {
+  margin: 0;
+  font-size: var(--etp-font-size-body);
+  font-weight: var(--etp-font-weight-medium);
+  color: var(--etp-color-text-primary);
+}
+
+.empty {
+  margin: 0;
+  font-size: var(--etp-font-size-body-sm);
+  color: var(--etp-color-text-secondary);
+}
+
+.metaGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+  gap: var(--etp-space-4);
+  margin: 0;
+}
+
+.metaGrid dt {
+  font-size: var(--etp-font-size-label);
+  font-weight: var(--etp-font-weight-medium);
+  color: var(--etp-color-text-secondary);
+  margin-bottom: var(--etp-space-1);
+}
+
+.metaGrid dd {
+  margin: 0;
+  font-size: var(--etp-font-size-body-sm);
+  color: var(--etp-color-text-primary);
+}
+
+.mono {
+  font-family: ui-monospace, 'Cascadia Code', 'Segoe UI Mono', monospace;
+  font-size: var(--etp-font-size-body-sm);
+}
+
+.disclosure {
+  border: 1px solid var(--etp-color-border);
+  border-radius: var(--etp-radius-md);
+  padding: var(--etp-space-3) var(--etp-space-4);
+  background: var(--etp-color-surface-raised);
+}
+
+.disclosureSummary {
+  font-size: var(--etp-font-size-body-sm);
+  font-weight: var(--etp-font-weight-medium);
+  color: var(--etp-color-text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.disclosure[open] .disclosureSummary {
+  margin-bottom: var(--etp-space-3);
+}
+
+.rawJson {
+  margin: 0;
+  padding: var(--etp-space-4);
+  border: 1px solid var(--etp-color-border);
+  border-radius: var(--etp-radius-md);
+  background: var(--etp-color-neutral-50);
+  font-family: ui-monospace, 'Cascadia Code', 'Segoe UI Mono', monospace;
+  font-size: var(--etp-font-size-body-sm);
+  line-height: 1.5;
+  overflow-x: auto;
+  max-height: 32rem;
+}
+
+.tableWrap {
+  overflow-x: auto;
+  border: 1px solid var(--etp-color-border);
+  border-radius: var(--etp-radius-md);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--etp-font-size-body-sm);
+}
+
+.table thead th {
+  padding: var(--etp-space-2) var(--etp-space-3);
+  border-bottom: 1px solid var(--etp-color-border);
+  background: var(--etp-color-surface-subtle);
+  font-size: var(--etp-font-size-label);
+  font-weight: var(--etp-font-weight-semibold);
+  color: var(--etp-color-text-secondary);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.table tbody td {
+  padding: var(--etp-space-2) var(--etp-space-3);
+  border-bottom: 1px solid var(--etp-color-border);
+  vertical-align: middle;
+  color: var(--etp-color-text-primary);
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}

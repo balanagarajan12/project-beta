@@ -1,0 +1,88 @@
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--etp-space-3);
+  height: var(--etp-layout-header-height);
+  min-height: var(--etp-layout-header-height);
+  max-height: var(--etp-layout-header-height);
+  padding: 0 var(--etp-space-4);
+  background: var(--etp-color-brand-navy);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--etp-color-text-on-dark);
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+.chromeLeft {
+  display: flex;
+  align-items: center;
+  gap: var(--etp-space-2);
+  min-width: 0;
+  flex: 1;
+}
+
+.right {
+  display: flex;
+  align-items: center;
+  gap: var(--etp-space-2);
+  flex-shrink: 0;
+}
+
+.contextChip {
+  display: flex;
+  align-items: center;
+  gap: var(--etp-space-2);
+  padding: var(--etp-space-1) var(--etp-space-3);
+  border-radius: var(--etp-radius-md);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  font-size: var(--etp-font-size-body-sm);
+  line-height: 1.25;
+  color: rgba(255, 255, 255, 0.9);
+  white-space: nowrap;
+}
+
+.contextLabel {
+  font-size: var(--etp-font-size-label);
+  font-weight: var(--etp-font-weight-medium);
+  color: rgba(255, 255, 255, 0.55);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.contextValue {
+  font-weight: var(--etp-font-weight-medium);
+}
+
+.iconButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--etp-radius-md);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.88);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color var(--etp-duration-fast) var(--etp-easing-default),
+    color var(--etp-duration-fast) var(--etp-easing-default);
+}
+
+.iconButton:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--etp-color-text-on-dark);
+}
+
+.iconButton:focus-visible {
+  outline: var(--etp-focus-ring-width) solid var(--etp-color-focus-ring);
+  outline-offset: var(--etp-focus-ring-offset);
+}
+
+@media (max-width: 768px) {
+  .contextChip {
+    display: none;
+  }
+}

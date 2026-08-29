@@ -1,0 +1,24 @@
+.brandBlock {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  text-decoration: none;
+  color: inherit;
+  flex-shrink: 0;
+}
+
+.brandLogo {
+  display: block;
+  height: auto;
+  max-height: calc(var(--etp-layout-header-height) - 12px);
+  width: auto;
+  max-width: min(22rem, 100%);
+  object-fit: contain;
+  object-position: left center;
+}
+
+@media (max-width: 900px) {
+  .brandLogo {
+    max-width: min(18rem, 100%);
+  }
+}

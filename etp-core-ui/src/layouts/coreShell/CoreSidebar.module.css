@@ -1,0 +1,89 @@
+.sidebar {
+  width: var(--etp-layout-sidebar-width);
+  flex-shrink: 0;
+  background: var(--etp-color-brand-navy);
+  color: var(--etp-color-text-on-dark);
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  padding: var(--etp-space-3) var(--etp-space-3) var(--etp-space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--etp-space-4);
+  transition: width var(--etp-duration-normal) var(--etp-easing-default);
+}
+
+.sidebarCollapsed {
+  width: var(--etp-layout-sidebar-collapsed-width);
+  padding-left: var(--etp-space-2);
+  padding-right: var(--etp-space-2);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--etp-space-1);
+}
+
+.sectionLabel {
+  padding: var(--etp-space-2) var(--etp-space-3);
+  font-size: var(--etp-font-size-label);
+  font-weight: var(--etp-font-weight-medium);
+  line-height: var(--etp-line-height-label);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.navList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--etp-space-1);
+}
+
+.navLink {
+  display: flex;
+  align-items: center;
+  gap: var(--etp-space-3);
+  padding: var(--etp-space-2) var(--etp-space-3);
+  border-radius: var(--etp-radius-md);
+  color: rgba(255, 255, 255, 0.82);
+  text-decoration: none;
+  font-size: var(--etp-font-size-body);
+  font-weight: var(--etp-font-weight-medium);
+  line-height: var(--etp-line-height-body);
+  transition: background-color var(--etp-duration-fast) var(--etp-easing-default),
+    color var(--etp-duration-fast) var(--etp-easing-default);
+}
+
+.navLinkCollapsed {
+  justify-content: center;
+  padding: var(--etp-space-2);
+  gap: 0;
+}
+
+.navLink:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--etp-color-text-on-dark);
+}
+
+.navLinkActive {
+  background: var(--etp-color-brand-blue);
+  color: var(--etp-color-text-on-dark);
+}
+
+.navLinkActive:hover {
+  background: var(--etp-color-brand-blue-hover);
+}
+
+.navIcon {
+  flex-shrink: 0;
+  width: var(--etp-icon-size-nav);
+  height: var(--etp-icon-size-nav);
+  stroke-width: var(--etp-icon-stroke);
+}
+
+.navLabel {
+  white-space: nowrap;
+}

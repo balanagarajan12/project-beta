@@ -24,6 +24,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -190,7 +191,10 @@ class CapabilityApiIntegrationTest extends AbstractPostgreSqlIntegrationTest {
         mockMvc.perform(get("/api/v1/capabilities"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.length()").value(1))
-                .andExpect(jsonPath("$.data[0].latestVersion").value("1.0.0"))
+                .andExpect(jsonPath("$.data[0].version").value("1.0.0"))
+                .andExpect(jsonPath("$.data[0].code").value("etp.iam"))
+                .andExpect(jsonPath("$.data[0].createdAt").exists())
+                .andExpect(jsonPath("$.data[0].updatedAt").exists())
                 .andExpect(jsonPath("$.data[0].contract").doesNotExist());
 
         mockMvc.perform(get("/api/v1/capabilities?category=SECURITY"))
@@ -226,6 +230,62 @@ class CapabilityApiIntegrationTest extends AbstractPostgreSqlIntegrationTest {
     @Test
     void getUnknownCapabilityReturns404() throws Exception {
         mockMvc.perform(get("/api/v1/capabilities/" + UUID.randomUUID()))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("CAPABILITY_NOT_FOUND"));
+    }
+
+    @Test
+    void putUpdatesCapabilityMetadata() throws Exception {
+        MvcResult created = mockMvc.perform(post("/api/v1/capabilities")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(createCapabilityJson("etp.iam", "IAM", "SECURITY", "1.0.0", true, null)))
+                .andExpect(status().isCreated())
+                .andReturn();
+
+        String capabilityId = objectMapper.readTree(created.getResponse().getContentAsString())
+                .path("data").path("id").asText();
+
+        ObjectNode update = objectMapper.createObjectNode();
+        update.put("name", "Identity and Access Management");
+        update.put("description", "Updated IAM capability");
+        update.put("category", "SECURITY");
+        update.put("status", "DRAFT");
+
+        mockMvc.perform(put("/api/v1/capabilities/" + capabilityId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(update.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.name").value("Identity and Access Management"))
+                .andExpect(jsonPath("$.data.description").value("Updated IAM capability"))
+                .andExpect(jsonPath("$.data.version").value("1.0.0"))
+                .andExpect(jsonPath("$.data.createdAt").exists())
+                .andExpect(jsonPath("$.data.updatedAt").exists());
+    }
+
+    @Test
+    void putInvalidRequestReturns400() throws Exception {
+        String capabilityId = createCapabilityAndReturnId("etp.iam", "IAM", "SECURITY");
+
+        ObjectNode update = objectMapper.createObjectNode();
+        update.put("description", "Missing required fields");
+
+        mockMvc.perform(put("/api/v1/capabilities/" + capabilityId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(update.toString()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
+    }
+
+    @Test
+    void putUnknownCapabilityReturns404() throws Exception {
+        ObjectNode update = objectMapper.createObjectNode();
+        update.put("name", "Unknown");
+        update.put("category", "SECURITY");
+        update.put("status", "DRAFT");
+
+        mockMvc.perform(put("/api/v1/capabilities/" + UUID.randomUUID())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(update.toString()))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("CAPABILITY_NOT_FOUND"));
     }

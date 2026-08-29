@@ -1,0 +1,8 @@
+.page {
+  padding: var(--etp-layout-content-padding);
+  max-width: 960px;
+}
+
+.card {
+  margin-top: var(--etp-space-6);
+}

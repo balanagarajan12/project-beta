@@ -2,6 +2,7 @@ package com.etp.platform.capability.api.dto;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 
+import java.time.Instant;
 import java.util.UUID;
 
 @Schema(description = "Lightweight capability summary for collection responses")
@@ -16,14 +17,23 @@ public class CapabilitySummaryResponse {
     @Schema(description = "Capability name")
     private String name;
 
+    @Schema(description = "Capability description")
+    private String description;
+
     @Schema(description = "Capability category")
     private String category;
 
     @Schema(description = "Capability lifecycle status")
     private String status;
 
-    @Schema(description = "Latest registered version")
-    private String latestVersion;
+    @Schema(description = "Current or latest registered version")
+    private String version;
+
+    @Schema(description = "Record creation timestamp")
+    private Instant createdAt;
+
+    @Schema(description = "Record last update timestamp")
+    private Instant updatedAt;
 
     public UUID getId() {
         return id;
@@ -49,6 +59,14 @@ public class CapabilitySummaryResponse {
         this.name = name;
     }
 
+    public String getDescription() {
+        return description;
+    }
+
+    public void setDescription(String description) {
+        this.description = description;
+    }
+
     public String getCategory() {
         return category;
     }
@@ -65,11 +83,27 @@ public class CapabilitySummaryResponse {
         this.status = status;
     }
 
-    public String getLatestVersion() {
-        return latestVersion;
+    public String getVersion() {
+        return version;
     }
 
-    public void setLatestVersion(String latestVersion) {
-        this.latestVersion = latestVersion;
+    public void setVersion(String version) {
+        this.version = version;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(Instant createdAt) {
+        this.createdAt = createdAt;
+    }
+
+    public Instant getUpdatedAt() {
+        return updatedAt;
+    }
+
+    public void setUpdatedAt(Instant updatedAt) {
+        this.updatedAt = updatedAt;
     }
 }

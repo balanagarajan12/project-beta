@@ -11,6 +11,7 @@ import com.etp.platform.capability.api.dto.DependencyRequest;
 import com.etp.platform.capability.api.dto.ImplementationRequest;
 import com.etp.platform.capability.api.dto.NewVersionRequest;
 import com.etp.platform.capability.api.dto.PatchCapabilityRequest;
+import com.etp.platform.capability.api.dto.UpdateCapabilityRequest;
 import com.etp.platform.capability.api.dto.VersionRequest;
 import com.etp.platform.capability.domain.CapabilityLifecycleStatus;
 import com.etp.platform.capability.domain.CapabilityVersionLifecycleStatus;
@@ -125,6 +126,50 @@ public class CapabilityService {
     public Capability getCapability(UUID capabilityId) {
         return capabilityRepository.findById(capabilityId)
                 .orElseThrow(() -> BusinessException.notFound("CAPABILITY_NOT_FOUND", "Capability not found: " + capabilityId));
+    }
+
+    @Transactional
+    public Capability updateCapability(UUID capabilityId, UpdateCapabilityRequest request) {
+        Capability capability = getCapability(capabilityId);
+        Instant now = Instant.now();
+        Map<String, Object> oldMetadata = new HashMap<>();
+        Map<String, Object> newMetadata = new HashMap<>();
+
+        oldMetadata.put("name", capability.getCapabilityName());
+        capability.setCapabilityName(request.getName());
+        newMetadata.put("name", request.getName());
+
+        oldMetadata.put("description", capability.getDescription());
+        capability.setDescription(request.getDescription());
+        newMetadata.put("description", request.getDescription());
+
+        oldMetadata.put("category", capability.getCategory());
+        capability.setCategory(request.getCategory());
+        newMetadata.put("category", request.getCategory());
+
+        String oldStatus = capability.getLifecycleStatus();
+        if (!oldStatus.equals(request.getStatus())) {
+            LifecycleTransitionValidator.validateCapabilityTransition(oldStatus, request.getStatus());
+            capability.setLifecycleStatus(request.getStatus());
+            auditService.record(
+                    AuditService.ENTITY_CAPABILITY,
+                    capabilityId,
+                    AuditService.ACTION_STATUS_CHANGE,
+                    Map.of("status", oldStatus),
+                    Map.of("status", request.getStatus()));
+        }
+
+        capability.setUpdatedAt(now);
+        capability.setUpdatedBy(AuditService.PERFORMED_BY_SYSTEM);
+        auditService.record(
+                AuditService.ENTITY_CAPABILITY,
+                capabilityId,
+                AuditService.ACTION_METADATA_UPDATE,
+                oldMetadata,
+                newMetadata);
+
+        capabilityRepository.save(capability);
+        return capability;
     }
 
     @Transactional

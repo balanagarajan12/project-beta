@@ -2,6 +2,7 @@ package com.etp.platform.capability.api.dto;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
@@ -25,6 +26,15 @@ public class CapabilityDetailResponse {
 
     @Schema(description = "Capability lifecycle status")
     private String status;
+
+    @Schema(description = "Current or latest registered version")
+    private String version;
+
+    @Schema(description = "Record creation timestamp")
+    private Instant createdAt;
+
+    @Schema(description = "Record last update timestamp")
+    private Instant updatedAt;
 
     @Schema(description = "Capability versions")
     private List<CapabilityVersionDetailResponse> versions;
@@ -75,6 +85,30 @@ public class CapabilityDetailResponse {
 
     public void setStatus(String status) {
         this.status = status;
+    }
+
+    public String getVersion() {
+        return version;
+    }
+
+    public void setVersion(String version) {
+        this.version = version;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(Instant createdAt) {
+        this.createdAt = createdAt;
+    }
+
+    public Instant getUpdatedAt() {
+        return updatedAt;
+    }
+
+    public void setUpdatedAt(Instant updatedAt) {
+        this.updatedAt = updatedAt;
     }
 
     public List<CapabilityVersionDetailResponse> getVersions() {

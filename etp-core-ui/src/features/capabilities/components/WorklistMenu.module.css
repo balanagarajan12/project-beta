@@ -1,0 +1,100 @@
+.menu {
+  position: relative;
+}
+
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--etp-space-2);
+  padding: var(--etp-space-2) var(--etp-space-3);
+  border: 1px solid var(--etp-color-border);
+  border-radius: var(--etp-radius-md);
+  background: var(--etp-color-surface-raised);
+  color: var(--etp-color-text-primary);
+  font-family: var(--etp-font-family);
+  font-size: var(--etp-font-size-body-sm);
+  font-weight: var(--etp-font-weight-medium);
+  cursor: pointer;
+  transition: background-color var(--etp-duration-fast) var(--etp-easing-default);
+}
+
+.trigger:hover {
+  background: var(--etp-color-surface-subtle);
+}
+
+.trigger:focus-visible {
+  outline: var(--etp-focus-ring-width) solid var(--etp-color-focus-ring);
+  outline-offset: var(--etp-focus-ring-offset);
+}
+
+.iconTrigger {
+  padding: var(--etp-space-2);
+  border: none;
+  background: transparent;
+}
+
+.iconTrigger:hover {
+  background: var(--etp-color-surface-subtle);
+}
+
+.panel {
+  position: absolute;
+  top: calc(100% + var(--etp-space-2));
+  right: 0;
+  min-width: 200px;
+  padding: var(--etp-space-2);
+  border-radius: var(--etp-radius-lg);
+  border: 1px solid var(--etp-color-border);
+  background: var(--etp-color-white);
+  box-shadow: var(--etp-shadow-lg);
+  z-index: 40;
+}
+
+.panelLeft {
+  right: auto;
+  left: 0;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+}
+
+.menuItem {
+  display: block;
+  width: 100%;
+  padding: var(--etp-space-2) var(--etp-space-3);
+  border: none;
+  border-radius: var(--etp-radius-md);
+  background: transparent;
+  color: var(--etp-color-text-primary);
+  font-family: var(--etp-font-family);
+  font-size: var(--etp-font-size-body-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.menuItem:hover:not(:disabled) {
+  background: var(--etp-color-neutral-100);
+}
+
+.menuItem:focus-visible {
+  outline: var(--etp-focus-ring-width) solid var(--etp-color-focus-ring);
+  outline-offset: 0;
+}
+
+.menuItem:disabled,
+.disabled {
+  opacity: var(--etp-opacity-disabled);
+  cursor: not-allowed;
+}
+
+.destructive {
+  color: var(--etp-color-error);
+}
+
+.divider {
+  height: 1px;
+  margin: var(--etp-space-2) 0;
+  background: var(--etp-color-border);
+}

@@ -1,0 +1,91 @@
+.page {
+  padding: var(--etp-layout-content-padding);
+  max-width: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--etp-space-5);
+  min-height: 0;
+}
+
+.backLink {
+  display: inline-flex;
+  text-decoration: none;
+}
+
+.backRow {
+  margin-bottom: var(--etp-space-2);
+}
+
+.state {
+  padding: var(--etp-space-10);
+}
+
+.errorActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--etp-space-2);
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--etp-space-3);
+  padding-bottom: var(--etp-space-4);
+  border-bottom: 1px solid var(--etp-color-border);
+}
+
+.titleRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--etp-space-4);
+}
+
+.capabilityName {
+  margin: 0;
+  font-size: var(--etp-font-size-h2);
+  font-weight: var(--etp-font-weight-semibold);
+  color: var(--etp-color-text-primary);
+  line-height: var(--etp-line-height-heading);
+}
+
+.versionSelect {
+  flex-shrink: 0;
+  min-width: 14rem;
+  max-width: 20rem;
+}
+
+.codeRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--etp-space-3);
+}
+
+.mono {
+  font-family: ui-monospace, 'Cascadia Code', 'Segoe UI Mono', monospace;
+  font-size: var(--etp-font-size-body-sm);
+  color: var(--etp-color-text-secondary);
+}
+
+.badgeRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--etp-space-2);
+}
+
+.description {
+  margin: 0;
+  font-size: var(--etp-font-size-body);
+  color: var(--etp-color-text-primary);
+  line-height: var(--etp-line-height-body);
+  max-width: 48rem;
+}
+
+.tabs {
+  flex: 1;
+  min-height: 0;
+}
