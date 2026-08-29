@@ -9,7 +9,7 @@ Reference for the implemented Capability Registry in `etp-platform-service`. Thi
 | Area | Status |
 |------|--------|
 | Capability aggregate persistence (JPA + Flyway) | Implemented |
-| REST APIs under `/api/v1/capabilities` | Implemented |
+| REST APIs under `/api/v1/capabilities` (see § REST API) | Implemented |
 | Inline JSONB contract documents | Implemented |
 | External contract references (`location`) | Implemented |
 | JSON Schema validation (base schema) | Implemented |
@@ -17,13 +17,13 @@ Reference for the implemented Capability Registry in `etp-platform-service`. Thi
 | Single ACTIVE version enforcement (application + PostgreSQL) | Implemented |
 | Lifecycle audit events (`AuditEvent` table) | Implemented |
 | OpenAPI / Swagger documentation | Implemented |
+| ETP Core UI — capability list and read-only details (`etp-core-ui`) | Partially implemented (read-only; see § ETP Core UI) |
 
 ### Not implemented in platform-service (future ETP work)
 
 Do not assume these exist in **etp-platform-service** when using the registry:
 
 - OAuth2 JWT enforcement on platform capability registry APIs (deferred)
-- Capability Registry UI or React UI Capability
 - Application Registry APIs
 - Application Initializer / Composer / Builder
 - Business application runtime or generated application deployment
@@ -162,11 +162,93 @@ There is **intentionally no DELETE** endpoint. Retirement, deprecation, and canc
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/v1/capabilities` | Create capability with first version (DRAFT) |
-| `GET` | `/api/v1/capabilities` | List summaries; optional `category`, `status` filters |
+| `GET` | `/api/v1/capabilities` | List summaries; optional `category`, `status` query filters |
 | `GET` | `/api/v1/capabilities/{id}` | Full aggregate: versions, contracts, implementations, dependencies |
 | `PATCH` | `/api/v1/capabilities/{id}` | Metadata, capability lifecycle, new version, version lifecycle |
 
+**Exposed V1 contract:** GET, POST, GET by id, and PATCH only. There is **no DELETE** endpoint. **`PUT /api/v1/capabilities/{id}` is not part of the current exposed API** — capability metadata and lifecycle changes use PATCH.
+
 Versions are **not** exposed as separate top-level resources in V1; they are nested in the capability aggregate and managed via PATCH.
+
+### Response models
+
+All responses use the shared `ApiResponse<T>` wrapper (`data`, `message`, `timestamp`).
+
+#### `CapabilitySummaryResponse` (list)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | UUID | Capability ID |
+| `code` | string | Unique capability code |
+| `name` | string | Capability name |
+| `description` | string \| null | Capability description |
+| `category` | string \| null | Capability category |
+| `status` | string | Capability lifecycle status |
+| `version` | string \| null | Most recently **created** version semver (by `createdAt`); not necessarily `ACTIVE` |
+| `createdAt` | instant | Record creation timestamp |
+| `updatedAt` | instant | Record last update timestamp |
+
+#### `CapabilityDetailResponse` (create, retrieve, patch)
+
+Capability-level fields match the summary model (`id`, `code`, `name`, `description`, `category`, `status`, `version`, `createdAt`, `updatedAt`) plus:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `versions` | array | All capability versions (newest `createdAt` first) |
+
+Each `versions[]` entry (`CapabilityVersionDetailResponse`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | UUID | Capability version ID |
+| `version` | string | Semantic version (for example `1.0.0`) |
+| `status` | string | Version lifecycle status |
+| `description` | string \| null | Version description (stored as release notes) |
+| `contract` | object \| null | Version contract (see below) |
+| `implementation` | object \| null | Optional implementation metadata |
+| `dependencies` | array | Version dependencies (may be empty) |
+
+**Contract** (`ContractResponse`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `contractType` | string | Contract type (for example `COMPOSITE`) |
+| `contractVersion` | string | Contract schema/version identifier |
+| `contractFormat` | string | Contract format (for example `JSON`) |
+| `document` | object \| null | Inline contract document when present |
+| `location` | string \| null | External contract reference when present |
+
+**Inline contract document** sections validated by the V1 base JSON Schema (`capability-contract-base.schema.json`):
+
+- `functional`
+- `interfaces`
+- `security`
+- `deployment`
+- `nfr`
+- `operations`
+- `compatibility`
+- `configuration`
+
+Additional properties are permitted at the document root. Sections may be empty objects.
+
+**Implementation** (`ImplementationResponse`), when present:
+
+| Field | Type |
+|-------|------|
+| `code` | string |
+| `name` | string |
+| `technology` | string |
+| `technologyVersion` | string \| null |
+
+**Dependency** (`DependencyResponse`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `capabilityVersionId` | UUID | Depended-on capability **version** ID |
+| `dependencyType` | string | Dependency type |
+| `mandatory` | boolean | Whether the dependency is mandatory |
+
+Dependencies reference capability **versions**, not capability codes alone. The API does not expand depended-on capability name, code, or version status in the dependency payload.
 
 ### POST — create capability
 
@@ -229,6 +311,94 @@ Partial update. Supported fields (any combination):
 | 409 | `DUPLICATE_CAPABILITY_VERSION` | `newVersion` semver already exists |
 | 404 | `CAPABILITY_NOT_FOUND` | Unknown capability id |
 | 404 | `CAPABILITY_VERSION_NOT_FOUND` | Unknown version id |
+
+## ETP Core UI (`etp-core-ui`)
+
+Read-only Capability Registry screens are implemented in ETP Core UI. They consume **GET** list and **GET** detail APIs only. **POST** and **PATCH** exist on the platform API but have **no** corresponding Core UI workflows yet.
+
+### Routes
+
+| Route | Page |
+|-------|------|
+| `/capabilities` | Capability list |
+| `/capabilities/:capabilityId` | Capability details |
+
+Both routes are behind Core UI authentication (`RequireAuth`) inside the ETP Core Shell layout.
+
+### List page (`/capabilities`)
+
+**One row = one capability** (not one row per version).
+
+| Implemented | Notes |
+|-------------|-------|
+| Capability listing via `GET /api/v1/capabilities` | Full list fetched; no query params sent from UI |
+| Client-side search | Name, code, description, id, category, status, version |
+| Client-side category filter | Distinct values from loaded data |
+| Client-side status filter | Distinct values from loaded data |
+| Client-side pagination | Default 25 rows; page sizes 10, 25, 50, 100 |
+| Row selection | Checkbox per row; bulk bar present with actions disabled |
+| Refresh | Utilities menu reloads list |
+| Capability count | Filtered count in list header |
+| Loading / empty / error states | Including retry on load failure |
+| Navigation to details | Name link and row action **View** |
+
+The **Version** column shows the list API `version` field (most recently created version semver). It does not list every historical version as separate rows.
+
+**Deferred on list UI:** Create Capability (button disabled), Edit, Clone, lifecycle row actions, bulk operations, server-side pagination, server-side filtering (API supports `category`/`status` query params but UI does not use them), export, saved views, manage columns.
+
+### Details page (`/capabilities/:capabilityId`)
+
+Loads `GET /api/v1/capabilities/{id}`.
+
+| Implemented | Notes |
+|-------------|-------|
+| Capability identity header | Name, code, category badge, capability lifecycle status |
+| Capability description | Shown once when present |
+| Version selector | Dropdown from `versions[]`; label `version · status` |
+| Version-driven tabs | **Overview**, **Contract**, **Dependencies** update when version changes |
+| Overview | Version description when present; technical details disclosure (IDs, created/updated) |
+| Contract tab | Contract metadata; structured document sections (collapsible); Structured / Raw JSON toggle |
+| Dependencies tab | Empty state or table (`capabilityVersionId`, `dependencyType`, `mandatory`) |
+| Loading / not found / error + retry | Preserved |
+| Back to Capabilities | Link to list |
+
+Default selected version: matches capability-level `version` when possible, else first `ACTIVE` version, else first version in the response.
+
+**Not shown in UI today:** implementation metadata (returned by API), version lifecycle actions, edit/register workflows, POST/PATCH forms.
+
+The details layout is functional; information architecture may continue to be refined. Do not assume deferred UX (create, edit, lifecycle, export) is available in the UI because the backend API supports related operations.
+
+### API vs UI availability
+
+| Capability | Platform API | Core UI |
+|------------|--------------|---------|
+| List capabilities | GET | Implemented |
+| View capability detail | GET | Implemented |
+| Create capability | POST | Deferred |
+| Update metadata / lifecycle | PATCH | Deferred |
+| Delete | — (no API) | Deferred |
+
+## Deferred functionality (summary)
+
+Verified against current `etp-platform-service` and `etp-core-ui` code:
+
+| Item | API | UI | Notes |
+|------|-----|-----|-------|
+| Create / registration | POST implemented | Deferred | List Create button disabled |
+| PATCH / edit workflows | PATCH implemented | Deferred | No edit forms or lifecycle UI |
+| PUT metadata update | Not exposed | — | Use PATCH for metadata/lifecycle |
+| Lifecycle actions (publish, deprecate, etc.) | PATCH `status` / `versionStatus` | Deferred | Row/detail menus disabled |
+| Delete | No endpoint | Deferred | Cancellation via PATCH version lifecycle only |
+| Clone | — | Deferred | |
+| Bulk operations | — | Deferred | Selection UI only |
+| Export / import | — | Deferred | |
+| Saved views / manage columns | — | Deferred | |
+| Server-side pagination | — | Deferred | Client-side only |
+| Advanced / server-side filtering | GET query params exist | Deferred | UI filters client-side on full list |
+| Implementation display | GET detail includes field | Deferred | Not rendered in details tabs |
+| Capability Registry authorization | APIs permitAll | — | Platform JWT enforcement deferred |
+| Audit query API | Events recorded | — | No read API |
+| Operating model / entitlements (V14 tables) | — | — | Schema only; no service APIs |
 
 ## Package layout (implementation)
 

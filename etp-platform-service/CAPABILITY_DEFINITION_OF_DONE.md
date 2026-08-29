@@ -2,6 +2,26 @@
 
 A capability is considered complete only when the applicable items below are addressed. Not every item applies to every capability type; use judgment, but do not skip items that are relevant to the capability being delivered.
 
+## Capability Registry V1 — current delivery status
+
+Status of the **platform Capability Registry** (`etp-platform-service` + `etp-core-ui` read-only screens) as implemented today:
+
+| Area | Status | Notes |
+|------|--------|-------|
+| REST APIs (GET list, POST create, GET detail, PATCH modify) | **Completed** | Exposed contract; no DELETE; **PUT not exposed** |
+| Lifecycle rules and audit events | **Completed** | No audit read API |
+| Inline contracts + JSON Schema base validation | **Completed** | |
+| Core UI list (`/capabilities`) | **Partially implemented** | Read-only; client-side search/filter/pagination |
+| Core UI details (`/capabilities/:capabilityId`) | **Partially implemented** | Read-only; version selector + tabs; UX may be refined |
+| Core UI create / edit / lifecycle | **Deferred** | POST/PATCH not wired in UI |
+| Platform JWT enforcement on registry APIs | **Deferred** | `permitAll` today |
+| Operating model / entitlements (V14 schema) | **Schema only** | No Java services or APIs |
+| Application Registry | **Deferred** | |
+
+API availability and UI availability are **separate**. POST and PATCH are implemented on the platform API but not exposed through Core UI workflows.
+
+Detail: [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md).
+
 ## 1. Architecture
 
 - Clear capability boundary defined

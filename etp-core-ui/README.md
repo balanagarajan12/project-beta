@@ -59,8 +59,8 @@ etp-core-ui/
 │   ├── assets/             # Bundled assets
 │   ├── components/ui/      # Reusable ETP design system components
 │   ├── config/             # Environment configuration
-│   ├── features/           # Feature modules (auth, dashboard, capabilities, …)
-│   ├── layouts/            # Shared layouts (Core Shell — future)
+│   ├── features/           # Feature modules (auth, capabilities, …)
+│   ├── layouts/            # Shared layouts (Core Shell)
 │   ├── lib/                # Shared utilities
 │   ├── services/           # API client foundation
 │   ├── styles/             # Tokens, theme, typography
@@ -110,12 +110,19 @@ npm run dev
 
 Default Vite dev server: `http://localhost:5173`
 
-Routes (Phase 1):
+Requires `VITE_API_BASE_URL` pointing at `etp-platform-service` (default `http://localhost:8080`) for Capability Registry screens.
 
-- `/login` — approved login UI; guest-only; username/password authentication via ETP IAM
-- `/dashboard` — protected; requires authenticated session
+Routes (authenticated, inside Core Shell unless noted):
 
-For end-to-end login, ETP IAM and Keycloak must be running with a configured realm user and matching IAM `principals` row. See [capabilities/etp-iam/README.md](../capabilities/etp-iam/README.md).
+| Route | Access | Description |
+|-------|--------|-------------|
+| `/login` | Guest only | Approved login UI; username/password via ETP IAM |
+| `/dashboard` | Protected | Placeholder dashboard |
+| `/capabilities` | Protected | Capability list (read-only) |
+| `/capabilities/:capabilityId` | Protected | Capability details (read-only) |
+| `/customers`, `/applications`, `/platform/*`, `/audit` | Protected | Shell placeholders |
+
+For end-to-end login and Capability Registry data, ETP IAM, Keycloak, and `etp-platform-service` must be running. See [capabilities/etp-iam/README.md](../capabilities/etp-iam/README.md) and [Capability Registry](../etp-platform-service/docs/CAPABILITY_REGISTRY.md).
 
 ## Build
 
@@ -137,12 +144,18 @@ npm run lint
 
 - ETP design tokens and theme
 - Reusable `ETP*` UI components
+- ETP Core Shell layout (header, sidebar, navigation)
 - Approved login screen (visual baseline frozen)
 - Phase 1 authentication (1A–1C Phase 1)
 - Route protection and session handling
-- API client with Bearer token from session
+- API client with Bearer token from session (`VITE_API_BASE_URL` for platform APIs)
+- **Capability Registry (read-only):**
+  - List (`/capabilities`) — client-side search, category/status filters, pagination, row selection, refresh, navigation to details
+  - Details (`/capabilities/:capabilityId`) — version selector; Overview, Contract, and Dependencies tabs driven by selected version; loading, not-found, and error states
 
-**Not included yet:** Core Shell, Capability Registry screens, Customer UI, business application UIs, SSO, OIDC/PKCE.
+**API usage today:** `GET /api/v1/capabilities` and `GET /api/v1/capabilities/{id}` only. POST and PATCH are **not** called from Core UI.
+
+**Not included yet:** Capability create/edit/lifecycle UI, Customer UI, business application UIs, SSO, OIDC/PKCE, server-side list pagination/filtering in UI, bulk/export workflows, implementation metadata display on details.
 
 ## Related documentation
 

@@ -61,7 +61,8 @@ Logical ETP components (not necessarily separate deployables):
 
 | Component | Role |
 |-----------|------|
-| ETP UI | Platform operator and developer experience (future) |
+| ETP UI | Platform operator and developer experience |
+| ETP Core UI | Internal platform console (`etp-core-ui`) — shell, auth, read-only Capability Registry list/details |
 | ETP Platform API | Core platform REST services (`com.etp.platform.core`) |
 | Application Registry | Customer applications and definitions (future APIs) |
 | Capability Registry | Capability catalog, versions, contracts (**V1 REST APIs implemented**) |
@@ -119,8 +120,8 @@ Do not implement capabilities (including IAM) as owned by a single business appl
 | Area | Status |
 |------|--------|
 | Spring Boot 4.1 service foundation | Implemented |
-| Platform metadata data model (11 tables) | Implemented |
-| Flyway migrations (13) | Implemented |
+| Platform metadata data model (16 tables) | Implemented |
+| Flyway migrations (14) | Implemented |
 | JPA entities | Implemented |
 | `GET /api/v1/health` (`com.etp.platform.core`) | Implemented |
 | `GET /api/v1/platform/info` (`com.etp.platform.core`) | Implemented |
@@ -133,7 +134,8 @@ Do not implement capabilities (including IAM) as owned by a single business appl
 | Common API/error model | Implemented |
 | Database connectivity health indicator | Implemented |
 | Spring Security baseline | Implemented |
-| OAuth2 Resource Server dependency | Present; Keycloak not integrated |
+| CORS for Core UI dev origin (`http://localhost:5173`) | Implemented |
+| OAuth2 Resource Server dependency | Present; Keycloak not integrated on platform APIs |
 | Actuator health | Implemented |
 | OpenAPI / Swagger (SpringDoc) | Implemented |
 | Docker Compose local PostgreSQL | Implemented |
@@ -141,9 +143,19 @@ Do not implement capabilities (including IAM) as owned by a single business appl
 
 Detailed Capability Registry behavior: [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md).
 
+### Partially implemented (`etp-core-ui`)
+
+| Area | Status |
+|------|--------|
+| ETP Core Shell layout | Implemented |
+| Capability Registry list (`/capabilities`) | Implemented (read-only) |
+| Capability Registry details (`/capabilities/:capabilityId`) | Implemented (read-only; version selector + Overview / Contract / Dependencies tabs) |
+
+Detail: [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md) § ETP Core UI.
+
 ### Future (not in this repository yet)
 
-- Capability Registry **UI**
+- Capability Registry **write** UI (create, PATCH edit, lifecycle actions)
 - Application Registry APIs
 - Application Builder / Initializer / Composer
 - ETP UI Foundation
@@ -192,7 +204,7 @@ PostgreSQL enforces the single-ACTIVE invariant via partial unique index `uk_cap
 
 ## 6. Current Data Model
 
-All tables live in `etp_platform`. UUID primary keys. No seed data in migrations.
+All tables live in `etp_platform`. UUID primary keys. V14 adds operating-model seed data for `operating_model` only.
 
 | Entity | Purpose |
 |--------|---------|
@@ -207,6 +219,13 @@ All tables live in `etp_platform`. UUID primary keys. No seed data in migrations
 | **CapabilityDependency** | Version-aware dependency between capability versions |
 | **PlatformVersion** | Version of ETP itself |
 | **AuditEvent** | Audit record for platform metadata changes |
+| **OperatingModel** | Operating model catalog (V14 schema foundation) |
+| **CustomerOperatingAccess** | Customer ↔ operating model access (V14 schema foundation) |
+| **CapabilityEntitlement** | Capability entitlement rules (V14 schema foundation) |
+| **ApplicationEntitlement** | Application entitlement rules (V14 schema foundation) |
+| **PlatformConfiguration** | Platform configuration records (V14 schema foundation) |
+
+**V14 operating model / entitlement tables** (`V14__create_operating_model_entitlements.sql`) are **database schema foundation only**. There is currently no Java entity, service, or REST API in `etp-platform-service` referencing `customer_operating_access`, `capability_entitlement`, `application_entitlement`, or `platform_configuration`. Do not document entitlement workflows as implemented.
 
 ### Key relationships
 
@@ -233,7 +252,7 @@ Current conventions:
 - Errors via `ErrorResponse` / `ErrorDetail` and `GlobalExceptionHandler`
 - Operational endpoints under `/actuator` (not mixed with business APIs)
 - OpenAPI at `/api/v1/openapi`, Swagger UI at `/api/v1/swagger-ui`
-- Capability Registry: aggregate-oriented API; no DELETE; lifecycle via PATCH
+- Capability Registry: aggregate-oriented API; no DELETE; lifecycle via PATCH; **exposed contract: GET, POST, GET by id, PATCH** (no PUT)
 
 Detailed conventions: [docs/API_CONVENTIONS.md](docs/API_CONVENTIONS.md). Capability Registry detail: [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md).
 
@@ -353,7 +372,7 @@ Frontend progression (see [docs/ETP_CORE_UI_DESIGN_GUIDELINES.md](docs/ETP_CORE_
 
 ### Platform API security (current)
 
-**Current status:** `spring-boot-starter-security-oauth2-resource-server` is on the classpath. `SecurityConfig` permits health, platform info, actuator health, OpenAPI paths, and **capability registry APIs** until platform JWT enforcement. **ETP IAM and Keycloak are integrated for Core UI login** via `capabilities/etp-iam`. **Platform service APIs do not yet validate IAM/Keycloak JWTs** on business routes.
+**Current status:** `spring-boot-starter-security-oauth2-resource-server` is on the classpath. `SecurityConfig` permits health, platform info, actuator health, OpenAPI paths, and **capability registry APIs** until platform JWT enforcement. CORS allows configured origins (default `http://localhost:5173` for Core UI dev). **ETP IAM and Keycloak are integrated for Core UI login** via `capabilities/etp-iam`. **Platform service APIs do not yet validate IAM/Keycloak JWTs** on business routes. Capability Registry authorization mappings in IAM are **not** configured for platform API access in the current codebase.
 
 ## 9. Local Runtime
 
@@ -362,7 +381,7 @@ Frontend progression (see [docs/ETP_CORE_UI_DESIGN_GUIDELINES.md](docs/ETP_CORE_
 | Application | Port `8080` (`ETP_SERVER_PORT`) |
 | PostgreSQL | Host port `5434` → container `5432` (`ETP_DB_PORT`) |
 | Database | `etp_platform`, user `etp_admin` |
-| Schema | Flyway `classpath:db/migration` (13 migrations) |
+| Schema | Flyway `classpath:db/migration` (14 migrations) |
 | JPA | `ddl-auto=validate` (default profile) |
 | Timezone | JDBC `TimeZone=UTC` |
 
@@ -387,9 +406,9 @@ Frontend progression (see [docs/ETP_CORE_UI_DESIGN_GUIDELINES.md](docs/ETP_CORE_
 
 **Foundation:** Service scaffold, metadata model, Flyway, JPA, health APIs, documentation, local PostgreSQL.
 
-**Capability Registry V1 (current):** REST APIs, lifecycle (including `CANCELLED`), inline JSONB contracts, audit on lifecycle changes, single-ACTIVE enforcement.
+**Capability Registry V1 (current):** REST APIs, lifecycle (including `CANCELLED`), inline JSONB contracts, audit on lifecycle changes, single-ACTIVE enforcement, read-only Core UI list and details.
 
-**Next major work:** Application Registry APIs, Application Initializer, Capability Registry UI, platform JWT enforcement, IAM Phase 2 (SSO/OIDC/PKCE, refresh, `/me`), and composition workflows.
+**Next major work:** Application Registry APIs, Application Initializer, Capability Registry **write** UI (create, PATCH workflows), platform JWT enforcement, IAM Phase 2 (SSO/OIDC/PKCE, refresh, `/me`), operating model / entitlement services (V14 schema), and composition workflows.
 
 Step 1C Phase 1 (Core UI username/password via ETP IAM) is implemented — see §8.
 

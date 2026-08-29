@@ -120,6 +120,8 @@ Base path: `/api/v1`
 
 **Browser login uses IAM `POST /api/v1/auth/login` — credentials are validated by Keycloak; IAM does not store passwords.**
 
+IAM authorizes IAM-protected APIs via JWT and PostgreSQL RBAC. **ETP Platform Service capability registry APIs are not IAM-protected today** (`permitAll` on `/api/v1/capabilities/**`). Capability Registry authorization mappings in IAM are **not** configured in the current codebase.
+
 ## Keycloak development setup (username/password login)
 
 1. Create realm `etp` (or use existing).

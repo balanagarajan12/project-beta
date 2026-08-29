@@ -48,10 +48,11 @@ Implemented in this repository today:
 
 - **Spring Boot 4.1** on **Java 21**
 - **PostgreSQL 17** (`etp_platform` database)
-- **Flyway** schema migrations (13 migrations, 11 tables, no seed data)
+- **Flyway** schema migrations (14 migrations, 16 tables; V14 operating-model schema foundation)
 - **JPA/Hibernate** entities with `ddl-auto=validate`
 - **REST APIs** — platform health/info (`com.etp.platform.core`) and **Capability Registry V1** (`/api/v1/capabilities`)
 - **Capability Registry V1** — create, list, retrieve, and PATCH capabilities with version lifecycle, inline JSONB contracts, audit on lifecycle changes, and single-ACTIVE-version enforcement
+- **CORS** — configured for Core UI local dev (`http://localhost:5173` via `etp.platform.cors.allowed-origins`)
 - **Spring Boot Actuator** — operational health
 - **Docker Compose** — local PostgreSQL
 - **Common API/error model** — `ApiResponse`, `ErrorResponse`, `GlobalExceptionHandler`
@@ -59,7 +60,9 @@ Implemented in this repository today:
 - **Spring Security** baseline with OAuth2 Resource Server dependency (platform JWT enforcement deferred; ETP IAM integrates with Keycloak separately in `capabilities/etp-iam/`)
 - **OpenAPI/Swagger** via SpringDoc
 
-**Not implemented yet** (planned capabilities and services): Capability Registry UI, Application Registry APIs, Application Initializer, Application Composer, platform-service JWT enforcement, workflow, Kafka, RabbitMQ, SFTP, AI, generated applications, and full ETP UI shell.
+**Not implemented yet** (planned capabilities and services): Capability Registry **write** UI (create, edit, lifecycle), Application Registry APIs, Application Initializer, Application Composer, platform-service JWT enforcement, workflow, Kafka, RabbitMQ, SFTP, AI, generated applications, operating model / entitlement **services** (V14 tables exist as schema foundation only).
+
+**Partially implemented in `etp-core-ui`:** ETP Core Shell, read-only Capability Registry list and details (GET APIs only). See [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md) § ETP Core UI.
 
 **Implemented elsewhere:** ETP IAM capability (`capabilities/etp-iam/`) with Keycloak for Core UI Phase 1 login. Customer UI and business application authentication are **not** implemented.
 
@@ -191,9 +194,9 @@ Intentionally **not** implemented:
 
 - Application Initializer
 - Application Builder / Composer
-- Capability Registry UI
-- full ETP UI shell
+- Capability Registry write UI (create, edit, lifecycle in Core UI)
 - platform-service Keycloak/JWT enforcement on capability APIs
+- Operating model / entitlement APIs (V14 schema only)
 - Workflow implementation
 - Kafka implementation
 - RabbitMQ implementation
@@ -258,7 +261,7 @@ The service starts on port `8080` by default (`ETP_SERVER_PORT` overrides).
 | GET | `/api/v1/capabilities/{id}` | Retrieve full capability aggregate |
 | PATCH | `/api/v1/capabilities/{id}` | Update metadata, lifecycle, new version, or version status |
 
-There is no DELETE endpoint. Deprecation, retirement, and cancellation are lifecycle operations via PATCH.
+There is no DELETE endpoint and **no PUT** on the exposed V1 contract. Deprecation, retirement, and cancellation are lifecycle operations via PATCH.
 
 Lifecycle summary:
 
