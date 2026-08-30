@@ -1,0 +1,341 @@
+{
+  "code": "etp.kafka",
+  "name": "ETP Kafka",
+  "description": "ETP infrastructure capability for Apache Kafka 3.8.1 event streaming. Documents producer and consumer client connectivity, topic infrastructure conventions, and deployment targets. Not a runtime ETP service or Kafka proxy.",
+  "category": "INTEGRATION",
+  "version": {
+    "version": "1.0.0",
+    "description": "Initial infrastructure capability documenting Kafka 3.8.1 KRaft local Docker, direct producer/consumer connectivity, and environment-specific deployment targets. Excludes REST APIs, Schema Registry, automatic provisioning, and UAM event implementation."
+  },
+  "contract": {
+    "contractType": "COMPOSITE",
+    "contractVersion": "1.0",
+    "contractFormat": "JSON",
+    "location": "capabilities/kafka/ETP_KAFKA_CAPABILITY_DEPLOYMENT.md",
+    "document": {
+      "functional": {
+        "capabilityType": "INFRASTRUCTURE",
+        "summary": "Apache Kafka 3.8.1 event streaming infrastructure for ETP applications. Supports producer and consumer connectivity. Not a JVM runtime service, REST API, or Kafka proxy.",
+        "capabilities": [
+          "EVENT_STREAMING_INFRASTRUCTURE",
+          "KAFKA_PRODUCER_CONNECTIVITY",
+          "KAFKA_CONSUMER_CONNECTIVITY",
+          "TOPIC_AND_PARTITION_INFRASTRUCTURE"
+        ],
+        "producerConsumerModel": {
+          "capability": "etp.kafka",
+          "producer": {
+            "flow": "Application → Kafka Producer Client → Kafka Broker → Topic → Partition",
+            "description": "Applications publish events directly via Kafka client libraries"
+          },
+          "consumer": {
+            "flow": "Kafka Broker → Topic → Partition → Consumer Group → Kafka Consumer Client → Application",
+            "description": "Applications consume events directly via Kafka client libraries"
+          }
+        },
+        "provides": [
+          "Apache Kafka 3.8.1 broker (Docker image apache/kafka:3.8.1, KRaft mode, no Zookeeper)",
+          "Kafka wire protocol for producer and consumer client libraries",
+          "Topic, partition, replication, and retention infrastructure (deployment-configured)",
+          "Configuration and operational conventions for environment-resolved bootstrap servers and secrets"
+        ],
+        "doesNotProvide": [
+          "ETP REST APIs for producing or consuming messages",
+          "Application topic names, consumer groups, or event semantics (consumer-owned)",
+          "Event processing, business rules, or payload validation logic",
+          "Confluent Schema Registry or Avro enforcement (future optional integration)",
+          "Connection brokering or message proxy in the ETP runtime path"
+        ],
+        "applicationResponsibilities": [
+          "Topic purpose and business event naming",
+          "Producer vs consumer role per flow",
+          "Consumer group identity",
+          "Event payload, schema reference, and business semantics",
+          "Serialization choice (e.g. String, JSON bytes) and deserializers",
+          "Offset strategy, acknowledgement mode, and business retry/error handling",
+          "Event processing, transformations, and JSON Schema validation (separate validation capability at application layer)"
+        ],
+        "infrastructureResponsibilities": [
+          "Kafka broker cluster availability",
+          "Network reachability from producer and consumer applications",
+          "Topic creation, partitions, replication factor, and retention (operator or deployment tooling)",
+          "Authentication credentials and TLS certificates (deployment-specific)"
+        ],
+        "topicOwnership": {
+          "kafkaCapability": [
+            "Infrastructure support for topic creation and broker-level topic configuration",
+            "Default partition count and replication factor conventions for local dev",
+            "Retention and log directory persistence policy"
+          ],
+          "application": [
+            "Business topic names and event types",
+            "Producer and consumer binding to specific topics",
+            "Consumer group naming",
+            "Event payload structure and processing logic"
+          ]
+        },
+        "currentConsumersInRepository": []
+      },
+      "interfaces": {
+        "apis": [],
+        "events": [],
+        "kafka": {
+          "protocol": "Kafka wire protocol via TCP",
+          "clients": [
+            "spring-kafka (Spring Boot spring-kafka with KafkaTemplate and @KafkaListener)",
+            "Apache Kafka Java client (org.apache.kafka.clients.producer.KafkaProducer / KafkaConsumer)"
+          ],
+          "bootstrapServersPattern": "{host}:{port}[,{host}:{port}...]",
+          "integration": "Applications configure spring.kafka.* (or native client properties) and connect directly — no ETP Kafka middleware",
+          "producer": {
+            "flow": "Application → Kafka Producer Client → Kafka Broker → Topic → Partition",
+            "configuration": [
+              "bootstrap.servers / spring.kafka.bootstrap-servers",
+              "topic (application-defined, not ETP capability default)",
+              "key.serializer / value.serializer",
+              "acks, retries, delivery.timeout.ms, request.timeout.ms",
+              "enable.idempotence (when supported and configured)",
+              "security.protocol, sasl.*, ssl.* (deployment-specific)"
+            ]
+          },
+          "consumer": {
+            "flow": "Kafka Broker → Topic → Partition → Consumer Group → Kafka Consumer Client → Application",
+            "configuration": [
+              "bootstrap.servers / spring.kafka.bootstrap-servers",
+              "topic and group.id (application-defined)",
+              "key.deserializer / value.deserializer",
+              "auto.offset.reset, enable.auto.commit or manual acknowledgement",
+              "max.poll.records, session.timeout.ms, poll timeout",
+              "security.protocol, sasl.*, ssl.* (deployment-specific)"
+            ]
+          }
+        },
+        "schemaRegistry": {
+          "status": "NOT_INCLUDED_IN_V1_0_0",
+          "detail": "No Schema Registry in repository. Kafka transports message bytes; application/event processing performs payload validation (e.g. JSON Schema Validation capability at application layer). Confluent Schema Registry is a future optional integration."
+        },
+        "documentation": {
+          "deploymentGuide": "capabilities/kafka/ETP_KAFKA_CAPABILITY_DEPLOYMENT.md",
+          "note": "Infrastructure capability — no OpenAPI service surface"
+        }
+      },
+      "security": {
+        "credentials": [
+          "SASL username/password or other Kafka auth credentials via environment variables or secret manager",
+          "Never store live credentials in the Capability Registry contract document or registration payload"
+        ],
+        "secretReferences": [
+          "Environment variables (example: ETP_KAFKA_SASL_PASSWORD)",
+          "Production: secret manager / platform secret injection (deployment-specific)"
+        ],
+        "authentication": {
+          "localDevelopment": "PLAINTEXT only in capabilities/kafka/docker-compose.yml — no SASL in local defaults",
+          "sasl": "Supported by Kafka client libraries; not configured in repository local compose — deployment responsibility for non-dev"
+        },
+        "tlsSsl": {
+          "status": "NOT_CONFIGURED_IN_REPOSITORY_DEFAULTS",
+          "detail": "Local compose uses PLAINTEXT listeners. TLS is a deployment responsibility for managed Kafka (MSK, Azure Event Hubs for Kafka, etc.) in non-dev environments."
+        },
+        "acls": {
+          "status": "NOT_CONFIGURED_IN_REPOSITORY_DEFAULTS",
+          "detail": "Kafka ACLs supported by broker; not configured in local v1.0.0 compose"
+        },
+        "networkAccess": [
+          "Local development: Kafka port published via Docker Compose (default host port 59092)",
+          "Non-dev: restrict broker ports to application network; not configured in repository defaults"
+        ],
+        "applicationIsolation": [
+          "Topic and consumer group naming per application/service",
+          "Optional dedicated Kafka cluster per environment (deployment-specific)",
+          "ACL-based isolation in managed deployments (future hardening)"
+        ],
+        "limitations": [
+          "Single-node KRaft broker in local compose (replication factor 1)",
+          "No TLS or SASL in local Docker defaults",
+          "No ACL users in repository compose"
+        ],
+        "futureHardening": [
+          "SASL (SCRAM, OAuthBearer) for all non-dev environments",
+          "TLS/mTLS for broker and client connections",
+          "Kafka ACLs with least-privilege per producer/consumer",
+          "Private-network-only broker endpoints",
+          "Secret rotation automation"
+        ]
+      },
+      "deployment": {
+        "kafkaVersion": "3.8.1",
+        "distribution": "Apache Kafka (official apache/kafka Docker image)",
+        "mode": "KRaft (no Zookeeper)",
+        "versionRationale": "Apache Kafka 3.8.1 is the current stable 3.8 line with official Docker images, KRaft single-node simplicity for local dev, and broad spring-kafka compatibility. No prior Kafka version existed in the ETP repository.",
+        "implementationModel": "Infrastructure broker container — not an ETP Spring Boot artifact",
+        "localDockerReference": {
+          "composeFile": "capabilities/kafka/docker-compose.yml",
+          "service": "kafka",
+          "image": "apache/kafka:3.8.1",
+          "container": "etp-kafka",
+          "defaultHostPort": 59092,
+          "containerListenerPort": 9092,
+          "advertisedListener": "PLAINTEXT_HOST://localhost:59092 (host producers/consumers)",
+          "healthcheck": "kafka-broker-api-versions.sh against localhost:9092 inside container",
+          "persistence": "Named volume etp-kafka-data (KAFKA_LOG_DIRS)",
+          "supportingServices": "None — KRaft mode eliminates Zookeeper"
+        },
+        "environmentSpecific": [
+          "Docker Compose (local development — implemented in capabilities/kafka/)",
+          "Kubernetes Strimzi or Helm Kafka chart (deployment-specific — not defined in repository)",
+          "AWS MSK (deployment target — not implemented in repository)",
+          "Azure Event Hubs for Kafka / Azure-managed Kafka-compatible services (deployment target — not implemented in repository)"
+        ],
+        "bootstrapServers": "Environment-resolved list (example local: localhost:59092)",
+        "topicManagement": "Operator or kafka-topics CLI; auto-create enabled in local compose for dev convenience"
+      },
+      "nfr": {
+        "connectionReliability": "Producer retries and acks configured per application; consumers define poll/retry and error-handling policy",
+        "healthReadiness": "Container health via kafka-broker-api-versions; consumer application readiness via Kafka connectivity check (e.g. Spring Boot Actuator kafka health when configured)",
+        "messageDelivery": "At-least-once by default; exactly-once requires idempotent producer and transactional settings at application/deployment layer",
+        "operationalRequirements": [
+          "Start Kafka before consumers/producers that require connectivity at startup",
+          "Single-node local broker is not HA — deployment-specific clustering for production",
+          "No numeric latency or availability SLOs defined in repository for v1.0.0"
+        ]
+      },
+      "operations": {
+        "startup": [
+          "Provision or start Kafka broker(s)",
+          "Create topics with appropriate partitions and replication (or rely on auto-create in dev only)",
+          "Start producer/consumer applications with Kafka client configuration"
+        ],
+        "readiness": [
+          "Kafka: kafka-broker-api-versions healthcheck in local Docker Compose",
+          "Applications: KafkaTemplate/@KafkaListener health or native client metadata request"
+        ],
+        "connectivity": "Verified by application Kafka clients, not by a dedicated ETP Kafka service",
+        "offsets": {
+          "owner": "Kafka broker (__consumer_offsets internal topic) with consumer client offset commit policy",
+          "applicationPolicy": "auto vs manual commit, auto.offset.reset — consumer configuration"
+        },
+        "migrations": {
+          "note": "Not applicable — Kafka has no Flyway equivalent at infrastructure layer; topic schema evolution is application-owned"
+        },
+        "environmentConfiguration": "Per-service environment variables (ETP_KAFKA_*) — see configuration section"
+      },
+      "compatibility": {
+        "kafkaVersion": "3.8.1",
+        "clientConsumers": [
+          "Spring Boot services with spring-kafka (KafkaTemplate, @KafkaListener)",
+          "Any Kafka client compatible with Apache Kafka 3.x wire protocol"
+        ],
+        "expectations": [
+          "Producers and consumers use Kafka 3.x compatible client libraries",
+          "JSON payloads common; Avro/Protobuf without Schema Registry requires application-managed schema contracts",
+          "apache/kafka:3.8.1 matches capabilities/kafka/docker-compose.yml"
+        ],
+        "notIncludedInV1_0_0": [
+          "Kafka Connect cluster in repository",
+          "Schema Registry",
+          "Kafka REST proxy",
+          "MSK/Azure automation in repository"
+        ]
+      },
+      "configuration": {
+        "applicationCapabilityDependency": {
+          "description": "Composition-time: etp.kafka v1.0.0, required true/false — no plaintext secrets",
+          "example": "capability: etp.kafka, version: 1.0.0, required: true for event-driven flows"
+        },
+        "applicationKafkaUsage": {
+          "description": "Producer/consumer role, logical event usage, topic reference, consumer group, serializers — application-owned",
+          "examples": [
+            "role: producer | consumer | both",
+            "topic: application-defined name",
+            "group.id: application-defined consumer group",
+            "serializers: org.apache.kafka.common.serialization.StringSerializer / StringDeserializer or custom JSON"
+          ]
+        },
+        "environmentConfiguration": {
+          "description": "Deployment-time: bootstrap servers, SASL, TLS, secret references — resolves Docker vs K8s vs MSK vs Azure"
+        },
+        "businessImplementation": {
+          "description": "Event handlers, producer logic, validation, business rules — not ETP Kafka capability configuration"
+        },
+        "parameters": [
+          {
+            "name": "bootstrap servers",
+            "examples": [
+              "ETP_KAFKA_BOOTSTRAP_SERVERS=localhost:59092",
+              "spring.kafka.bootstrap-servers"
+            ],
+            "required": true
+          },
+          {
+            "name": "topic",
+            "description": "Application-defined topic name for produce/consume",
+            "scope": "application usage configuration",
+            "required": true
+          },
+          {
+            "name": "consumer group",
+            "description": "group.id for consumers",
+            "scope": "application usage configuration",
+            "required": "consumer only"
+          },
+          {
+            "name": "key/value serializers",
+            "description": "spring.kafka.producer.* / spring.kafka.consumer.* or native client properties",
+            "required": true
+          },
+          {
+            "name": "producer acks / retries / timeouts",
+            "description": "spring.kafka.producer.acks, retries, delivery-timeout-ms, request-timeout-ms",
+            "required": false
+          },
+          {
+            "name": "producer idempotence",
+            "description": "spring.kafka.producer.enable-idempotence when exactly-once produce required",
+            "required": false
+          },
+          {
+            "name": "consumer offset / acknowledgement",
+            "description": "enable.auto.commit, auto.offset.reset, spring.kafka.listener.ack-mode",
+            "required": false
+          },
+          {
+            "name": "security.protocol / SASL / SSL",
+            "description": "spring.kafka.properties.security.protocol, sasl.jaas.config, ssl.*",
+            "secret": true,
+            "required": "non-dev when secured"
+          },
+          {
+            "name": "partitions / replication",
+            "description": "Topic creation parameters — operator or deployment tooling, not application registry payload",
+            "scope": "infrastructure"
+          }
+        ],
+        "reference": "capabilities/kafka/ETP_KAFKA_CAPABILITY_DEPLOYMENT.md"
+      },
+      "dependencies": {
+        "capabilities": [],
+        "external": [],
+        "runtime": [
+          {
+            "name": "Apache Kafka",
+            "version": "3.8.1",
+            "role": "Event streaming broker software (KRaft mode)"
+          },
+          {
+            "name": "Docker",
+            "version": "optional",
+            "role": "Local development provisioning (apache/kafka:3.8.1 image)"
+          }
+        ],
+        "note": "Kafka is infrastructure. Registry dependencies[] is empty. JSON Schema Validation and other processing capabilities are separate application-layer concerns, not registry dependencies of etp.kafka."
+      }
+    }
+  },
+  "implementation": {
+    "code": "kafka",
+    "name": "ETP Kafka",
+    "technology": "Apache Kafka",
+    "technologyVersion": "3.8.1"
+  },
+  "dependencies": []
+}

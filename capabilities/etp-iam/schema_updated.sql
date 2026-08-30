@@ -2,7 +2,10 @@
 -- ETP IAM Platform - Database Schema (Finalized)
 -- PostgreSQL 17
 --
--- Design decisions:
+-- Runtime schema is applied via Flyway:
+--   src/main/resources/db/migration/V1__iam_schema.sql
+-- This file is kept as a human-readable reference copy.
+-- ============================================================
 -- 1. Applications are PLATFORM-LEVEL and are NOT tenant-owned.
 -- 2. Tenants belong to Companies.
 -- 3. Resources and Permissions belong to platform Applications.

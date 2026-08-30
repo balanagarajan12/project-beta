@@ -1,0 +1,264 @@
+{
+  "code": "etp.redis",
+  "name": "ETP Redis",
+  "description": "ETP infrastructure capability for Redis 7.4 in-memory cache connectivity. Documents Redis client consumption, key isolation conventions, deployment targets, and operations. Not a runtime ETP service or cache proxy.",
+  "category": "DATA",
+  "version": {
+    "version": "1.0.0",
+    "description": "Initial infrastructure capability documenting Redis 7.4, direct client connectivity, local Docker Compose, and environment-specific deployment targets. Excludes REST APIs, automatic provisioning, and UAM cache implementation."
+  },
+  "contract": {
+    "contractType": "COMPOSITE",
+    "contractVersion": "1.0",
+    "contractFormat": "JSON",
+    "location": "capabilities/redis/ETP_REDIS_CAPABILITY_DEPLOYMENT.md",
+    "document": {
+      "functional": {
+        "capabilityType": "INFRASTRUCTURE",
+        "summary": "Redis 7.4 in-memory cache infrastructure for ETP applications. Not a JVM runtime service, REST API, or cache proxy.",
+        "capabilities": [
+          "CACHE_INFRASTRUCTURE",
+          "REDIS_CONNECTIVITY",
+          "APPLICATION_CACHE_ISOLATION"
+        ],
+        "provides": [
+          "Redis 7.4 server (Docker image redis:7.4-alpine in local development)",
+          "Redis wire protocol connectivity for consumer applications via Redis client libraries",
+          "Configuration and operational conventions for environment-resolved endpoints and secrets"
+        ],
+        "doesNotProvide": [
+          "ETP REST APIs for cache access or Redis administration",
+          "Application cache keys, TTL policies, or invalidation logic (consumer-owned)",
+          "Cache-aside orchestration or automatic cache wiring (future platform scope)",
+          "Connection brokering or cache proxy in the ETP runtime path"
+        ],
+        "applicationResponsibilities": [
+          "What data is cached and cache-aside behavior (HIT/MISS → backing store such as PostgreSQL)",
+          "Cache key design and namespace conventions",
+          "TTL and business cache policy",
+          "Invalidation strategy",
+          "Redis client library integration (e.g. Spring Data Redis / Lettuce)"
+        ],
+        "infrastructureResponsibilities": [
+          "Redis server runtime availability",
+          "Network reachability from consumer applications",
+          "Authentication credentials provisioning (deployment-specific)",
+          "Persistence policy for the deployment environment (optional in dev)"
+        ],
+        "currentConsumersInRepository": []
+      },
+      "interfaces": {
+        "apis": [],
+        "events": [],
+        "redis": {
+          "protocol": "Redis wire protocol via TCP",
+          "clients": [
+            "Lettuce (Spring Boot default with spring-boot-starter-data-redis)",
+            "Jedis and other Redis-compatible Java clients"
+          ],
+          "endpointPattern": "{host}:{port}",
+          "logicalDatabase": "Redis logical database index 0–15 (default 0); key-prefix isolation recommended for multi-tenant or multi-app sharing",
+          "integration": "Applications configure spring.data.redis.* (or equivalent) and connect directly — no ETP Redis middleware"
+        },
+        "documentation": {
+          "deploymentGuide": "capabilities/redis/ETP_REDIS_CAPABILITY_DEPLOYMENT.md",
+          "note": "Infrastructure capability — no OpenAPI service surface"
+        }
+      },
+      "security": {
+        "credentials": [
+          "Redis password (requirepass / ACL user password) supplied via environment variables or secret manager",
+          "Never store live credentials in the Capability Registry contract document or registration payload"
+        ],
+        "secretReferences": [
+          "Environment variables (example: ETP_REDIS_PASSWORD)",
+          "Production: secret manager / platform secret injection (deployment-specific)"
+        ],
+        "authentication": {
+          "localDevelopment": "requirepass enabled in capabilities/redis/docker-compose.yml",
+          "acls": "Redis ACLs supported by Redis 7; not configured in repository defaults — deployment responsibility for non-dev"
+        },
+        "networkAccess": [
+          "Local development: Redis port published via Docker Compose (default host port 56379)",
+          "Non-dev: restrict Redis port to application network; not configured in repository defaults"
+        ],
+        "applicationIsolation": [
+          "Recommended: per-application key prefix or namespace (e.g. uam:, iam:)",
+          "Optional: separate logical database index per application on shared Redis",
+          "Strong isolation: dedicated Redis instance or cluster per environment/application (deployment-specific)"
+        ],
+        "tlsSsl": {
+          "status": "NOT_CONFIGURED_IN_REPOSITORY_DEFAULTS",
+          "detail": "Local compose uses plain TCP. TLS is a deployment responsibility for managed Redis (ElastiCache, Azure Cache for Redis) in non-dev environments."
+        },
+        "limitations": [
+          "Single shared Redis password in local compose example",
+          "No TLS in local Docker defaults",
+          "No Redis ACL users defined in repository compose — password-only auth for v1.0.0 local dev"
+        ],
+        "futureHardening": [
+          "Redis ACL users with least-privilege per application",
+          "TLS/mTLS for all non-dev environments",
+          "Private network-only endpoints with no public port exposure",
+          "Secret rotation automation"
+        ]
+      },
+      "deployment": {
+        "redisVersion": "7.4",
+        "dockerImage": "redis:7.4-alpine",
+        "versionRationale": "Redis 7.4 is the current stable Redis 7 line with wide Docker availability and compatibility with Spring Data Redis / Lettuce. No prior Redis version existed in the ETP repository.",
+        "implementationModel": "Infrastructure container — not an ETP Spring Boot artifact",
+        "localDockerReference": {
+          "composeFile": "capabilities/redis/docker-compose.yml",
+          "service": "redis",
+          "container": "etp-redis",
+          "defaultHostPort": 56379,
+          "containerPort": 6379,
+          "healthcheck": "redis-cli PING with authentication",
+          "persistence": "Named volume etp-redis-data (default Redis RDB snapshots to /data)"
+        },
+        "environmentSpecific": [
+          "Docker Compose (local development — implemented in capabilities/redis/)",
+          "Kubernetes Redis operator or Helm chart (deployment-specific — not defined in repository)",
+          "AWS ElastiCache for Redis (deployment target — not implemented in repository)",
+          "Azure Cache for Redis (deployment target — not implemented in repository)"
+        ],
+        "endpoint": "Host and port from deployment environment",
+        "logicalDatabase": "Default 0; consumer may set spring.data.redis.database",
+        "credentialsConfiguration": "ETP_REDIS_PASSWORD (compose) or spring.data.redis.password (application)"
+      },
+      "nfr": {
+        "connectionReliability": "Consumer applications should treat Redis as optional for cache-aside (degrade to backing store on failure) or require connectivity before readiness — consumer policy",
+        "healthReadiness": "Container health via redis-cli PING (local compose); consumer readiness via Redis connectivity check in application Actuator health contributor",
+        "connectionPool": "Lettuce connection pooling via Spring Boot defaults when using spring-boot-starter-data-redis; tunable via spring.data.redis.lettuce.pool.*",
+        "operationalRequirements": [
+          "Start Redis before consumers that require cache connectivity at startup",
+          "No numeric latency or availability SLOs defined in repository for v1.0.0"
+        ]
+      },
+      "operations": {
+        "startup": [
+          "Provision or start Redis instance",
+          "Configure authentication (password or ACL)",
+          "Start consumer application with Redis client configuration"
+        ],
+        "readiness": [
+          "Redis: redis-cli PING healthcheck in local Docker Compose",
+          "Consumers: application-level Redis health contributor (e.g. Spring Boot Actuator redis health when configured)"
+        ],
+        "connectivity": "Verified by consumer Redis client, not by a dedicated ETP Redis service",
+        "persistence": {
+          "localDevelopment": "Named Docker volume with default Redis persistence; acceptable for dev cache warm-up",
+          "productionGuidance": "Deployment-specific — ElastiCache/Azure policies or explicit no-persistence for pure cache tiers"
+        },
+        "environmentConfiguration": "Per-service environment variables (ETP_REDIS_*) — see configuration section"
+      },
+      "compatibility": {
+        "redisVersion": "7.4",
+        "clientConsumers": [
+          "Spring Boot services with spring-boot-starter-data-redis and Lettuce",
+          "Any Redis-compatible client targeting Redis 7 wire protocol"
+        ],
+        "expectations": [
+          "Consumers use Redis commands supported by Redis 7",
+          "Cache-aside pattern: application handles HIT/MISS and backing store (e.g. PostgreSQL) — not ETP Redis capability",
+          "redis:7.4-alpine matches capabilities/redis/docker-compose.yml"
+        ],
+        "notIncludedInV1_0_0": [
+          "Redis Cluster or Sentinel automation in repository",
+          "Central ETP cache provisioning API",
+          "Redis REST proxy"
+        ]
+      },
+      "configuration": {
+        "applicationDefinition": {
+          "description": "Composition-time selection of etp.redis capability version; required vs optional; logical usage intent (cache tier) — no plaintext secrets",
+          "examples": [
+            "capability: etp.redis, version: 1.0.0, required: false for cache-aside with PostgreSQL fallback"
+          ]
+        },
+        "environmentConfiguration": {
+          "description": "Deployment-time resolution of host, port, TLS, secret references — application does not hardcode Docker vs ElastiCache vs Azure"
+        },
+        "applicationImplementation": {
+          "description": "Runtime Spring Boot or client configuration injected from environment"
+        },
+        "parameters": [
+          {
+            "name": "Redis host / endpoint",
+            "examples": [
+              "ETP_REDIS_HOST=localhost",
+              "spring.data.redis.host"
+            ],
+            "required": true
+          },
+          {
+            "name": "Redis port",
+            "examples": [
+              "ETP_REDIS_PORT=56379",
+              "spring.data.redis.port"
+            ],
+            "default": "56379 in local compose mapping",
+            "required": true
+          },
+          {
+            "name": "logical database index",
+            "description": "spring.data.redis.database (0–15)",
+            "default": "0",
+            "required": false
+          },
+          {
+            "name": "password / secret reference",
+            "examples": [
+              "ETP_REDIS_PASSWORD",
+              "spring.data.redis.password"
+            ],
+            "secret": true,
+            "required": true
+          },
+          {
+            "name": "TLS",
+            "description": "spring.data.redis.ssl.enabled when deployment provides TLS endpoint",
+            "required": false,
+            "default": "false in local dev"
+          },
+          {
+            "name": "connection pool / timeouts",
+            "description": "spring.data.redis.lettuce.pool.*, spring.data.redis.timeout",
+            "required": false
+          },
+          {
+            "name": "key prefix / namespace",
+            "description": "Consumer-defined cache key convention — not ETP capability configuration",
+            "scope": "application implementation"
+          }
+        ],
+        "reference": "capabilities/redis/ETP_REDIS_CAPABILITY_DEPLOYMENT.md"
+      },
+      "dependencies": {
+        "capabilities": [],
+        "external": [],
+        "runtime": [
+          {
+            "name": "Redis",
+            "version": "7.4",
+            "role": "In-memory cache server software"
+          },
+          {
+            "name": "Docker",
+            "version": "optional",
+            "role": "Local development provisioning (redis:7.4-alpine image)"
+          }
+        ],
+        "note": "Redis is infrastructure. Registry dependencies[] is empty. Consumers connect via Redis client directly. Backing stores (e.g. etp.postgresql) are separate consumer dependencies, not registry dependencies of etp.redis."
+      }
+    }
+  },
+  "implementation": {
+    "code": "redis",
+    "name": "ETP Redis",
+    "technology": "Redis",
+    "technologyVersion": "7.4"
+  },
+  "dependencies": []
+}

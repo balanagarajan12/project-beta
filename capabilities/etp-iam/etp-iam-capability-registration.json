@@ -1,0 +1,354 @@
+{
+  "code": "etp.iam",
+  "name": "ETP IAM",
+  "description": "Reusable ETP capability providing human and service authentication (Keycloak-backed) and JWT-backed authorization checks against IAM PostgreSQL RBAC metadata. Independent Spring Boot service; not a business application.",
+  "category": "SECURITY",
+  "version": {
+    "version": "1.0.0",
+    "description": "Initial capability version documenting Phase 1 human login, client_credentials service tokens, and authorization checks. Excludes PKCE, refresh, logout, and admin APIs."
+  },
+  "contract": {
+    "contractType": "COMPOSITE",
+    "contractVersion": "1.0",
+    "contractFormat": "JSON",
+    "location": "/v3/api-docs",
+    "document": {
+      "functional": {
+        "capabilities": [
+          "HUMAN_AUTHENTICATION",
+          "SERVICE_AUTHENTICATION",
+          "AUTHORIZATION"
+        ],
+        "humanAuthentication": {
+          "summary": "Broker username/password to Keycloak via server-side confidential client (Direct Access Grant). Passwords are not stored in IAM.",
+          "api": "POST /api/v1/auth/login",
+          "caller": "ETP Core UI and other human-facing consumers"
+        },
+        "serviceAuthentication": {
+          "summary": "Issue OAuth2 access tokens using client_credentials grant only.",
+          "api": "POST /api/v1/auth/token",
+          "caller": "Backend services and system integrations"
+        },
+        "authorization": {
+          "summary": "Evaluate whether a Bearer JWT principal is authorized for an application permission using IAM PostgreSQL RBAC metadata (principal, groups, roles, role_application_permissions).",
+          "api": "POST /api/v1/authorization/check",
+          "optionalTenantScope": "When tenant is provided on the request, group_tenant_assignments are enforced."
+        },
+        "outOfScope": [
+          "OIDC browser redirect / PKCE",
+          "Token refresh",
+          "Logout",
+          "GET /auth/me",
+          "IAM administration or write APIs",
+          "Automatic user provisioning",
+          "Keycloak Admin API automation"
+        ]
+      },
+      "interfaces": {
+        "apis": [
+          {
+            "name": "Human login",
+            "method": "POST",
+            "path": "/api/v1/auth/login",
+            "authentication": "none",
+            "requestContentType": "application/json",
+            "requestBody": {
+              "username": "string (required)",
+              "password": "string (required)"
+            },
+            "response": {
+              "accessToken": "string",
+              "expiresAt": "instant",
+              "user": {
+                "id": "string",
+                "username": "string",
+                "displayName": "string",
+                "email": "string",
+                "roles": "array of strings (Keycloak realm roles from token)"
+              }
+            },
+            "errors": [
+              { "status": 400, "description": "Validation failure" },
+              { "status": 401, "description": "Invalid username or password" },
+              { "status": 502, "description": "Keycloak or token service unavailable" }
+            ]
+          },
+          {
+            "name": "Service token",
+            "method": "POST",
+            "path": "/api/v1/auth/token",
+            "authentication": "none",
+            "requestContentType": "application/json",
+            "requestBody": {
+              "client_id": "string (required)",
+              "client_secret": "string (required)",
+              "grant_type": "client_credentials (required)"
+            },
+            "response": "OAuth2 token fields (access_token, token_type, expires_in, etc.)",
+            "errors": [
+              { "status": 400, "description": "Validation failure or unsupported grant_type" },
+              { "status": 401, "description": "Invalid client credentials" },
+              { "status": 502, "description": "Keycloak token service unavailable" }
+            ]
+          },
+          {
+            "name": "Authorization check",
+            "method": "POST",
+            "path": "/api/v1/authorization/check",
+            "authentication": "Bearer JWT (Keycloak-issued)",
+            "requestContentType": "application/json",
+            "requestBody": {
+              "application": "string (required) — IAM application code or name",
+              "permission": "string (required) — IAM permission code or name",
+              "tenant": "string (optional) — tenant scope for group_tenant_assignments"
+            },
+            "response": {
+              "authorized": "boolean"
+            },
+            "errors": [
+              { "status": 400, "description": "Validation failure" },
+              { "status": 401, "description": "Missing or invalid Bearer JWT" },
+              { "status": 403, "description": "JWT valid but principal not authorized or inactive" }
+            ]
+          }
+        ],
+        "events": [],
+        "openApi": {
+          "documentPath": "/v3/api-docs",
+          "swaggerUiPath": "/swagger-ui/index.html",
+          "note": "Resolve OpenAPI location against the deployed IAM service base URL (default port 8081)."
+        }
+      },
+      "security": {
+        "authentication": [
+          "Access tokens are issued by Keycloak (OIDC/OAuth2).",
+          "IAM validates JWTs on protected routes via Spring Security OAuth2 Resource Server using issuer-uri.",
+          "POST /api/v1/auth/login and POST /api/v1/auth/token are public.",
+          "POST /api/v1/authorization/check requires Authorization: Bearer <accessToken>.",
+          "Human login uses a confidential Keycloak client; client secret is server-side in IAM only and must not be exposed to browsers.",
+          "Service authentication uses client_credentials; client_secret must be transmitted only over HTTPS in deployed environments.",
+          "Passwords are never persisted in IAM PostgreSQL or returned in API responses."
+        ],
+        "authorization": [
+          "Authorization checks require a valid JWT with iss and sub matching an ACTIVE principals row in etp_iam.",
+          "RBAC chain: principal → group → role → role_application_permissions → application + permission.",
+          "Keycloak realm roles returned on login are not used for /authorization/check.",
+          "Optional tenant parameter gates access via group_tenant_assignments when provided."
+        ],
+        "issuerValidation": {
+          "property": "spring.security.oauth2.resourceserver.jwt.issuer-uri",
+          "environmentVariable": "ETP_IAM_KEYCLOAK_ISSUER_URI",
+          "example": "http://localhost:8180/realms/etp"
+        }
+      },
+      "deployment": {
+        "requirements": [
+          "Java 21 runtime",
+          "Spring Boot 4.1.0 application (etp-iam artifact)",
+          "Default HTTP port 8081 (ETP_IAM_SERVER_PORT)",
+          "PostgreSQL database etp_iam for authorization metadata",
+          "Keycloak realm with OIDC token endpoint and configured login/service clients",
+          "Environment-driven configuration; no secrets baked into the container image"
+        ],
+        "artifact": {
+          "implementationCode": "etp-iam",
+          "packaging": "Spring Boot executable JAR",
+          "docker": "Dockerfile available (eclipse-temurin:21-jre-alpine)"
+        },
+        "externalInfrastructure": [
+          {
+            "component": "PostgreSQL",
+            "version": "17 recommended",
+            "purpose": "IAM authorization metadata database (etp_iam)"
+          },
+          {
+            "component": "Keycloak",
+            "purpose": "Authentication and JWT issuance",
+            "realm": "etp (configurable via ETP_IAM_KEYCLOAK_REALM)",
+            "tokenEndpoint": "{ETP_IAM_KEYCLOAK_BASE_URL}/realms/{realm}/protocol/openid-connect/token"
+          }
+        ],
+        "healthEndpoints": [
+          "GET /actuator/health",
+          "GET /actuator/health/liveness",
+          "GET /actuator/health/readiness"
+        ]
+      },
+      "nfr": {
+        "availability": "Service startup requires reachable PostgreSQL and Keycloak for readiness probes. IAM returns HTTP 502 when Keycloak token endpoint is unavailable during login/token requests.",
+        "performance": "No published numeric SLOs in v1.0.0. Authorization checks are read-only database queries against IAM metadata.",
+        "scalability": "Stateless Spring Boot service; horizontal scaling requires shared PostgreSQL, Keycloak, and consistent issuer configuration.",
+        "security": "Secrets and credentials must be supplied via environment variables or a secret manager; HTTPS required for credential-bearing requests in deployed environments.",
+        "maintainability": "IAM schema applied via Flyway migrations on service startup (V1 schema, optional V2 dev RBAC seed)."
+      },
+      "operations": {
+        "startupOrder": [
+          "PostgreSQL (etp_iam database reachable)",
+          "Keycloak (realm, clients, issuer URL reachable from IAM)",
+          "ETP IAM service (Flyway migrations then application listen)"
+        ],
+        "health": {
+          "endpoint": "GET /actuator/health",
+          "access": "Public (permitAll)",
+          "showDetails": "never for unauthenticated callers"
+        },
+        "readiness": {
+          "endpoints": [
+            "GET /actuator/health/readiness",
+            "GET /actuator/health/liveness"
+          ],
+          "indicators": [
+            "databaseConnectivity — PostgreSQL connection validation",
+            "keycloakRealm — HTTP GET realm metadata endpoint",
+            "db — Spring Boot datasource health (when enabled)"
+          ]
+        },
+        "schemaMigration": {
+          "tool": "Flyway",
+          "location": "classpath:db/migration",
+          "migrations": [
+            "V1__iam_schema.sql — full IAM schema (13 tables)",
+            "V2__platform_dev_seed.sql — optional development RBAC seed for Core UI"
+          ],
+          "hibernate": "ddl-auto=validate after Flyway"
+        },
+        "configuration": "All deployment settings are environment-driven; see configuration section.",
+        "metrics": {},
+        "logging": {
+          "default": "Spring Boot default logging",
+          "sqlLogging": "Enabled only with spring.profiles.active=dev"
+        },
+        "tracing": {}
+      },
+      "compatibility": {
+        "capabilityVersion": "1.0.0",
+        "contractVersion": "1.0",
+        "platformVersions": [],
+        "implementedScope": [
+          "Human authentication via POST /api/v1/auth/login",
+          "Service authentication via POST /api/v1/auth/token (client_credentials only)",
+          "Authorization via POST /api/v1/authorization/check with Bearer JWT",
+          "OpenAPI documentation at /v3/api-docs"
+        ],
+        "notIncludedInThisVersion": [
+          "OIDC Authorization Code / PKCE",
+          "Refresh tokens",
+          "Logout endpoint",
+          "GET /auth/me",
+          "IAM administration APIs",
+          "Automatic principal provisioning on login"
+        ]
+      },
+      "configuration": {
+        "parameters": [
+          {
+            "name": "ETP_IAM_DB_URL",
+            "required": true,
+            "description": "JDBC URL for etp_iam PostgreSQL database"
+          },
+          {
+            "name": "ETP_IAM_DB_USERNAME",
+            "required": true,
+            "description": "Database username"
+          },
+          {
+            "name": "ETP_IAM_DB_PASSWORD",
+            "required": true,
+            "secret": true,
+            "description": "Database password — supply via environment or secret manager"
+          },
+          {
+            "name": "ETP_IAM_KEYCLOAK_ISSUER_URI",
+            "required": true,
+            "description": "JWT issuer URI (must match Keycloak realm)"
+          },
+          {
+            "name": "ETP_IAM_KEYCLOAK_BASE_URL",
+            "required": true,
+            "description": "Keycloak base URL"
+          },
+          {
+            "name": "ETP_IAM_KEYCLOAK_REALM",
+            "required": true,
+            "default": "etp",
+            "description": "Keycloak realm name"
+          },
+          {
+            "name": "ETP_IAM_KEYCLOAK_LOGIN_CLIENT_ID",
+            "required": true,
+            "description": "Confidential client ID for human login broker"
+          },
+          {
+            "name": "ETP_IAM_KEYCLOAK_LOGIN_CLIENT_SECRET",
+            "required": true,
+            "secret": true,
+            "description": "Login client secret — server-side only"
+          },
+          {
+            "name": "ETP_IAM_SERVER_PORT",
+            "required": false,
+            "default": "8081",
+            "description": "HTTP listen port"
+          },
+          {
+            "name": "ETP_IAM_CORS_ALLOWED_ORIGINS",
+            "required": false,
+            "description": "Comma-separated allowed origins for /api/v1/auth/** CORS"
+          }
+        ],
+        "reference": "capabilities/etp-iam/ETP_IAM_CAPABILITY_DEPLOYMENT.md"
+      },
+      "dependencies": {
+        "capabilities": [],
+        "external": [
+          {
+            "name": "PostgreSQL",
+            "version": "17 recommended",
+            "role": "Authorization metadata store (database etp_iam)",
+            "mandatory": true
+          },
+          {
+            "name": "Keycloak",
+            "role": "Identity provider; JWT issuance and credential validation",
+            "mandatory": true,
+            "requirements": [
+              "Realm configured with issuer matching ETP_IAM_KEYCLOAK_ISSUER_URI",
+              "Confidential login client for IAM broker (Direct Access Grants enabled for Phase 1 dev)",
+              "Service clients with client_credentials for /auth/token"
+            ]
+          }
+        ],
+        "runtime": [
+          {
+            "name": "Spring Boot",
+            "version": "4.1.0"
+          },
+          {
+            "name": "Spring Security OAuth2 Resource Server",
+            "role": "JWT validation on protected routes"
+          },
+          {
+            "name": "Spring Data JPA / Hibernate",
+            "role": "Read-only IAM metadata access"
+          },
+          {
+            "name": "SpringDoc OpenAPI",
+            "role": "API documentation"
+          },
+          {
+            "name": "PostgreSQL JDBC Driver",
+            "role": "Database connectivity"
+          }
+        ],
+        "note": "PostgreSQL and Keycloak are external infrastructure, not registered ETP capabilities. Registry dependency entries (capabilityVersionId) are empty for v1.0.0."
+      }
+    }
+  },
+  "implementation": {
+    "code": "etp-iam",
+    "name": "ETP IAM Service",
+    "technology": "Spring Boot",
+    "technologyVersion": "4.1.0"
+  },
+  "dependencies": []
+}

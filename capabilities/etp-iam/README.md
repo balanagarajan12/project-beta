@@ -3,7 +3,14 @@
 **Capability code:** `etp.iam`  
 **Implementation code:** `etp-iam`
 
-ETP IAM is a **reusable ETP capability** that provides authentication and authorization platform services. It is **not** a business application.
+| ETP Capability Status | |
+|-----------------------|---|
+| Registry | Registered and **ACTIVE** |
+| Capability | `etp.iam` v**1.0.0** — **ACTIVE** |
+| Capability ID | `d8c29697-1a31-4318-bcd7-665e684915e9` |
+| Version ID | `e8f1af6c-0d53-4fc3-bc94-5e2aea3781d3` |
+
+ETP IAM is a **registered, active ETP capability** that provides authentication and authorization platform services. It is **not** a business application.
 
 Consumers (for example ETP Core UI, business applications, ETP Customer UI) integrate with ETP IAM through its APIs and OAuth2/JWT contracts — they do not embed IAM implementation logic.
 
@@ -266,14 +273,16 @@ docker compose --env-file .env up -d
 
 ### 3. Apply database schema
 
-Apply `schema_updated.sql` to the `etp_iam` database (one-time or when schema changes):
+Flyway migrations run automatically when the IAM service starts against an empty `etp_iam` database:
 
-```bash
-# Example using psql against the Docker Postgres host port
-psql -h localhost -p 55432 -U etp_admin -d etp_iam -f schema_updated.sql
-```
+- `V1__iam_schema.sql` — full schema
+- `V2__platform_dev_seed.sql` — optional development RBAC seed
 
-There is no Flyway migration in this step — schema is applied manually from `schema_updated.sql`.
+For manual reference, see `schema_updated.sql` (same content as V1).
+
+Alternatively apply `schema_updated.sql` once with `psql` if you are not using service-managed Flyway (not recommended for new deployments).
+
+See [ETP_IAM_CAPABILITY_DEPLOYMENT.md](ETP_IAM_CAPABILITY_DEPLOYMENT.md) for full database and seed documentation.
 
 ### 4. Configure Keycloak
 
@@ -308,13 +317,15 @@ Service listens on `http://localhost:8081` by default.
 - OIDC Authorization Code + PKCE browser flow **not implemented** (Phase 2+)
 - No `/auth/logout`, `/auth/me`, `/auth/refresh` endpoints
 - No token refresh in Phase 1
-- No Flyway migrations (manual `schema_updated.sql`)
-- No health/actuator endpoint yet
+- Flyway manages schema; `schema_updated.sql` is a reference copy
+- `/actuator/health` with database and Keycloak readiness indicators
 - Keycloak realm/clients are not auto-provisioned from this repo
 - Principals must exist in IAM DB and match Keycloak JWT issuer/subject for authorization checks
 - Direct Access Grant on IAM server is a Phase 1 development choice — not the production SSO target architecture
 
 ## Related documentation
 
+- [ETP IAM Capability Readiness](ETP_IAM_CAPABILITY_READINESS.md) — onboarding record; `etp.iam` v1.0.0 **ACTIVE**
+- [ETP IAM Capability Deployment](ETP_IAM_CAPABILITY_DEPLOYMENT.md) — service deployment and registry reference
 - [ETP Architecture](../../etp-platform-service/ARCHITECTURE.md)
 - [Capability Registry](../../etp-platform-service/docs/CAPABILITY_REGISTRY.md)

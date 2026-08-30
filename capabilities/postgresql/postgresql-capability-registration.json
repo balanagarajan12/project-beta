@@ -1,0 +1,248 @@
+{
+  "code": "etp.postgresql",
+  "name": "ETP PostgreSQL",
+  "description": "ETP infrastructure capability for PostgreSQL 17 relational database connectivity. Documents JDBC consumption, database-per-application isolation, deployment conventions, and operations. Not a runtime ETP service or SQL proxy.",
+  "category": "DATA",
+  "version": {
+    "version": "1.0.0",
+    "description": "Initial infrastructure capability documenting PostgreSQL 17, JDBC direct connectivity, Flyway-on-consumer pattern, and existing local Docker Compose references. Excludes REST APIs, automatic provisioning, and UAM implementation."
+  },
+  "contract": {
+    "contractType": "COMPOSITE",
+    "contractVersion": "1.0",
+    "contractFormat": "JSON",
+    "location": "capabilities/postgresql/ETP_POSTGRESQL_CAPABILITY_DEPLOYMENT.md",
+    "document": {
+      "functional": {
+        "capabilityType": "INFRASTRUCTURE",
+        "summary": "PostgreSQL 17 relational database infrastructure for ETP platform metadata, capability services, and application databases. Not a JVM runtime service or SQL proxy.",
+        "capabilities": [
+          "RELATIONAL_DATABASE_INFRASTRUCTURE",
+          "JDBC_CONNECTIVITY",
+          "APPLICATION_DATABASE_ISOLATION"
+        ],
+        "provides": [
+          "PostgreSQL 17 database server (Docker image postgres:17 in local development)",
+          "PostgreSQL wire protocol and JDBC connectivity for consumer applications",
+          "Database-per-service/application isolation pattern (separate database names; separate containers in current local dev)"
+        ],
+        "doesNotProvide": [
+          "ETP REST APIs for SQL or database administration",
+          "Application schema design or Flyway migrations (consumer-owned)",
+          "Automatic application database provisioning (future platform scope)",
+          "Connection brokering or query proxy in the ETP runtime path"
+        ],
+        "currentConsumersInRepository": [
+          {
+            "service": "etp-platform-service",
+            "database": "etp_platform",
+            "purpose": "Platform metadata (capability catalog, customers, applications, audit)"
+          },
+          {
+            "service": "etp-iam",
+            "database": "etp_iam",
+            "purpose": "IAM authorization metadata"
+          }
+        ]
+      },
+      "interfaces": {
+        "apis": [],
+        "events": [],
+        "jdbc": {
+          "protocol": "PostgreSQL wire protocol via JDBC",
+          "driver": "org.postgresql.Driver (PostgreSQL JDBC driver via Spring Boot dependency management)",
+          "urlPattern": "jdbc:postgresql://{host}:{port}/{database}",
+          "timezoneOption": "Consumers set session timezone UTC (e.g. Hikari options or JDBC URL options=-c TimeZone=UTC)",
+          "integration": "Applications configure Spring Boot spring.datasource.* and connect directly — no ETP PostgreSQL middleware"
+        },
+        "documentation": {
+          "deploymentGuide": "capabilities/postgresql/ETP_POSTGRESQL_CAPABILITY_DEPLOYMENT.md",
+          "note": "Infrastructure capability — no OpenAPI service surface"
+        }
+      },
+      "security": {
+        "credentials": [
+          "Database username and password supplied via environment variables or secret manager",
+          "Never store live credentials in the Capability Registry contract document or registration payload"
+        ],
+        "secretReferences": [
+          "Environment variables (examples: ETP_DB_PASSWORD, ETP_IAM_DB_PASSWORD)",
+          "Production: secret manager / platform secret injection (deployment-specific)"
+        ],
+        "networkAccess": [
+          "Local development: PostgreSQL ports published via Docker Compose (examples: 5434 platform, 55432 IAM)",
+          "Non-dev: restrict database port exposure to application network; not configured in repository defaults"
+        ],
+        "applicationIsolation": [
+          "Dedicated database per service/application (etp_platform, etp_iam — not shared)",
+          "Current local dev uses separate PostgreSQL containers for platform and IAM",
+          "Default schema: public (PostgreSQL default); isolation is at database level, not separate PostgreSQL schemas per app"
+        ],
+        "tlsSsl": {
+          "status": "NOT_CONFIGURED_IN_REPOSITORY_DEFAULTS",
+          "detail": "Current JDBC URLs use plain jdbc:postgresql:// without sslmode. TLS is a deployment responsibility for non-dev environments."
+        },
+        "limitations": [
+          "Single application database user per deployment in current examples (etp_admin)",
+          "No separate migration vs runtime DB user split in current Spring configuration",
+          "pgAdmin included in IAM docker-compose for dev convenience only — not part of capability runtime"
+        ]
+      },
+      "deployment": {
+        "postgresqlVersion": "17",
+        "dockerImage": "postgres:17",
+        "implementationModel": "Infrastructure container — not an ETP Spring Boot artifact",
+        "localDockerReferences": [
+          {
+            "composeFile": "etp-platform-service/docker-compose.yml",
+            "service": "etp-platform-postgres",
+            "defaultHostPort": 5434,
+            "database": "etp_platform",
+            "healthcheck": "pg_isready"
+          },
+          {
+            "composeFile": "capabilities/etp-iam/docker-compose.yml",
+            "service": "postgres",
+            "defaultHostPort": 55432,
+            "database": "etp_iam"
+          }
+        ],
+        "environmentSpecific": [
+          "Docker Compose (local development — implemented in repository)",
+          "Kubernetes, AWS RDS, Azure Database for PostgreSQL (deployment-specific — not defined in repository)"
+        ],
+        "databaseEndpoint": "Host and port from deployment environment (JDBC URL)",
+        "databaseName": "Per-consumer database name (e.g. etp_platform, etp_iam, future etp_uam)",
+        "schema": "public (default PostgreSQL schema unless consumer configures otherwise)",
+        "credentialsConfiguration": "POSTGRES_USER / POSTGRES_PASSWORD (container) or spring.datasource.username / spring.datasource.password (application)",
+        "persistentStorage": "Docker named volumes in local compose (etp_platform_pgdata, etp-postgres-data)"
+      },
+      "nfr": {
+        "connectionReliability": "Consumer applications require a reachable PostgreSQL instance before Flyway and Hibernate validate succeed on startup",
+        "healthReadiness": "Container health via pg_isready (platform compose); consumer readiness via JDBC connection.isValid in Spring Actuator health contributors",
+        "connectionPool": "HikariCP via Spring Boot defaults in current consumers — no custom pool sizing in repository configuration",
+        "operationalRequirements": [
+          "Start PostgreSQL before Flyway-enabled consumer services",
+          "No numeric latency or availability SLOs defined in repository for v1.0.0"
+        ]
+      },
+      "operations": {
+        "startup": [
+          "Provision or start PostgreSQL instance",
+          "Create database and application user (manual, compose env, or operator)",
+          "Start consumer application (Flyway migrations run on consumer startup)"
+        ],
+        "readiness": [
+          "PostgreSQL: pg_isready (Docker healthcheck on platform container)",
+          "Consumers: Spring Boot Actuator db health and custom DatabaseConnectivityHealthIndicator (platform-service, etp-iam)"
+        ],
+        "databaseConnectivity": "Verified by consumer JDBC pool, not by a dedicated ETP PostgreSQL service",
+        "migrations": {
+          "owner": "Consumer application",
+          "framework": "Flyway (Spring Boot integration in platform-service and etp-iam)",
+          "locations": "classpath:db/migration in each consumer module",
+          "postgresCapabilityRole": "Provides database server only — does not run application migrations"
+        },
+        "environmentConfiguration": "Per-service environment variables (ETP_DB_*, ETP_IAM_DB_*) — see configuration section"
+      },
+      "compatibility": {
+        "postgresqlVersion": "17",
+        "jdbcConsumers": [
+          "Spring Boot 4.1 services with spring-boot-starter-data-jpa",
+          "Hibernate ddl-auto=validate with Flyway-managed schema (current platform and IAM pattern)"
+        ],
+        "expectations": [
+          "Consumers must use PostgreSQL-compatible SQL for migrations",
+          "UTC timezone recommended for timestamps (configured in current consumers)",
+          "PostgreSQL 17 Docker image matches repository compose files"
+        ],
+        "notIncludedInV1_0_0": [
+          "PgBouncer connection pooler",
+          "High-availability replication automation",
+          "Central ETP database provisioning API"
+        ]
+      },
+      "configuration": {
+        "parameters": [
+          {
+            "name": "JDBC URL / endpoint",
+            "examples": [
+              "ETP_DB_URL=jdbc:postgresql://localhost:5434/etp_platform",
+              "ETP_IAM_DB_URL=jdbc:postgresql://localhost:55432/etp_iam"
+            ],
+            "required": true
+          },
+          {
+            "name": "database",
+            "description": "Database name in JDBC URL path",
+            "required": true
+          },
+          {
+            "name": "schema",
+            "description": "Default public unless consumer configures Hibernate default_schema",
+            "default": "public"
+          },
+          {
+            "name": "username",
+            "examples": [
+              "ETP_DB_USERNAME",
+              "ETP_IAM_DB_USERNAME"
+            ],
+            "default": "etp_admin in local examples",
+            "required": true
+          },
+          {
+            "name": "password / secret reference",
+            "examples": [
+              "ETP_DB_PASSWORD",
+              "ETP_IAM_DB_PASSWORD"
+            ],
+            "secret": true,
+            "required": true
+          },
+          {
+            "name": "connection pool",
+            "description": "Spring Boot HikariCP defaults; optional spring.datasource.hikari.* per consumer",
+            "required": false
+          },
+          {
+            "name": "Docker POSTGRES_DB",
+            "description": "Initial database name when using official postgres image",
+            "scope": "container provisioning"
+          },
+          {
+            "name": "Docker POSTGRES_USER / POSTGRES_PASSWORD",
+            "description": "Container bootstrap credentials",
+            "scope": "container provisioning",
+            "secret": true
+          }
+        ],
+        "reference": "capabilities/postgresql/ETP_POSTGRESQL_CAPABILITY_DEPLOYMENT.md"
+      },
+      "dependencies": {
+        "capabilities": [],
+        "external": [],
+        "runtime": [
+          {
+            "name": "PostgreSQL",
+            "version": "17",
+            "role": "Database server software"
+          },
+          {
+            "name": "Docker",
+            "version": "optional",
+            "role": "Local development provisioning (postgres:17 image)"
+          }
+        ],
+        "note": "PostgreSQL is infrastructure. Registry dependencies[] is empty. Consumers connect via JDBC directly."
+      }
+    }
+  },
+  "implementation": {
+    "code": "postgresql",
+    "name": "ETP PostgreSQL",
+    "technology": "PostgreSQL",
+    "technologyVersion": "17"
+  },
+  "dependencies": []
+}

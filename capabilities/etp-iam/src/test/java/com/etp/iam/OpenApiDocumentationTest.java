@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.etp.iam.environment.DatabaseConnectivityHealthIndicator;
+import com.etp.iam.environment.KeycloakRealmHealthIndicator;
 import com.etp.iam.repository.GroupRoleMappingRepository;
 import com.etp.iam.repository.GroupTenantAssignmentRepository;
 import com.etp.iam.repository.PrincipalGroupMappingRepository;
@@ -48,6 +50,12 @@ class OpenApiDocumentationTest {
 
 	@MockitoBean
 	private GroupTenantAssignmentRepository groupTenantAssignmentRepository;
+
+	@MockitoBean
+	private DatabaseConnectivityHealthIndicator databaseConnectivityHealthIndicator;
+
+	@MockitoBean
+	private KeycloakRealmHealthIndicator keycloakRealmHealthIndicator;
 
 	@Test
 	void openApiDocumentsAuthenticationEndpoints() throws Exception {
