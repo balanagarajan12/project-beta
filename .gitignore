@@ -1,6 +1,9 @@
 # Build output
-target/
-**/target/
+/target/
+/capabilities/etp-migration/target/
+/capabilities/etp-iam/target/
+/capabilities/etp-platform-service/target/
+/etp-platform-service/target/
 
 # Environment / secrets
 .env
