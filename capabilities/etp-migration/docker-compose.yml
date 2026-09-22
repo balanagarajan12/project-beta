@@ -1,0 +1,22 @@
+services:
+  etp-migration-postgres:
+    image: postgres:17
+    container_name: etp-migration-postgres
+    environment:
+      POSTGRES_DB: ${ETP_MIGRATION_DB_NAME:-etp_migration}
+      POSTGRES_USER: ${ETP_MIGRATION_DB_USERNAME:-etp_admin}
+      POSTGRES_PASSWORD: ${ETP_MIGRATION_DB_PASSWORD:?ETP_MIGRATION_DB_PASSWORD is required}
+    ports:
+      - "${ETP_MIGRATION_DB_PORT:-55433}:5432"
+    volumes:
+      - etp-migration-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ETP_MIGRATION_DB_USERNAME:-etp_admin} -d ${ETP_MIGRATION_DB_NAME:-etp_migration}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  etp-migration-pgdata:
