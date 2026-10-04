@@ -321,48 +321,203 @@ Default batch size property: `etp.migration.batch-size` (default 10000); definit
 
 ---
 
-## 8. Source connector architecture
+## 8. Connector Architecture
 
-`MigrationSourceConnectorRegistry.require` picks the first bean where `supports(source)` is true. The only implementation is `CsvSourceConnector`: `supports` is true iff `CsvFileSourceConfiguration.from(configuration)` succeeds.
+Connectors isolate source, staging, target, and external-system integration concerns. The migration engine itself remains responsible for migration processing, including extraction, entity/relationship resolution, planning, mapping, validation, reconciliation, identity resolution, and promotion orchestration.
 
-If none match, the registry still calls `CsvFileSourceConfiguration.from` so invalid CSV/filesystem config surfaces as 400 (`InvalidSourceConfigurationException` / unsupported format/provider), else `UnsupportedSourceTypeException` (“No source connector is available for the configured source”).
+UAM is the first demonstrated business target implementation, not the definition of the migration engine.
 
-`CsvFileSourceConfiguration` fields: provider, optional bucket (stored, unused by filesystem), objectKey, fileFormat, delimiter (default `,`), hasHeader (default true), encoding (default UTF-8), quoteCharacter.
+The tree below is a responsibility map. It is not a claim that every class is a separate external-system connector.
 
-Inspect counts all data rows, SHA-256 of the file stream, header columns. `RecordCountBatchPlanner` splits `0 .. recordCount-1` into locators. `CsvRowRangeLocator` reads that range.
+```text
+ETP Migration Engine
+│
+├── Source Connectors
+│   ├── CsvSourceConnector
+│   └── MultiFileEntitySource
+│
+├── Staging / PostgreSQL Target
+│   ├── PostgreSqlStagingTarget
+│   ├── PostgreSqlTargetConnector
+│   └── PostgreSqlStagedEntityReader
+│
+├── Business Target / Promotion
+│   ├── UamStagingPromotion
+│   ├── UamPostgreSqlTargetConnector
+│   └── UamTargetConnector
+│
+└── Reconciliation
+    ├── MigrationTargetReconciliationProvider
+    └── PostgreSqlTargetReconciliationProvider
+```
 
----
+`MigrationSourceConnectorRegistry` selects the first source bean whose `supports` method accepts the source. The only source connector bean is `CsvSourceConnector`. `MigrationTargetConnectorRegistry` selects a target bean by `targetType()`. Implemented target types are `POSTGRESQL` (staging COPY) and `UAM` (REST). The demonstrated promotion path keeps definition `targetType` as `POSTGRESQL` and selects the canonical loader with `target.mode=UAM`.
+
+There is no Kafka connector, no S3 or other object-storage source, no database source connector, and no REST connector other than `UamTargetConnector`.
+
+### Source connectors
+
+#### CsvSourceConnector
+
+`CsvSourceConnector` reads CSV from the configured filesystem source and supplies `SourceRecord` values to inspection and to the generic extraction pipeline.
+
+- It accepts a source when `CsvFileSourceConfiguration` can parse the source JSON. It does not switch on the free-form `sourceType` label. `FILE_SYSTEM` is the documented value. A non-blank label such as `FILE` also works when the JSON is valid.
+- Source configuration includes `provider`, `fileFormat`, `objectKey`, `hasHeader`, and `delimiter`. Encoding defaults to UTF-8. `objectKey` is relative to `etp.migration.storage.root`.
+- Inspect counts data rows, records a SHA-256 of the file stream, and reads header columns. Flat batch planning then splits that count into row ranges.
+- It does not contain UAM-specific logic, does not allocate target identities, and does not write UAM tables.
+
+#### MultiFileEntitySource
+
+`MultiFileEntitySource` is the multi-file source capability. A migration does not have to be one physical CSV.
+
+`SourceLayoutConfiguration` reads optional `layoutType` from the source configuration. When `layoutType` is omitted, the source stays on the single-object CSV path. `SourceLayoutType` is `SINGLE_FILE` or `MULTI_FILE`. `SourceLayout` names the CSV bound to each configured entity. `MultiFileEntitySource` opens one of those files through `CsvSourceConnector` and extracts only the entity that file is mapped to. Relationship resolution stays outside this class.
+
+No other file format is implemented.
+
+### Staging / PostgreSQL target
+
+#### PostgreSqlStagingTarget
+
+`PostgreSqlStagingTarget` resolves the staging relation from configuration. It prefers `target.stagingSchema`, then `target.schema`, then the target datasource schema property, then `migration_staging`. The table name is `target.stagingTable`. Callers that read or write staging use that resolved name.
+
+The demonstrated local table is `migration_staging.uam_entity_stage`. The schema and table are configuration. They are not inherently UAM tables.
+
+One staging row is one logical entity payload. The entity JSON includes `entity`, `targetEntity`, `sourceIdentity`, `targetIdentity`, `sourceKey`, `targetKey`, `sourceRecordNumber`, `attributes`, and `relationships`. At staging time `targetIdentity` is null. Parent target identities in `relationships` are null until promotion.
+
+Staging is not the canonical UAM database. A row is not inserted into UAM because it was staged.
+
+#### PostgreSqlTargetConnector
+
+`PostgreSqlTargetConnector` is the PostgreSQL loading capability used by migration execution. Its target type is `POSTGRESQL` and it supports `LoadMode.BULK` only. It requires `etp.migration.target.postgresql.url`.
+
+For the demonstrated bulk flow it `COPY`-loads the generated payload into the staging table resolved by `PostgreSqlStagingTarget`. The staging columns are `migration_run_id`, `migration_batch_id`, `source_record_number`, `target_payload`, `idempotency_key`, and `loaded_at`. Flat loads delete that run and batch, then copy. Entity loads also delete earlier rows in the same run that share the entity idempotency key. See §27.
+
+```text
+PostgreSqlTargetConnector
+    ↓
+PostgreSQL staging
+```
+
+It is not the canonical UAM loader.
+
+```text
+PostgreSqlTargetConnector
+    ↓
+UAM canonical tables
+```
+
+That path does not exist.
+
+#### PostgreSqlStagedEntityReader
+
+Promotion does not reread the original CSV. `PostgreSqlStagedEntityReader` reads one staged batch from the resolved staging table and rebuilds the payload list. Null target identities stay null. The reader does not allocate identities and does not write business tables.
+
+```text
+Staging
+   ↓
+PostgreSqlStagedEntityReader
+   ↓
+Promotion
+```
+
+`StagedEntityView` and `StagedRelationshipView` are the reconciliation projection of the same staged payload: entity name, source identity, target identity, and parent links. `PostgreSqlTargetReconciliationProvider` builds those views. They are not a second stored copy of the migration, and they are not the type the reader returns to promotion.
+
+### Business target connectors
+
+Generic processing ends at staging. Loading a business application is a later, explicit promotion step.
+
+```text
+Source
+  ↓
+Staging
+  ↓
+Promotion
+  ↓
+Business Target
+```
+
+UAM is the reference business-target implementation for that last step.
+
+#### UamStagingPromotion
+
+`UamStagingPromotion` is the bridge from staged results to the UAM PostgreSQL loader. It is not part of entity extraction or mapping.
+
+When `target.mode` is `UAM`, it reads the staged batch, allocates target identities from `mapping.entities[].targetIdentity`, fills parent target identities, and calls `UamPostgreSqlTargetConnector`. Definition `targetType` remains `POSTGRESQL`. Staging rows are not updated.
+
+#### UamPostgreSqlTargetConnector
+
+`UamPostgreSqlTargetConnector` is the canonical UAM business-target implementation used by the demonstrated promotion path. Its connector type is `UAM_POSTGRESQL`. It is not selected as the execution staging target.
+
+It receives prepared canonical rows and inserts the configured UAM tables in one database transaction per promotion batch. `tables`, `loadOrder`, and `foreignKeys` choose the tables and parent columns. `loadTimestampColumns` fills a blank timestamp. `columnTypes` binds `numeric` and `timestamptz` values. A failure rolls that target transaction back. `ON CONFLICT (id) DO NOTHING` leaves an existing primary key in place, so a retry that reuses `migration_identity_allocation` does not duplicate it. An already `PROMOTED` promotion returns the stored result.
+
+The local demonstration loaded:
+
+| Table | Role |
+|-------|------|
+| `uam.location` | Business table |
+| `uam.geographic_address` | Business table |
+| `uam.geographic_location` | Business table |
+| `uam.location_geometry` | Business table |
+| `uam.geographic_sub_address` | Business table |
+
+The UAM schema is business-application-owned reference-target schema. The migration engine provides the migration capability and the target integration. Those tables are not part of the generic engine.
+
+This path was demonstrated locally. It is not a production UAM deployment and it does not call a UAM HTTP API. See §28.
+
+#### UamTargetConnector
+
+`UamTargetConnector` is the REST UAM integration retained in the codebase. Target type `UAM`, `LoadMode.SINGLE` only: `POST {baseUrl}/api/v1/{entity}` with the mapped JSON body. The base URL comes from `etp.migration.target.uam.*`. An optional client-credentials token may be sent. BATCH and BULK REST endpoints are not implemented.
+
+```text
+UamTargetConnector
+    → REST/HTTP UAM integration
+
+UamPostgreSqlTargetConnector
+    → canonical PostgreSQL UAM loading used by the demonstrated promotion path
+```
+
+Promotion does not use `UamTargetConnector`. Neither connector replaces the other.
+
+### Target reconciliation providers
+
+Reconciliation is separate from loading.
+
+```text
+MigrationTargetReconciliationProvider
+    ↓
+PostgreSqlTargetReconciliationProvider
+```
+
+`MigrationTargetReconciliationProvider` is the verification interface. `PostgreSqlTargetReconciliationProvider` counts and projects staged PostgreSQL rows for the run. The demonstrated end-to-end reconciliation verifies that staging result. It does not perform a canonical UAM checksum comparison.
+
+`PASSED_WITH_WARNINGS` remains the status when that checksum comparison is unavailable, including when entity and relationship staging checks passed. That warning is not a failed migration. See §11 and §26.
+
+`UamTargetReconciliationProvider` is the provider for REST target type `UAM`. It reports target-count verification as unavailable. It is not the provider used by the demonstrated PostgreSQL staging reconciliation.
+
+### Connector extensibility
+
+```text
+Generic Migration Engine
+        │
+        ├── Source connector
+        │
+        ├── PostgreSQL staging capability
+        │
+        ├── Promotion
+        │
+        └── Business target connector
+                    │
+                    ├── UAM
+                    └── Other business application
+```
+
+A new business application should normally be a target-integration and configuration concern. It should not require entity-specific changes to `EntityExtractor`, relationship resolution, `LogicalMigrationScopeBuilder`, `ExecutionPlanner`, `MappingEngine`, validation, or generic reconciliation.
+
+A genuinely new technology, protocol, or target behavior that the current connectors do not support can require a new connector. Configuration alone does not cover every future target. No such additional connector is implemented today.
 
 ## 9. Target connector architecture
 
-`MigrationTargetConnectorRegistry` keys connectors by `targetType()` uppercased.
-
-### PostgreSQL staging — **implemented**
-
-- `PostgreSqlTargetConnector` (`POSTGRESQL`), **BULK only**.
-- Requires `etp.migration.target.postgresql.url` (non-blank) to create the target `DataSource`.
-- Staging table columns expected: `migration_run_id`, `migration_batch_id`, `source_record_number`, `target_payload` JSONB, `idempotency_key`, `loaded_at`.
-- `COPY ... FROM STDIN` CSV; payload is JSON of mapped fields.
-- Flat keys: DELETE rows for that run and batch, then COPY, one JDBC transaction.
-- Entity keys (`entity-v1:`): after that batch delete, DELETE earlier rows in the same run that carry the entity keys in the current load, then COPY. Flat keys are not matched by that second delete. Operator uniqueness differs for the two layouts; see §27 and [DATABASE_MODEL.md](DATABASE_MODEL.md).
-
-### Canonical UAM load — **local demonstration, not a production deployment**
-
-When `target.mode` is `UAM` and `promotion.enabled` is true, promotion reads one staged batch, allocates target identities, fills parent target identities, and inserts configured canonical tables. Staging itself stays on `PostgreSqlTargetConnector`. The definition `targetType` remains `POSTGRESQL`.
-
-The loader uses `configuration.tables`, `loadOrder`, and `foreignKeys`. `loadTimestampColumns` fills a blank timestamp. `columnTypes` binds `numeric` and `timestamptz` values. One promotion batch is one database transaction. A failure rolls that batch back. `ON CONFLICT (id) DO NOTHING` leaves an existing primary key in place, so a retry does not duplicate it.
-
-This path was demonstrated locally against schema `uam`. It is not a production UAM deployment and it does not call a UAM HTTP API.
-
-### UAM REST — **HTTP placeholder only**
-
-- `UamTargetConnector` (`UAM`), **SINGLE** only: `POST {baseUrl}/api/v1/{entity}` with mapped JSON. Default path from `etp.migration.target.uam.*`. Optional client-credentials token.
-- Promotion does **not** use `UamTargetConnector`.
-- The older flat illustration table **`uam_migration_test.address`** is a PostgreSQL stand-in for the flat INSERT/UPSERT contract. It is not the canonical demonstration in §28.
-
-### Other connectors
-
-None. No S3/MinIO source. No Kafka source.
+Target-connector responsibilities are part of §8 Connector Architecture. Staging COPY stays on `PostgreSqlTargetConnector`. Canonical UAM loading stays on `UamPostgreSqlTargetConnector`. REST UAM stays on `UamTargetConnector`.
 
 ---
 

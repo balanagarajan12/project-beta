@@ -20,10 +20,6 @@ public final class PipelineTiming {
 	private final EnumMap<Stage, Long> nanos = new EnumMap<>(Stage.class);
 	private final Map<String, Long> counters = new LinkedHashMap<>();
 
-	public static PipelineTiming current() {
-		return CURRENT.get();
-	}
-
 	public static void bind(PipelineTiming timing) {
 		if (timing == null) {
 			CURRENT.remove();

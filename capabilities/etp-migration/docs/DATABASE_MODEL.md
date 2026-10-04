@@ -444,8 +444,8 @@ Two prefixes do not share a row. A reservation locks the row, adds the requested
 
 | Database | Port / location | Used by |
 |----------|-----------------|---------|
-| `etp_migration` | Host **55433** (etp-migration Compose) | Local application / demonstration |
+| `etp_migration` | Host **55433** (etp-migration Compose) | Local control plane |
+| `etp_migration` | Host **55432** | Local demonstration target: `migration_staging` and schema `uam`. Not a production UAM deployment |
 | `etp_migration_test` | Testcontainers `postgres:17`, ephemeral mapped port | `@SpringBootTest` / `@DataJpaTest` |
-| IAM `etp_iam` (and any leftover `etp_migration` on **55432**) | etp-iam Compose | **Not** the etp-migration test or demo default |
 
-Flyway V1–V3 run against whichever DataSource Spring is using. Tests do **not** isolate by truncating the demo database.
+Flyway V1–V5 run against whichever DataSource Spring is using. Tests do **not** isolate by truncating the demo database.

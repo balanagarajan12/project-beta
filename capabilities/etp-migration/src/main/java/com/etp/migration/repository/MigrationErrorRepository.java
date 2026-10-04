@@ -11,8 +11,6 @@ public interface MigrationErrorRepository extends JpaRepository<MigrationError, 
 
 	long countByMigrationRun_Id(UUID migrationRunId);
 
-	long countByMigrationBatch_Id(Long migrationBatchId);
-
 	@Query("select e from MigrationError e where e.migrationRun.id = :runId")
 	Stream<MigrationError> streamByMigrationRunId(@Param("runId") UUID runId);
 }

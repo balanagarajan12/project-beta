@@ -109,15 +109,15 @@ JSONB on definition: `target.mode`, `target.schema`, `stagingSchema`, `stagingTa
 
 ## 12. Source connectors
 
-Only `CsvSourceConnector`. Registry uses `supports()` → `CsvFileSourceConfiguration.from`. `sourceType` must be non-blank; `FILE` vs `FILE_SYSTEM` **labels** both work if JSON is valid FILE_SYSTEM+CSV.
+Only `CsvSourceConnector` is a source-connector bean. Registry uses `supports()` → `CsvFileSourceConfiguration.from`. `sourceType` must be non-blank; `FILE` vs `FILE_SYSTEM` **labels** both work if JSON is valid FILE_SYSTEM+CSV. `MultiFileEntitySource` opens configured per-entity CSVs through that connector. See [ARCHITECTURE.md](ARCHITECTURE.md) §8.
 
 ---
 
 ## 13. Target connectors
 
-- `POSTGRESQL`: BULK COPY staging. Definition `targetType` stays `POSTGRESQL` for the canonical demonstration.
-- Canonical promotion: `target.mode=UAM` loads configured tables after promotion-time identity allocation. Local schema `uam` on port 55432. Not a production UAM deployment.
-- `UAM` REST: SINGLE HTTP POST placeholder. Promotion does not use it.
+- `PostgreSqlTargetConnector` (`POSTGRESQL`): BULK COPY into staging. It does not load canonical UAM tables. Definition `targetType` stays `POSTGRESQL` for the canonical demonstration.
+- `UamPostgreSqlTargetConnector`: canonical PostgreSQL UAM load used by promotion when `target.mode=UAM`. Local schema `uam` on port 55432. Not a production UAM deployment.
+- `UamTargetConnector` (`UAM`): REST SINGLE HTTP POST. Retained. Promotion does not use it.
 - Older flat stand-in: `uam_migration_test.address`.
 
 ---
