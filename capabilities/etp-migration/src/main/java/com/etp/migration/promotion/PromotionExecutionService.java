@@ -2,6 +2,7 @@ package com.etp.migration.promotion;
 
 import com.etp.migration.connector.target.postgresql.PostgreSqlPromotionWriter;
 import com.etp.migration.connector.target.postgresql.PromotionTargetConfiguration;
+import com.etp.migration.connector.target.uam.UamStagingPromotion;
 import com.etp.migration.entity.MigrationBatchStatus;
 import com.etp.migration.entity.MigrationDefinition;
 import com.etp.migration.entity.MigrationPromotion;
@@ -51,6 +52,7 @@ public class PromotionExecutionService {
 	private final MigrationPromotionRepository promotionRepository;
 	private final MigrationPromotionBatchRepository promotionBatchRepository;
 	private final PostgreSqlPromotionWriter promotionWriter;
+	private final UamStagingPromotion uamStagingPromotion;
 
 	public PromotionExecutionService(
 			PlatformTransactionManager transactionManager,
@@ -59,7 +61,8 @@ public class PromotionExecutionService {
 			MigrationReconciliationRepository reconciliationRepository,
 			MigrationPromotionRepository promotionRepository,
 			MigrationPromotionBatchRepository promotionBatchRepository,
-			PostgreSqlPromotionWriter promotionWriter) {
+			PostgreSqlPromotionWriter promotionWriter,
+			UamStagingPromotion uamStagingPromotion) {
 		this.transactionTemplate = new TransactionTemplate(transactionManager);
 		this.migrationRunRepository = migrationRunRepository;
 		this.migrationBatchRepository = migrationBatchRepository;
@@ -67,6 +70,7 @@ public class PromotionExecutionService {
 		this.promotionRepository = promotionRepository;
 		this.promotionBatchRepository = promotionBatchRepository;
 		this.promotionWriter = promotionWriter;
+		this.uamStagingPromotion = uamStagingPromotion;
 	}
 
 	public ExecutePromotionResponse promote(UUID runId) {
@@ -88,7 +92,8 @@ public class PromotionExecutionService {
 				? Map.of()
 				: new HashMap<>(definition.getConfiguration());
 		requirePostgresqlTarget(definition.getTargetType());
-		PromotionTargetConfiguration promotionConfig = requireEnabledPromotion(configuration);
+		PromotionTargetConfiguration promotionConfig = PromotionConfigurationGate.requireEnabled(configuration);
+		Map<String, Object> mappingConfiguration = mappingConfiguration(definition);
 		requireExecutionComplete(run);
 		requireNoActiveBatches(runId);
 		requireReconciliation(runId);
@@ -132,17 +137,33 @@ public class PromotionExecutionService {
 					batch.getMigrationBatch().getId(),
 					nz(batch.getEligibleRecordCount())));
 		}
-		return new StartedPromotion(ready.getId(), runId, configuration, promotionConfig, eligible, false);
+		return new StartedPromotion(
+				ready.getId(), runId, configuration, mappingConfiguration, promotionConfig, eligible, false);
+	}
+
+	private static Map<String, Object> mappingConfiguration(MigrationDefinition definition) {
+		if (definition.getMapping() == null || definition.getMapping().getConfiguration() == null) {
+			return Map.of();
+		}
+		return new HashMap<>(definition.getMapping().getConfiguration());
 	}
 
 	private void promoteBatch(StartedPromotion started, EligibleBatch eligible) {
 		transactionTemplate.executeWithoutResult(status -> markBatchPromoting(eligible.promotionBatchId()));
 		try {
-			promotionWriter.promoteBatch(
-					started.configuration(),
-					started.promotionConfig(),
-					started.runId(),
-					eligible.migrationBatchId());
+			if (UamStagingPromotion.configured(started.configuration())) {
+				uamStagingPromotion.promoteBatch(
+						started.runId(),
+						eligible.migrationBatchId(),
+						started.configuration(),
+						started.mappingConfiguration());
+			} else {
+				promotionWriter.promoteBatch(
+						started.configuration(),
+						started.promotionConfig(),
+						started.runId(),
+						eligible.migrationBatchId());
+			}
 			transactionTemplate.executeWithoutResult(status -> markBatchPromoted(eligible));
 		} catch (RuntimeException ex) {
 			transactionTemplate.executeWithoutResult(status -> markBatchFailed(eligible, ex));
@@ -262,23 +283,6 @@ public class PromotionExecutionService {
 		}
 	}
 
-	private static PromotionTargetConfiguration requireEnabledPromotion(Map<String, Object> configuration) {
-		if (configuration == null || !configuration.containsKey("promotion")) {
-			throw new PromotionException(
-					HttpStatus.BAD_REQUEST.value(),
-					MigrationErrorCodes.PROMOTION_NOT_CONFIGURED,
-					"Promotion is not configured");
-		}
-		PromotionTargetConfiguration parsed = PromotionTargetConfiguration.parse(configuration);
-		if (!parsed.enabled()) {
-			throw new PromotionException(
-					HttpStatus.BAD_REQUEST.value(),
-					MigrationErrorCodes.PROMOTION_DISABLED,
-					"Promotion is disabled");
-		}
-		return parsed;
-	}
-
 	private static void requireExecutionComplete(MigrationRun run) {
 		if (!EXECUTION_COMPLETE.contains(run.getStatus())) {
 			throw conflict(
@@ -330,12 +334,13 @@ public class PromotionExecutionService {
 			UUID promotionId,
 			UUID runId,
 			Map<String, Object> configuration,
+			Map<String, Object> mappingConfiguration,
 			PromotionTargetConfiguration promotionConfig,
 			List<EligibleBatch> eligibleBatches,
 			boolean alreadyComplete) {
 
 		static StartedPromotion completed(UUID promotionId, UUID runId) {
-			return new StartedPromotion(promotionId, runId, Map.of(), null, List.of(), true);
+			return new StartedPromotion(promotionId, runId, Map.of(), Map.of(), null, List.of(), true);
 		}
 	}
 }

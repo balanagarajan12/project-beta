@@ -72,7 +72,9 @@ class MigrationMappingControllerTest {
 								}
 								"""))
 				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("name is required")));
+				.andExpect(jsonPath("$.error").value("Validation Failed"))
+				.andExpect(jsonPath("$.message").value("Request validation failed"))
+				.andExpect(jsonPath("$.errors[*].message", org.hamcrest.Matchers.hasItem("name is required")));
 	}
 
 	@Test
@@ -159,7 +161,9 @@ class MigrationMappingControllerTest {
 								}
 								"""))
 				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("targetField is required")));
+				.andExpect(jsonPath("$.error").value("Validation Failed"))
+				.andExpect(jsonPath("$.message").value("Request validation failed"))
+				.andExpect(jsonPath("$.errors[*].message", org.hamcrest.Matchers.hasItem("targetField is required")));
 	}
 
 	@Test
@@ -188,7 +192,10 @@ class MigrationMappingControllerTest {
 								}
 								"""))
 				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("sequenceNo")));
+				.andExpect(jsonPath("$.error").value("Validation Failed"))
+				.andExpect(jsonPath("$.message").value("Request validation failed"))
+				.andExpect(jsonPath("$.errors[*].message",
+						org.hamcrest.Matchers.hasItem(org.hamcrest.Matchers.containsString("sequenceNo"))));
 	}
 
 	@Test
@@ -241,6 +248,7 @@ class MigrationMappingControllerTest {
 				10L,
 				MAPPING_ID,
 				1,
+				null,
 				"addr1",
 				"streetName",
 				TransformationType.TRIM,

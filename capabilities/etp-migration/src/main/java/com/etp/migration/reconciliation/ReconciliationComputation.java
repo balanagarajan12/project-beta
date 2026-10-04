@@ -16,4 +16,17 @@ public record ReconciliationComputation(
 		long differenceCount,
 		Map<String, Object> details
 ) {
+	public ReconciliationComputation withStatus(ReconciliationStatus status) {
+		return new ReconciliationComputation(
+				type,
+				status,
+				sourceCount,
+				processedCount,
+				successCount,
+				rejectedCount,
+				duplicateCount,
+				failureCount,
+				differenceCount,
+				details);
+	}
 }

@@ -34,6 +34,9 @@ public record CsvFileSourceConfiguration(
 		}
 		String objectKey = text(configuration, "objectKey", null);
 		if (objectKey == null || objectKey.isBlank()) {
+			objectKey = text(configuration, "file", null);
+		}
+		if (objectKey == null || objectKey.isBlank()) {
 			throw new InvalidSourceConfigurationException("Source configuration requires objectKey");
 		}
 		ArtifactFileFormat fileFormat = enumValue(
@@ -51,7 +54,9 @@ public record CsvFileSourceConfiguration(
 			throw new com.etp.migration.connector.storage.UnsupportedStorageProviderException(provider);
 		}
 		char delimiter = firstChar(text(configuration, "delimiter", ","), "delimiter", ',');
-		boolean hasHeader = bool(configuration, "hasHeader", true);
+		boolean hasHeader = configuration.containsKey("hasHeader")
+				? bool(configuration, "hasHeader", true)
+				: bool(configuration, "header", true);
 		Charset encoding = charset(text(configuration, "encoding", "UTF-8"));
 		char quoteCharacter = firstChar(text(configuration, "quoteCharacter", "\""), "quoteCharacter", '"');
 		return new CsvFileSourceConfiguration(

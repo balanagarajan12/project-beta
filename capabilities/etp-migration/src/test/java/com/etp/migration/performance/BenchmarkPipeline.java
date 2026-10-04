@@ -328,7 +328,7 @@ public class BenchmarkPipeline {
 			TransformationType type,
 			boolean mandatory,
 			Map<String, Object> configuration) {
-		return new CreateMappingRuleRequest(sequence, source, target, type, null, null, configuration, mandatory, true);
+		return new CreateMappingRuleRequest(sequence, null, source, target, type, null, null, configuration, mandatory, true);
 	}
 
 	private static long nz(Long value) {

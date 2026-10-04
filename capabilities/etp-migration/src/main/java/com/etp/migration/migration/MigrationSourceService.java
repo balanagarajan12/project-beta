@@ -1,5 +1,6 @@
 package com.etp.migration.migration;
 
+import com.etp.migration.connector.source.csv.SourceLayoutConfiguration;
 import com.etp.migration.entity.MigrationDefinition;
 import com.etp.migration.entity.MigrationSource;
 import com.etp.migration.migration.dto.CreateMigrationSourceRequest;
@@ -31,6 +32,9 @@ public class MigrationSourceService {
 	public MigrationSourceResponse create(UUID migrationId, CreateMigrationSourceRequest request) {
 		MigrationDefinition definition = migrationDefinitionRepository.findById(migrationId)
 				.orElseThrow(() -> new MigrationDefinitionNotFoundException(migrationId));
+		SourceLayoutConfiguration.validateDeclared(
+				request.configuration(),
+				definition.getMapping() == null ? null : definition.getMapping().getConfiguration());
 
 		Instant now = Instant.now();
 		MigrationSource source = new MigrationSource();

@@ -2,6 +2,7 @@ package com.etp.migration.migration.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import java.time.Instant;
+import java.util.List;
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record ApiErrorResponse(
@@ -10,9 +11,14 @@ public record ApiErrorResponse(
 		String error,
 		String message,
 		String path,
-		String code
+		String code,
+		List<ApiFieldError> errors
 ) {
 	public ApiErrorResponse(Instant timestamp, int status, String error, String message, String path) {
-		this(timestamp, status, error, message, path, null);
+		this(timestamp, status, error, message, path, null, null);
+	}
+
+	public ApiErrorResponse(Instant timestamp, int status, String error, String message, String path, String code) {
+		this(timestamp, status, error, message, path, code, null);
 	}
 }

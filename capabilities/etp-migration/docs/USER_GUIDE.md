@@ -2,7 +2,7 @@
 
 Audience: migration/integration developers, operators, and local demo users.
 
-**Implementation status:** Commands below match the current HTTP APIs and local defaults. Do not treat the demo PostgreSQL table as real UAM.
+**Implementation status:** Commands below match the current HTTP APIs. The current local end-to-end demonstration is recorded in [ARCHITECTURE.md](ARCHITECTURE.md) §28. The flat `uam_migration_test.address` example later in this guide is an older illustration. Neither is a production UAM deployment.
 
 Related: [API_GUIDE.md](API_GUIDE.md), [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -12,8 +12,8 @@ Related: [API_GUIDE.md](API_GUIDE.md), [ARCHITECTURE.md](ARCHITECTURE.md).
 
 - JDK 21
 - Maven
-- PostgreSQL 17 reachable at `localhost:55433` (container `etp-migration-postgres` from `capabilities/etp-migration/docker-compose.yml`)
-- Database **`etp_migration`** (created by that compose service)
+- PostgreSQL 17 for the control plane at `localhost:55433` (container `etp-migration-postgres` from `capabilities/etp-migration/docker-compose.yml`), database **`etp_migration`**
+- For the local canonical demonstration, a second PostgreSQL database **`etp_migration`** at `localhost:55432` holding `migration_staging.uam_entity_stage` and schema `uam`. That second instance is a local arrangement, not a production UAM deployment.
 - Staging table created (Flyway does **not** create it)
 - Source CSV under `etp.migration.storage.root`
 - Optional: Keycloak on 8180 if you do **not** use Spring profile `dev`
@@ -28,7 +28,7 @@ From `capabilities/etp-migration`, Spring loads `optional:file:.env[.properties]
 ETP_MIGRATION_DB_URL=jdbc:postgresql://localhost:55433/etp_migration?options=-c%20TimeZone%3DUTC
 ETP_MIGRATION_DB_USERNAME=etp_admin
 ETP_MIGRATION_DB_PASSWORD=<password>
-ETP_MIGRATION_TARGET_POSTGRESQL_URL=jdbc:postgresql://localhost:55433/etp_migration?options=-c%20TimeZone%3DUTC
+ETP_MIGRATION_TARGET_POSTGRESQL_URL=jdbc:postgresql://localhost:55432/etp_migration?options=-c%20TimeZone%3DUTC
 ETP_MIGRATION_TARGET_POSTGRESQL_USERNAME=etp_admin
 ETP_MIGRATION_TARGET_POSTGRESQL_PASSWORD=<password>
 ETP_MIGRATION_TARGET_POSTGRESQL_SCHEMA=migration_staging
@@ -47,7 +47,7 @@ cd capabilities\etp-migration
 docker compose up -d
 ```
 
-Flyway V1+V2 apply on application start. IAM Postgres on **55432** is a different database and is not used by this capability’s local defaults.
+Flyway V1–V5 apply on application start. V4 and V5 are the control-plane identity tables. The local canonical demonstration uses port **55432** as the target database for staging and schema `uam`. That is a workstation arrangement, not the production UAM deployment.
 
 Create staging (identifiers must match definition `configuration.target`):
 
@@ -64,7 +64,9 @@ CREATE TABLE IF NOT EXISTS migration_staging.address_load (
 );
 ```
 
-For promotion, create the **business** table named in `configuration.promotion` (schema, columns, unique keys). The local demo used schema **`uam_migration_test`** table **`address`**. That schema is a **simulated business target**, not the UAM product.
+That unique key is for flat CSV staging. An `ENTITY_RELATIONSHIP` staging table should use `UNIQUE (migration_run_id, idempotency_key)` instead. The entity key is `entity-v1:` plus a SHA-256 of the run id, entity name, and source identity. Both tables are operator SQL. Flyway does not create them. See [DATABASE_MODEL.md](DATABASE_MODEL.md).
+
+Flat promotion writes the business table named in `configuration.promotion`. The older local illustration used schema **`uam_migration_test`** table **`address`**. Canonical promotion (`target.mode=UAM`) writes the tables named in `configuration.tables`. The completed local demonstration used schema **`uam`** on port 55432. That schema is a local stand-in, not the UAM product. See [ARCHITECTURE.md](ARCHITECTURE.md) §28.
 
 ---
 
@@ -87,8 +89,8 @@ Profile `dev` permits `/api/v1/migrations/**`, `/migration-configurations/**`, `
 
 ## 6. Swagger
 
-- UI: http://localhost:8082/swagger-ui/index.html  
-- OpenAPI: http://localhost:8082/v3/api-docs  
+- UI: http://localhost:8082/swagger-ui/index.html
+- OpenAPI: http://localhost:8082/v3/api-docs
 - Configured path prefix: `springdoc.swagger-ui.path=/swagger-ui`
 
 OpenAPI declares scheme **`bearer-jwt`** and a security requirement on operations. After **Authorize** with a Keycloak JWT, Execute sends `Authorization: Bearer <JWT>` (and generated curl includes that header). Health and `/v3/api-docs/**` remain public. No roles/scopes are defined in this module.
@@ -223,7 +225,7 @@ Execute and `POST .../runs` **require ACTIVE** (409 if DRAFT).
 
 ## 11. Executing a migration
 
-`POST /api/v1/migrations/{migrationId}/execute`  
+`POST /api/v1/migrations/{migrationId}/execute`
 Optional body `CreateMigrationRunRequest`: `idempotencyKey`, snapshots.
 
 Synchronous (same request thread): create QUEUED run → prepare (inspect + batches) → process every eligible batch → **201** `MigrationRunResponse` with Location `/api/v1/migration-runs/{runId}`. There is no scheduler, Kafka trigger, or `@Async` worker.
@@ -262,7 +264,7 @@ Read: `GET /api/v1/migration-runs/{runId}/reconciliation` (404 if never reconcil
 
 ## 14. Preparing promotion
 
-`POST /api/v1/migration-runs/{runId}/promotion/prepare`  
+`POST /api/v1/migration-runs/{runId}/promotion/prepare`
 Optional JSON `{ "requestedBy": "operator" }`.
 
 Requires PostgreSQL target, `promotion.enabled`, completed run, no active batches, existing reconciliation rows. Returns READY with eligible staging counts. Does not write the business table.
@@ -281,7 +283,7 @@ Read-only. 404 if no promotion exists (does **not** create one). 404 if run miss
 
 `POST /api/v1/migration-runs/{runId}/promote`
 
-Requires READY promotion. Writes INSERT/UPSERT into `promotion.schema.table` using parameterized SQL. Each eligible batch is independently transactional. A failed batch does not roll back already promoted batches (`PARTIALLY_PROMOTED`). UPSERT is retry-safe when `conflictKeys` represent identity; INSERT is not inherently idempotent. Idempotent HTTP result if promotion is already PROMOTED.
+Requires READY promotion. When `target.mode` is `UAM`, promotion allocates mapping-level target identities and loads the configured canonical tables in one transaction per eligible batch. A failure rolls that UAM transaction back. Identity allocations remain for a retry. An already `PROMOTED` promotion is returned without another load. Flat mode, used when canonical mode is not selected, writes INSERT/UPSERT into `promotion.schema.table`. A failed flat batch does not roll back batches already committed (`PARTIALLY_PROMOTED`).
 
 ---
 
@@ -325,22 +327,28 @@ Promotion `code` values include `MIGRATION_PROMOTION_*` constants in `MigrationE
 
 ## 20. Operational sequence
 
-1. Composite configuration (DRAFT)  
-2. Activate  
-3. Execute  
-4. Staging reconcile  
-5. Promotion prepare  
-6. GET promotion (optional)  
-7. Promote  
-8. Business-target reconcile  
+1. Composite configuration (DRAFT)
+2. Activate
+3. Execute
+4. Staging reconcile
+5. Promotion prepare
+6. GET promotion (optional)
+7. Promote
+8. Business-target reconcile
 
 ---
 
-## Demo flow (local illustration only)
+## Current local end-to-end demonstration
+
+Status: **COMPLETED**. Authoritative write-up: [ARCHITECTURE.md](ARCHITECTURE.md) §28.
+
+Definition `migrate_geographicAddress_test01` version **1.2** (`59fc4cc1-85cf-44bd-870b-dd56ae3ca1ae`) is ACTIVE. Run `f9e9fd4f-cc61-4d0f-8e71-e3333f09b431` (run number 2) completed with 515 logical entity records from 110 physical CSV rows. Promotion `2994bce6-6033-4b9a-94ba-f5b2c3e1a561` is `PROMOTED` with 515 records. Staging reconciliation is `PASSED_WITH_WARNINGS` because checksum comparison is unavailable. That warning is not a failed migration, and it checks staging rather than the UAM tables. Local UAM row counts are `location` 202, `geographic_address` 101, `geographic_location` 101, `location_geometry` 101, and `geographic_sub_address` 10.
+
+## Historical flat CSV illustration
 
 Repository CSV `demo/data/addresses.csv`: **8** source rows. **DEMO-004** has empty `address_line_1`. With mandatory TRIM on that field, expect **7** staged successes and **1** validation failure. With `batchSize` **3**, prepare creates **3** batches. Execute status: **`COMPLETED_WITH_ERRORS`**.
 
-Staging table: `migration_staging.address_load`.  
+Staging table: `migration_staging.address_load`.
 Business-target stand-in: `uam_migration_test.address` (**not** production UAM).
 
 Copy:

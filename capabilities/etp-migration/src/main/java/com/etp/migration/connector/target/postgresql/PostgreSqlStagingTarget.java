@@ -20,7 +20,12 @@ final class PostgreSqlStagingTarget {
 
 	static Resolved resolve(Map<String, Object> configuration, PostgreSqlTargetProperties properties) {
 		Map<String, Object> target = targetMap(configuration);
-		String schema = firstNonBlank(stringValue(target.get("schema")), properties.schema(), "migration_staging");
+		// stagingSchema selects the staging table when target.schema names a business schema.
+		String schema = firstNonBlank(
+				stringValue(target.get("stagingSchema")),
+				stringValue(target.get("schema")),
+				properties.schema(),
+				"migration_staging");
 		String table = firstNonBlank(stringValue(target.get("stagingTable")), null);
 		if (table == null) {
 			throw new TargetInfrastructureException(

@@ -73,7 +73,7 @@ public class MigrationDefinitionController {
 
 	@Operation(
 			summary = "Activate a migration definition",
-			description = "Transitions a structurally complete DRAFT definition to ACTIVE. Already ACTIVE definitions are returned unchanged. Does not execute, promote, or reconcile.")
+			description = "Transitions a structurally complete DRAFT definition to ACTIVE and marks other ACTIVE versions of the same name INACTIVE. Already ACTIVE definitions are returned unchanged. Does not execute, promote, or reconcile.")
 	@ApiResponses({
 			@ApiResponse(responseCode = "200", description = "Definition is ACTIVE"),
 			@ApiResponse(responseCode = "400", description = "Definition is incomplete or invalid"),

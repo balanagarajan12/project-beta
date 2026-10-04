@@ -9,6 +9,8 @@ import com.etp.migration.connector.target.TargetInfrastructureException;
 import com.etp.migration.connector.target.TargetLoadModeNotSupportedException;
 import com.etp.migration.connector.target.TargetLoadResult;
 import com.etp.migration.entity.LoadMode;
+import com.etp.migration.processing.EntityIdempotencyKey;
+import com.etp.migration.processing.FlatIdempotencyKey;
 import com.etp.migration.processing.MigrationErrorCodes;
 import com.etp.migration.processing.TargetRecord;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -72,6 +74,17 @@ class PostgreSqlTargetConnectorTest {
 					  UNIQUE (migration_run_id, migration_batch_id, source_record_number)
 					)
 					""");
+			connection.createStatement().execute("""
+					CREATE TABLE IF NOT EXISTS migration_staging.entity_identity_load (
+					  migration_run_id UUID NOT NULL,
+					  migration_batch_id BIGINT NOT NULL,
+					  source_record_number BIGINT NOT NULL,
+					  target_payload JSONB NOT NULL,
+					  idempotency_key VARCHAR(500),
+					  loaded_at TIMESTAMPTZ NOT NULL,
+					  UNIQUE (migration_run_id, idempotency_key)
+					)
+					""");
 		}
 	}
 
@@ -102,7 +115,7 @@ class PostgreSqlTargetConnectorTest {
 			try (ResultSet rs = statement.executeQuery()) {
 				assertThat(rs.next()).isTrue();
 				assertThat(rs.getLong("source_record_number")).isEqualTo(10001L);
-				assertThat(rs.getString("idempotency_key")).isEqualTo(runId + ":11:10001");
+				assertThat(rs.getString("idempotency_key")).isEqualTo(FlatIdempotencyKey.of(runId, 11L, 10001L));
 				JsonNode payload = objectMapper.readTree(rs.getString("target_payload"));
 				assertThat(payload.get("streetName").asText()).isEqualTo("123 Main");
 				assertThat(rs.next()).isFalse();
@@ -190,7 +203,29 @@ class PostgreSqlTargetConnectorTest {
 	}
 
 	private static LoadableTargetRecord record(UUID runId, long batchId, long number, Map<String, Object> fields) {
-		return new LoadableTargetRecord(number, new TargetRecord(fields), runId + ":" + batchId + ":" + number);
+		return new LoadableTargetRecord(number, new TargetRecord(fields), FlatIdempotencyKey.of(runId, batchId, number));
+	}
+
+	@Test
+	void entityIdentitiesSharingASourceRecordStayDistinctAcrossBatchRetry() throws Exception {
+		UUID runId = UUID.randomUUID();
+		String parentKey = EntityIdempotencyKey.of(runId, "EntityA", "A1");
+		String childKey = EntityIdempotencyKey.of(runId, "EntityB", "A1");
+		assertThat(parentKey).isNotEqualTo(childKey);
+		assertThat(parentKey).doesNotContain("A1");
+		LoadableTargetRecord parent = new LoadableTargetRecord(105L, new TargetRecord(Map.of("entity", "EntityA")), parentKey);
+		LoadableTargetRecord child = new LoadableTargetRecord(105L, new TargetRecord(Map.of("entity", "EntityB")), childKey);
+		connector.load(context(runId, 1L, LoadMode.BULK, "entity_identity_load"), List.of(parent, child));
+		assertThat(countByKey(runId, parentKey, "entity_identity_load")).isEqualTo(1);
+		assertThat(countByKey(runId, childKey, "entity_identity_load")).isEqualTo(1);
+
+		connector.load(context(runId, 7L, LoadMode.BULK, "entity_identity_load"), List.of(parent));
+		assertThat(countByKey(runId, parentKey, "entity_identity_load")).isEqualTo(1);
+		assertThat(countByKey(runId, childKey, "entity_identity_load")).isEqualTo(1);
+		assertThat(countRows(runId, "entity_identity_load")).isEqualTo(2);
+
+		connector.load(context(runId, 1L, LoadMode.BULK, "entity_identity_load"), List.of(parent, child));
+		assertThat(countRows(runId, "entity_identity_load")).isEqualTo(2);
 	}
 
 	private int countRows(UUID runId, long batchId, String table) throws Exception {
@@ -199,6 +234,32 @@ class PostgreSqlTargetConnectorTest {
 						"SELECT COUNT(*) FROM migration_staging." + table + " WHERE migration_run_id = ? AND migration_batch_id = ?")) {
 			statement.setObject(1, runId);
 			statement.setLong(2, batchId);
+			try (ResultSet rs = statement.executeQuery()) {
+				rs.next();
+				return rs.getInt(1);
+			}
+		}
+	}
+
+	private int countRows(UUID runId, String table) throws Exception {
+		try (Connection connection = targetDataSource.getConnection();
+				PreparedStatement statement = connection.prepareStatement(
+						"SELECT COUNT(*) FROM migration_staging." + table + " WHERE migration_run_id = ?")) {
+			statement.setObject(1, runId);
+			try (ResultSet rs = statement.executeQuery()) {
+				rs.next();
+				return rs.getInt(1);
+			}
+		}
+	}
+
+	private int countByKey(UUID runId, String key, String table) throws Exception {
+		try (Connection connection = targetDataSource.getConnection();
+				PreparedStatement statement = connection.prepareStatement(
+						"SELECT COUNT(*) FROM migration_staging." + table
+								+ " WHERE migration_run_id = ? AND idempotency_key = ?")) {
+			statement.setObject(1, runId);
+			statement.setString(2, key);
 			try (ResultSet rs = statement.executeQuery()) {
 				rs.next();
 				return rs.getInt(1);

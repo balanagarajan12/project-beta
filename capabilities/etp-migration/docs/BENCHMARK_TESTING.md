@@ -1,16 +1,90 @@
-# ETP Migration — Benchmark testing (Phase 12)
+# ETP Migration — Benchmark testing
 
-**Implementation status:** Local measurement tooling and a recorded workstation run. **This is not a production-scale capacity claim.**
+**Implementation status:** Local measurement tooling. **This is not a production-scale capacity claim.**
 
-**30 million records are NOT claimed as supported.** 10M and 30M end-to-end runs were **not executed**.
+Authoritative Phase 10 result: [PHASE_10_PERFORMANCE_RESULTS.md](performance/PHASE_10_PERFORMANCE_RESULTS.md). Architecture summary: [ARCHITECTURE.md](ARCHITECTURE.md) §27.
 
-Authoritative measured write-up: repository `docs/performance/PHASE_12_PERFORMANCE_RESULTS.md` (2026-09-20). This file summarizes that document and the classes still in `com.etp.migration.performance`.
+The 2026-09-20 flat end-to-end figure of about **9,650 records/sec** is a **historical** measurement of an earlier flat pipeline. It is not the Phase 10 result.
 
-Related: [ARCHITECTURE.md](ARCHITECTURE.md).
+**10M, 30M, and 50M were not demonstrated.**
 
 ---
 
-## What Phase 12 is
+## Phase 10 — local CSV baseline
+
+One worker. Batch size 10,000. Generated data, not a production dataset.
+
+| Category | What the clock includes | What it does not include |
+|----------|-------------------------|--------------------------|
+| Flat source read | Reading the generated CSV | Mapping, staging, reconciliation |
+| Entity prepare | Read, extract, relationship resolution, scope build, execution planning | PostgreSQL staging, HTTP reconcile |
+| Entity process-batch | One source reread per batch, mapping, validation, recording target | PostgreSQL staging. Run only at 10,000 and 100,000 leaves |
+| Reconciliation fold | In-memory aggregation of planned work items | `POST /reconcile` |
+| PostgreSQL staging copy | COPY of 10,000 rows into Testcontainers PostgreSQL 17 | Reconciliation |
+
+Stage timings inside prepare overlap. Relationship-resolution time includes source reading and extraction. Planning time includes walking scopes. Do not add stage timings and call the sum elapsed time.
+
+Observed heap is one used-heap sample, not an exact peak and not process RSS. On the 1,011,000-entity prepare runs that sample was about 1.7–1.9 GB of total used heap. The scope-index estimate at that size is about 198 MB. Those are not the same number.
+
+Entity files use opaque names EntityA, EntityB, and EntityC. Roots = leaves/1000, middles = leaves/100, leaves = the requested leaf count, with at least one root. `--records` for `single` and `multi` is the leaf count.
+
+1,011,000 entities were successfully measured locally during the prepare benchmark. That is a local prepare baseline of about 1.01 million generated entities. It is not a capacity claim.
+
+| Scenario | Size | Prepare | Rate | Reconcile fold | Observed heap |
+|----------|------|---------|------|----------------|---------------|
+| Flat source read | 10,000 rows | 246 ms | 40,650 rows/s | — | 59 MB |
+| Flat source read | 100,000 rows | 266 ms | 375,940 rows/s | — | 107 MB |
+| Single-file | 10,110 entities | 4,009 ms | 2,522 entities/s | 77 ms | 113 MB |
+| Multi-file | 10,110 entities | 796 ms | 12,701 entities/s | 183 ms | 152 MB |
+| Single-file | 101,100 entities | 6,290 ms | 16,073 entities/s | 99 ms | 340 MB |
+| Multi-file | 101,100 entities | 1,852 ms | 54,590 entities/s | 58 ms | 505 MB |
+| Single-file | 1,011,000 entities | 47,468 ms | 21,299 entities/s | 277 ms | 1,904 MB |
+| Multi-file | 1,011,000 entities | 20,590 ms | 49,102 entities/s | 300 ms | 1,739 MB |
+
+Process-batch, recording target, 10,000 and 100,000 leaves only:
+
+| Layout | Entities | Batches | Process | Entities/s |
+|--------|----------|---------|---------|------------|
+| Single-file | 10,110 | 2 | 1,070 ms | 9,449 |
+| Multi-file | 10,110 | 2 | 2,021 ms | 5,002 |
+| Single-file | 101,100 | 11 | 11,855 ms | 8,528 |
+| Multi-file | 101,100 | 11 | 6,406 ms | 15,782 |
+
+PostgreSQL staging, 10,000 rows, reconciliation not included:
+
+| Layout | Copy | Rows/s | Retry | Rows after retry |
+|--------|------|--------|-------|------------------|
+| Flat | 773 ms | 12,937 | — | 10,000 |
+| Entity | 841 ms | 11,891 | 469 ms | 10,000 |
+
+**Measured:** the rows above; a single scope through 100,000 members; about 1,011,000 identities across many scopes; relationship parent-index behavior through 100,000 parents.
+
+**Not demonstrated:** 1,000,000-leaf process-batch, 1,000,000-row staging copy, a 1,000,000-entity run through staging and HTTP reconciliation, one logical scope of 1,000,000 members, 10M, 30M, 50M.
+
+```powershell
+cd capabilities\etp-migration
+mvn test
+$env:ETP_MIGRATION_ENTITY_SCALE = "1m"
+mvn test -Pperformance "-Dtest=EntityPipelineBenchmarkTest,EntityStagingBenchmarkTest"
+```
+
+Without `ETP_MIGRATION_ENTITY_SCALE=1m`, prepare stops at 100,000 leaves. Normal `mvn test` excludes `@Tag("performance")`.
+
+```text
+java -cp ... com.etp.migration.performance.BenchmarkRunner --layout flat --records 100000 --output ./data/benchmark/addresses.csv
+java -cp ... com.etp.migration.performance.BenchmarkRunner --layout single --records 100000 --output ./data/benchmark/entity-single.csv
+java -cp ... com.etp.migration.performance.BenchmarkRunner --layout multi --records 100000 --output ./data/benchmark/entity-multi
+```
+
+Generated CSV is not committed.
+
+---
+
+## Historical flat-pipeline measurement (2026-09-20)
+
+Authoritative write-up: [PHASE_12_PERFORMANCE_RESULTS.md](performance/PHASE_12_PERFORMANCE_RESULTS.md). The “Phase 12” name in that file is the historical performance note. It is not roadmap Phase 12 (XLSX multiple sheets), which is future and not implemented.
+
+## What that historical measurement is
 
 A **tooling and measurement** slice. It did **not** change production worker/COPY/checksum behavior to “optimize for 30M”. Default application batch size remains **10000** (`etp.migration.batch-size`). No Kafka, Spark, Airflow, Kubernetes, Redis, scheduler, or GUI was added.
 
@@ -20,11 +94,14 @@ A **tooling and measurement** slice. It did **not** change production worker/COP
 
 | Class | Role |
 |-------|------|
-| `BenchmarkDataGenerator` | Streams synthetic address-like CSV to disk (bounded memory, LF newlines, deterministic). |
+| `BenchmarkDataGenerator` | Streams synthetic address-like CSV to disk (bounded memory, LF newlines, deterministic). `main` also accepts `--layout single` and `--layout multi`. |
+| `EntityDatasetGenerator` | Streams a deterministic EntityA / EntityB / EntityC dataset for single-file or multi-file benchmarks. |
 | `BenchmarkRunner` | CLI `main` that calls the generator. **Not** a Spring `CommandLineRunner`; app startup does not generate files. |
 | `BenchmarkConfiguration` | recordCount, batchSize, workers, output path, seed (`DEFAULT_BATCH_SIZE=10000`). |
 | `BenchmarkMetrics` / `BenchmarkResult` | Timing helpers used by tests. |
-| `PerformanceBenchmarkTest` | JUnit `@Tag("performance")` e2e and micro measurements. |
+| `PerformanceBenchmarkTest` | JUnit `@Tag("performance")` e2e and micro measurements for the flat pipeline. |
+| `EntityPipelineBenchmarkTest` | `@Tag("performance")` local prepare measurement for flat source read and entity layouts. |
+| `EntityStagingBenchmarkTest` | `@Tag("performance")` PostgreSQL staging copy of 10,000 flat rows and 10,000 entity rows. |
 | `BenchmarkPipeline` | Test-only helper imported by that test. |
 
 Surefire **default** `mvn test` sets `<excludedGroups>performance</excludedGroups>`, so these tests do **not** run in the normal suite.
@@ -92,11 +169,11 @@ java -cp ... com.etp.migration.performance.BenchmarkRunner --records 1000000 --o
 
 ---
 
-## LOCAL BENCHMARK RESULT (workstation, 2026-09-20)
+## Historical local result (workstation, 2026-09-20)
 
-**Label: LOCAL BENCHMARK RESULT.** Environment: Windows 11, Intel i5-1235U, ~16 GB RAM, PostgreSQL 17.10 on `localhost:55432` **at the time of measurement**, JDK 21, Spring Boot 4.1.0. These numbers are **workstation measurements**, not a production SLA. The application default demo port is now **55433**; later `mvn test -Pperformance` runs against Testcontainers PostgreSQL 17 (`etp_migration_test`).
+**Historical flat-pipeline measurement.** This is not the Phase 10 entity baseline. Environment: Windows 11, Intel i5-1235U, ~16 GB RAM, PostgreSQL 17.10 on `localhost:55432` **at the time of measurement**, JDK 21, Spring Boot 4.1.0. These numbers are **workstation measurements**, not a production SLA. The application default demo port is now **55433**; later `mvn test -Pperformance` runs against Testcontainers PostgreSQL 17 (`etp_migration_test`).
 
-### Headline 1,000,000-row e2e (single worker)
+### Historical 1,000,000-row flat e2e (single worker)
 
 | Metric | Value |
 |--------|--------|
@@ -174,4 +251,4 @@ Four in-process workers copied 40k staging rows but persisted `successRecords=20
 
 ## Relation to current default test suite
 
-Phase 12 recorded `mvn clean test` at **145** tests on 2026-09-20. The default suite has grown since (later phases, OpenAPI security tests, Testcontainers isolation). Performance tests remain excluded unless `-Pperformance`.
+The 2026-09-20 note recorded `mvn clean test` at **145** tests. The default suite after Phases 0–10 is **516** tests, 0 failures, 0 errors, 0 skipped. Performance tests remain excluded unless `-Pperformance`.

@@ -9,6 +9,7 @@ public record MigrationMappingRuleResponse(
 		Long id,
 		UUID mappingId,
 		Integer sequenceNo,
+		String entity,
 		String sourceField,
 		String targetField,
 		TransformationType transformationType,

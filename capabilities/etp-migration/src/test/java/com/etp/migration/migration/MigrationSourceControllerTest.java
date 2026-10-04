@@ -81,7 +81,9 @@ class MigrationSourceControllerTest {
 								}
 								"""))
 				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("name is required")));
+				.andExpect(jsonPath("$.error").value("Validation Failed"))
+				.andExpect(jsonPath("$.message").value("Request validation failed"))
+				.andExpect(jsonPath("$.errors[*].message", org.hamcrest.Matchers.hasItem("name is required")));
 	}
 
 	@Test
@@ -94,7 +96,9 @@ class MigrationSourceControllerTest {
 								}
 								"""))
 				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("sourceType is required")));
+				.andExpect(jsonPath("$.error").value("Validation Failed"))
+				.andExpect(jsonPath("$.message").value("Request validation failed"))
+				.andExpect(jsonPath("$.errors[*].message", org.hamcrest.Matchers.hasItem("sourceType is required")));
 	}
 
 	@Test

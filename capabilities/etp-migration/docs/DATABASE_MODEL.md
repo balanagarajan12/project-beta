@@ -1,7 +1,7 @@
 # ETP Migration — Database model
 
-**Source of truth:** Flyway `V1__initial_migration_schema.sql` and `V2__create_migration_promotion.sql`, plus JPA entities under `com.etp.migration.entity`.  
-**Current Flyway version:** **V2** (applied after V1). Flyway location: `classpath:db/migration`. Hibernate `ddl-auto=validate`.  
+**Source of truth:** Flyway `V1` through `V5`, plus JPA entities under `com.etp.migration.entity`.
+**Current Flyway version:** **V5**. Flyway location: `classpath:db/migration`. Hibernate `ddl-auto=validate`.
 **Control-plane database (local default):** PostgreSQL database `etp_migration` on **localhost:55433** (`capabilities/etp-migration/docker-compose.yml`). Integration tests use a separate Testcontainers database `etp_migration_test` and must not write to this demo instance.
 
 Related: [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -12,7 +12,7 @@ Related: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## 1. Database overview
 
-The capability uses one PostgreSQL database for **control-plane** rows (definitions, runs, batches, errors, reconciliation, promotion). Large source files stay on disk (`etp.migration.storage.root`). Staging JSONB rows and business-target rows live in schemas/tables named in definition JSON on the **target** datasource (often the same PostgreSQL instance).
+The capability uses one PostgreSQL database for **control-plane** rows (definitions, runs, batches, errors, reconciliation, promotion). Large source files stay on disk (`etp.migration.storage.root`). Staging JSONB rows and business-target rows live in schemas/tables named in definition JSON on the **target** datasource. The local canonical demonstration kept the control plane on `localhost:55433` and staging plus schema `uam` on `localhost:55432`. That split is a workstation arrangement, not a production UAM deployment. See [ARCHITECTURE.md](ARCHITECTURE.md) §28.
 
 V1 file header text mentions “runs up to 30M+ records”. That comment is **not** a capacity claim. See [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md).
 
@@ -23,7 +23,7 @@ V1 file header text mentions “runs up to 30M+ records”. That comment is **no
 | Schema | Created by Flyway? | Purpose |
 |--------|-------------------|---------|
 | `public` (typical search_path) | Yes — control-plane tables | `migration_*` tables |
-| `migration_staging` (conventional) | **No** | Staging `address_load` (operator SQL / tests) |
+| `migration_staging` (conventional) | **No** | Operator staging tables such as `address_load` and `entity_load`. Not control-plane tables. |
 | `uam_migration_test` (local demo) | **No** | Simulated business table `address` — **not** a platform control-plane table |
 | `promo_app` (integration tests) | **No** | Test business table only |
 
@@ -50,7 +50,7 @@ All timestamps are `TIMESTAMP WITH TIME ZONE` unless noted. JSON documents are `
 | created_at / created_by | timestamptz / VARCHAR(100) | created_at NOT NULL | |
 | updated_at / updated_by | timestamptz / VARCHAR(100) | updated_at NOT NULL | |
 
-**Constraints:** `uk_migration_mapping_name_version`, `ck_migration_mapping_status`.  
+**Constraints:** `uk_migration_mapping_name_version`, `ck_migration_mapping_status`.
 **Index:** `idx_migration_mapping_status`.
 
 ---
@@ -74,8 +74,8 @@ All timestamps are `TIMESTAMP WITH TIME ZONE` unless noted. JSON documents are `
 | enabled | BOOLEAN | NOT NULL default TRUE | |
 | created_at / updated_at | timestamptz | NOT NULL | |
 
-**Constraints:** `uk_mapping_rule_sequence`, `ck_mapping_rule_sequence`, `ck_mapping_rule_transformation_type`  
-Types: DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, LOOKUP, REGEX, CONDITIONAL, DATE_FORMAT, CUSTOM.  
+**Constraints:** `uk_mapping_rule_sequence`, `ck_mapping_rule_sequence`, `ck_mapping_rule_transformation_type`
+Types: DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, LOOKUP, REGEX, CONDITIONAL, DATE_FORMAT, CUSTOM.
 **Index:** `idx_mapping_rule_mapping`.
 
 ---
@@ -98,7 +98,7 @@ Types: DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, LOOKUP, REGEX
 | configuration | JSONB | NOT NULL default `{}` | target + promotion objects |
 | created_at / created_by / updated_at / updated_by | | created_at/updated_at NOT NULL | |
 
-**Constraints:** `uk_migration_definition_name_version`, `ck_migration_definition_batch_size`, `ck_migration_definition_load_mode`, `ck_migration_definition_status`, `fk_migration_definition_mapping`.  
+**Constraints:** `uk_migration_definition_name_version`, `ck_migration_definition_batch_size`, `ck_migration_definition_load_mode`, `ck_migration_definition_status`, `fk_migration_definition_mapping`.
 **Index:** `idx_migration_definition_status`.
 
 ---
@@ -143,7 +143,7 @@ Types: DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, LOOKUP, REGEX
 
 **Status check:** CREATED, QUEUED, RUNNING, PAUSED, COMPLETED, COMPLETED_WITH_ERRORS, FAILED, CANCEL_REQUESTED, CANCELLED.
 
-**Indexes:** definition, status, created_at DESC, (status, started_at).  
+**Indexes:** definition, status, created_at DESC, (status, started_at).
 **Unique:** `uk_migration_run_number`, `uk_migration_run_idempotency`.
 
 ---
@@ -231,7 +231,7 @@ Types: DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, LOOKUP, REGEX
 | started_at / completed_at | timestamptz | NULL | |
 | created_at | timestamptz | NOT NULL | |
 
-**Unique:** `uk_reconciliation_run_type`.  
+**Unique:** `uk_reconciliation_run_type`.
 **Index:** `idx_reconciliation_run`.
 
 ---
@@ -288,7 +288,7 @@ Types: DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, LOOKUP, REGEX
 | error_code / error_message | VARCHAR | NULL | |
 | created_at / updated_at | timestamptz | NOT NULL | |
 
-**Unique:** `(promotion_id, migration_batch_id)`.  
+**Unique:** `(promotion_id, migration_batch_id)`.
 **Indexes:** promotion, run, batch.
 
 ---
@@ -367,11 +367,62 @@ CREATE TABLE IF NOT EXISTS migration_staging.address_load (
 );
 ```
 
-### Local simulated business target (demo)
+Flat migrations keep that unique key: `UNIQUE (migration_run_id, migration_batch_id, source_record_number)`. The stored flat idempotency value is `runId:batchId:sourceRecordNumber`.
 
-`uam_migration_test.address` is a **local simulated application table**. It is **not** an ETP control-plane table and is **not** created by V1/V2. Do not document it as UAM production schema.
+An entity staging table uses a different uniqueness rule. One source row can produce several entities, and the same entity can be loaded from another batch. Batch id is not part of the logical entity identity. The entity idempotency value is `entity-v1:` plus the hex SHA-256 of run id, entity name, and source identity. Flyway does not create this staging table. Use:
 
-Integration tests also use `promo_app.address` similarly.
+```sql
+CREATE TABLE IF NOT EXISTS migration_staging.entity_load (
+  migration_run_id UUID NOT NULL,
+  migration_batch_id BIGINT NOT NULL,
+  source_record_number BIGINT NOT NULL,
+  target_payload JSONB NOT NULL,
+  idempotency_key VARCHAR(500) NOT NULL,
+  loaded_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (migration_run_id, idempotency_key)
+);
+```
+
+This table is still operator DDL. It is not a Flyway migration. The control-plane schema does not store the uniqueness rule, and a JSONB column cannot enforce it.
+
+### Local business targets (not Flyway, not production UAM)
+
+`uam_migration_test.address` is an older **flat** illustration table. It is not an ETP control-plane table and is not created by V1–V5.
+
+The completed local canonical demonstration used schema **`uam`** on the target database (`localhost:55432` / `etp_migration`): `location`, `geographic_address`, `geographic_location`, `location_geometry`, and `geographic_sub_address`. Staging for that run is `migration_staging.uam_entity_stage` on the same target instance. The control plane stays on `localhost:55433`. Hosting `uam` on the existing local PostgreSQL instance was a workstation arrangement because a separate UAM container was not available. It is not a production UAM deployment. The column list used locally is `local/uam-target.sql`. That script does not replace a production UAM schema.
+
+Integration tests also use `promo_app.address` similarly for the flat contract.
+
+---
+
+### `migration_identity_allocation` (V4)
+
+**Purpose:** Remember the formatted target id already given to one source identity in one migration run. A retry reads this row and does not reserve another number.
+
+| Column | Type | Null | Notes |
+|--------|------|------|--------|
+| id | BIGINT IDENTITY | PK | |
+| migration_run_id | UUID | NOT NULL | Run that owns the assignment |
+| entity_name | VARCHAR(200) | NOT NULL | Logical entity |
+| source_identity | VARCHAR(500) | NOT NULL | Source key value |
+| target_identity | VARCHAR(500) | NOT NULL | Formatted id |
+| sequence_no | BIGINT | NOT NULL | Reserved number for `PREFIX_SEQUENCE` |
+| created_at | timestamptz | NOT NULL | |
+
+**Constraints:** `uk_identity_allocation_source` on `(migration_run_id, entity_name, source_identity)`, `uk_identity_allocation_sequence` on `(migration_run_id, entity_name, sequence_no)`.
+
+### `target_identity_allocator` (V5)
+
+**Purpose:** Atomic numeric range reservation. This is runtime state. Configuration does not store a start number.
+
+| Column | Type | Null | Notes |
+|--------|------|------|--------|
+| namespace | VARCHAR(200) | PK | The configured prefix, such as `LOC-` or `GEO-LOC-` |
+| current_value | BIGINT | NOT NULL | Last reserved number. The next range begins at `current_value + 1` |
+| floor_established | BOOLEAN | NOT NULL | True after existing target ids for that prefix were considered once |
+| updated_at | timestamptz | NOT NULL | |
+
+Two prefixes do not share a row. A reservation locks the row, adds the requested count to `current_value`, and returns the first new number. Concurrent reservations block on that lock, so the ranges do not overlap.
 
 ---
 
@@ -381,8 +432,11 @@ Integration tests also use `promo_app.address` similarly.
 |------|------|
 | `src/main/resources/db/migration/V1__initial_migration_schema.sql` | Control plane through reconciliation + optional `migration_record` |
 | `src/main/resources/db/migration/V2__create_migration_promotion.sql` | `migration_promotion`, `migration_promotion_batch` |
+| `src/main/resources/db/migration/V3__add_mapping_rule_entity_name.sql` | Nullable `migration_mapping_rule.entity_name` |
+| `src/main/resources/db/migration/V4__create_migration_identity_allocation.sql` | `(run, entity, source identity)` → formatted target id, so a retry reuses it |
+| `src/main/resources/db/migration/V5__create_target_identity_allocator.sql` | Atomic numeric range reservation, keyed by id prefix |
 
-No later versions exist in this module.
+`migration_identity_allocation` remembers which formatted id was given to a source identity in one run. `target_identity_allocator.current_value` is the last reserved number for that prefix. Configuration supplies `prefix` and `sequenceLength` only. It does not supply a start number. Entity staging uniqueness remains operator DDL. `migration_record` remains the optional unused lineage table from V1.
 
 ---
 
@@ -394,4 +448,4 @@ No later versions exist in this module.
 | `etp_migration_test` | Testcontainers `postgres:17`, ephemeral mapped port | `@SpringBootTest` / `@DataJpaTest` |
 | IAM `etp_iam` (and any leftover `etp_migration` on **55432**) | etp-iam Compose | **Not** the etp-migration test or demo default |
 
-Flyway V1+V2 run against whichever DataSource Spring is using. Tests do **not** isolate by truncating the demo database.
+Flyway V1–V3 run against whichever DataSource Spring is using. Tests do **not** isolate by truncating the demo database.

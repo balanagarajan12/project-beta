@@ -2,6 +2,14 @@ package com.etp.migration.processing;
 
 import com.etp.migration.batch.BatchPlanner;
 import com.etp.migration.connector.source.InvalidSourceConfigurationException;
+import com.etp.migration.entity.MigrationMappingRule;
+import com.etp.migration.execution.EntityBatchLocator;
+import com.etp.migration.execution.EntityFailureRecorder;
+import com.etp.migration.execution.EntityItemFailure;
+import com.etp.migration.execution.EntityRelationshipPlanSource;
+import com.etp.migration.execution.ExecutionMode;
+import com.etp.migration.mapping.EntityRelationshipConfiguration;
+import com.etp.migration.repository.MigrationMappingRuleRepository;
 import com.etp.migration.connector.source.MigrationSourceConnector;
 import com.etp.migration.connector.source.MigrationSourceConnectorRegistry;
 import com.etp.migration.connector.source.SourceColumn;
@@ -22,6 +30,8 @@ import com.etp.migration.repository.MigrationRunRepository;
 import com.etp.migration.repository.MigrationSourceRepository;
 import com.etp.migration.run.InvalidStateTransitionException;
 import com.etp.migration.run.MigrationRunNotFoundException;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -45,6 +55,12 @@ public class SourceInspectionService {
 	private final MigrationArtifactRepository migrationArtifactRepository;
 	private final MigrationSourceConnectorRegistry connectorRegistry;
 	private final BatchPlanner batchPlanner;
+	private final MigrationMappingRuleRepository mappingRuleRepository;
+	private final EntityRelationshipPlanSource entityPlanSource;
+	private final EntityFailureRecorder entityFailureRecorder;
+
+	@PersistenceContext
+	private EntityManager entityManager;
 
 	public SourceInspectionService(
 			PlatformTransactionManager transactionManager,
@@ -53,7 +69,10 @@ public class SourceInspectionService {
 			MigrationBatchRepository migrationBatchRepository,
 			MigrationArtifactRepository migrationArtifactRepository,
 			MigrationSourceConnectorRegistry connectorRegistry,
-			BatchPlanner batchPlanner) {
+			BatchPlanner batchPlanner,
+			MigrationMappingRuleRepository mappingRuleRepository,
+			EntityRelationshipPlanSource entityPlanSource,
+			EntityFailureRecorder entityFailureRecorder) {
 		this.transactionTemplate = new TransactionTemplate(transactionManager);
 		this.migrationRunRepository = migrationRunRepository;
 		this.migrationSourceRepository = migrationSourceRepository;
@@ -61,12 +80,20 @@ public class SourceInspectionService {
 		this.migrationArtifactRepository = migrationArtifactRepository;
 		this.connectorRegistry = connectorRegistry;
 		this.batchPlanner = batchPlanner;
+		this.mappingRuleRepository = mappingRuleRepository;
+		this.entityPlanSource = entityPlanSource;
+		this.entityFailureRecorder = entityFailureRecorder;
 	}
 
 	public PrepareMigrationRunResponse prepare(UUID runId) {
 		InspectionWork work = transactionTemplate.execute(status -> beginPreparation(runId));
 		if (work.alreadyPrepared()) {
 			return work.existing();
+		}
+		if (work.entityMappingConfiguration() != null) {
+			PrepareMigrationRunResponse[] response = new PrepareMigrationRunResponse[1];
+			PipelineTiming.open(() -> response[0] = transactionTemplate.execute(status -> persistEntityPreparation(runId, work)));
+			return response[0];
 		}
 		SourceInspection inspection = work.connector().inspect(work.source(), work.run());
 		return transactionTemplate.execute(status -> persistPreparation(runId, work.sourceId(), inspection, work.batchSize()));
@@ -83,12 +110,89 @@ public class SourceInspectionService {
 					"Cannot prepare migration run in status " + run.getStatus());
 		}
 		MigrationSource source = resolveSource(run);
-		MigrationSourceConnector connector = connectorRegistry.require(source);
 		int batchSize = run.getMigrationDefinition().getBatchSize() == null
 				? 10_000
 				: run.getMigrationDefinition().getBatchSize();
 		source.getConfiguration();
+		Map<String, Object> mappingConfiguration = mappingConfiguration(run);
+		if (ExecutionMode.entityRelationship(mappingConfiguration)) {
+			return InspectionWork.entity(run, source, batchSize, mappingConfiguration);
+		}
+		MigrationSourceConnector connector = connectorRegistry.require(source);
 		return InspectionWork.pending(run, source, connector, batchSize);
+	}
+
+	private PrepareMigrationRunResponse persistEntityPreparation(UUID runId, InspectionWork work) {
+		MigrationRun run = migrationRunRepository.findById(runId)
+				.orElseThrow(() -> new MigrationRunNotFoundException(runId));
+		if (isPrepared(run)) {
+			return toResponse(run);
+		}
+		if (run.getStatus() != MigrationRunStatus.QUEUED) {
+			throw new InvalidStateTransitionException(
+					"Cannot prepare migration run in status " + run.getStatus());
+		}
+		var mapping = run.getMigrationDefinition().getMapping();
+		List<MigrationMappingRule> rules = mappingRuleRepository
+				.findByMapping_IdAndEnabledTrueOrderBySequenceNoAsc(mapping.getId());
+		rules.forEach(rule -> {
+			rule.getEntityName();
+			rule.getConfiguration();
+		});
+		var model = EntityRelationshipConfiguration.parse(work.entityMappingConfiguration());
+		List<EntityItemFailure> structural = new ArrayList<>();
+		int[] counts = new int[2];
+		Instant now = Instant.now();
+		entityPlanSource.consume(
+				work.source().getConfiguration(),
+				model,
+				rules,
+				work.batchSize(),
+				plan -> {
+					MigrationBatch batch = new MigrationBatch();
+					batch.setMigrationRun(run);
+					batch.setBatchNumber(plan.batchNumber());
+					batch.setStatus(MigrationBatchStatus.PENDING);
+					batch.setRecordCount(plan.workItems().size());
+					batch.setSourceLocator(EntityBatchLocator.write(plan));
+					batch.setCreatedAt(now);
+					batch.setUpdatedAt(now);
+					migrationBatchRepository.save(batch);
+					entityManager.flush();
+					entityManager.detach(batch);
+					counts[0]++;
+					counts[1] += plan.workItems().size();
+				},
+				structural::add);
+		run.setSourceSnapshot(entitySnapshot(work.sourceId(), counts[1]));
+		run.setTotalRecords((long) counts[1]);
+		run.setTotalBatches(counts[0]);
+		run.setUpdatedAt(now);
+		if (!structural.isEmpty()) {
+			entityFailureRecorder.save(runId, null, structural);
+		}
+		return toResponse(run);
+	}
+
+	private static Map<String, Object> entitySnapshot(UUID sourceId, int workItemCount) {
+		Map<String, Object> source = new LinkedHashMap<>();
+		source.put("sourceId", sourceId);
+		source.put("sourceType", "FILE");
+		source.put("format", "CSV");
+		source.put("recordCount", workItemCount);
+		Map<String, Object> snapshot = new LinkedHashMap<>();
+		snapshot.put("statusMessage", STATUS_SOURCE_INSPECTED);
+		snapshot.put("source", source);
+		snapshot.put("executionMode", "ENTITY_RELATIONSHIP");
+		return snapshot;
+	}
+
+	private static Map<String, Object> mappingConfiguration(MigrationRun run) {
+		if (run.getMigrationDefinition() == null || run.getMigrationDefinition().getMapping() == null) {
+			return Map.of();
+		}
+		Map<String, Object> configuration = run.getMigrationDefinition().getMapping().getConfiguration();
+		return configuration == null ? Map.of() : new LinkedHashMap<>(configuration);
 	}
 
 	private PrepareMigrationRunResponse persistPreparation(
@@ -297,10 +401,11 @@ public class SourceInspectionService {
 			MigrationRun run,
 			MigrationSource source,
 			MigrationSourceConnector connector,
-			int batchSize
+			int batchSize,
+			Map<String, Object> entityMappingConfiguration
 	) {
 		static InspectionWork prepared(PrepareMigrationRunResponse existing) {
-			return new InspectionWork(true, existing, null, null, null, 0);
+			return new InspectionWork(true, existing, null, null, null, 0, null);
 		}
 
 		static InspectionWork pending(
@@ -308,7 +413,15 @@ public class SourceInspectionService {
 				MigrationSource source,
 				MigrationSourceConnector connector,
 				int batchSize) {
-			return new InspectionWork(false, null, run, source, connector, batchSize);
+			return new InspectionWork(false, null, run, source, connector, batchSize, null);
+		}
+
+		static InspectionWork entity(
+				MigrationRun run,
+				MigrationSource source,
+				int batchSize,
+				Map<String, Object> mappingConfiguration) {
+			return new InspectionWork(false, null, run, source, null, batchSize, mappingConfiguration);
 		}
 
 		UUID sourceId() {

@@ -3,6 +3,7 @@ package com.etp.migration.config;
 import com.etp.migration.batch.MigrationBatchNotFoundException;
 import com.etp.migration.connector.source.InvalidSourceConfigurationException;
 import com.etp.migration.connector.target.InvalidPromotionConfigurationException;
+import com.etp.migration.mapping.InvalidEntityRelationshipConfigurationException;
 import com.etp.migration.connector.target.TargetInfrastructureException;
 import com.etp.migration.connector.source.SourceInspectionException;
 import com.etp.migration.connector.source.UnsupportedFileFormatException;
@@ -17,7 +18,9 @@ import com.etp.migration.migration.InvalidMappingReferenceException;
 import com.etp.migration.migration.MappingNotFoundException;
 import com.etp.migration.migration.MigrationDefinitionNotFoundException;
 import com.etp.migration.migration.MigrationSourceNotFoundException;
+import com.etp.migration.migration.RequestValidationException;
 import com.etp.migration.migration.dto.ApiErrorResponse;
+import com.etp.migration.migration.dto.ApiFieldError;
 import com.etp.migration.promotion.PromotionException;
 import com.etp.migration.run.DefinitionNotActiveException;
 import com.etp.migration.run.InvalidStateTransitionException;
@@ -25,9 +28,12 @@ import com.etp.migration.run.MigrationRunNotFoundException;
 import com.etp.migration.promotion.PromotionNotFoundException;
 import com.etp.migration.reconciliation.ReconciliationNotFoundException;
 import com.etp.migration.reconciliation.ReconciliationNotReadyException;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.exc.InvalidFormatException;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Instant;
-import java.util.stream.Collectors;
+import java.util.Arrays;
+import java.util.List;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -43,17 +49,43 @@ public class GlobalExceptionHandler {
 	public ResponseEntity<ApiErrorResponse> handleValidation(
 			MethodArgumentNotValidException ex,
 			HttpServletRequest request) {
-		String message = ex.getBindingResult().getFieldErrors().stream()
-				.map(error -> error.getField() + ": " + error.getDefaultMessage())
-				.collect(Collectors.joining("; "));
-		return error(HttpStatus.BAD_REQUEST, message, request, null);
+		List<ApiFieldError> errors = ex.getBindingResult().getFieldErrors().stream()
+				.map(error -> new ApiFieldError(
+						error.getField(),
+						simpleValue(error.getRejectedValue()),
+						error.getDefaultMessage(),
+						null))
+				.toList();
+		return validationFailed(errors, request);
 	}
 
 	@ExceptionHandler(HttpMessageNotReadableException.class)
 	public ResponseEntity<ApiErrorResponse> handleUnreadable(
 			HttpMessageNotReadableException ex,
 			HttpServletRequest request) {
-		return error(HttpStatus.BAD_REQUEST, "Request body is invalid or uses an unsupported value", request);
+		InvalidFormatException invalid = invalidFormat(ex);
+		if (invalid != null && invalid.getTargetType() != null && invalid.getTargetType().isEnum()) {
+			String field = fieldPath(invalid);
+			return validationFailed(List.of(new ApiFieldError(
+					field,
+					simpleValue(invalid.getValue()),
+					unsupportedMessage(field),
+					enumNames(invalid.getTargetType()))), request);
+		}
+		JacksonException mapping = jacksonFailure(ex);
+		String field = mapping == null ? null : fieldPath(mapping);
+		return validationFailed(List.of(new ApiFieldError(
+				field,
+				null,
+				"Request body is invalid or uses an unsupported value",
+				null)), request);
+	}
+
+	@ExceptionHandler(RequestValidationException.class)
+	public ResponseEntity<ApiErrorResponse> handleRequestValidation(
+			RequestValidationException ex,
+			HttpServletRequest request) {
+		return validationFailed(ex.errors(), request);
 	}
 
 	@ExceptionHandler(IllegalArgumentException.class)
@@ -87,6 +119,7 @@ public class GlobalExceptionHandler {
 	@ExceptionHandler({
 			InvalidSourceConfigurationException.class,
 			InvalidPromotionConfigurationException.class,
+			InvalidEntityRelationshipConfigurationException.class,
 			UnsupportedSourceTypeException.class,
 			UnsupportedFileFormatException.class,
 			UnsupportedStorageProviderException.class,
@@ -144,6 +177,80 @@ public class GlobalExceptionHandler {
 	@ExceptionHandler(Exception.class)
 	public ResponseEntity<ApiErrorResponse> handleUnexpected(Exception ex, HttpServletRequest request) {
 		return error(HttpStatus.INTERNAL_SERVER_ERROR, "An unexpected error occurred", request);
+	}
+
+	private ResponseEntity<ApiErrorResponse> validationFailed(List<ApiFieldError> errors, HttpServletRequest request) {
+		ApiErrorResponse body = new ApiErrorResponse(
+				Instant.now(),
+				HttpStatus.BAD_REQUEST.value(),
+				"Validation Failed",
+				"Request validation failed",
+				request.getRequestURI(),
+				null,
+				errors);
+		return ResponseEntity.badRequest().body(body);
+	}
+
+	private static InvalidFormatException invalidFormat(Throwable failure) {
+		Throwable current = failure;
+		while (current != null) {
+			if (current instanceof InvalidFormatException invalid) {
+				return invalid;
+			}
+			current = current.getCause();
+		}
+		return null;
+	}
+
+	private static JacksonException jacksonFailure(Throwable failure) {
+		Throwable current = failure;
+		while (current != null) {
+			if (current instanceof JacksonException mapping) {
+				return mapping;
+			}
+			current = current.getCause();
+		}
+		return null;
+	}
+
+	private static String fieldPath(JacksonException failure) {
+		StringBuilder path = new StringBuilder();
+		for (JacksonException.Reference reference : failure.getPath()) {
+			if (reference.getIndex() >= 0) {
+				path.append('[').append(reference.getIndex()).append(']');
+			}
+			else if (reference.getPropertyName() != null) {
+				if (!path.isEmpty()) {
+					path.append('.');
+				}
+				path.append(reference.getPropertyName());
+			}
+		}
+		return path.isEmpty() ? null : path.toString();
+	}
+
+	private static String unsupportedMessage(String field) {
+		if (field != null && (field.equals("transformationType") || field.endsWith(".transformationType"))) {
+			return "Unsupported transformation type";
+		}
+		if (field != null && (field.equals("loadMode") || field.endsWith(".loadMode"))) {
+			return "Unsupported load mode";
+		}
+		return "Unsupported value";
+	}
+
+	private static List<String> enumNames(Class<?> type) {
+		return Arrays.stream(type.getEnumConstants()).map(Object::toString).toList();
+	}
+
+	private static String simpleValue(Object value) {
+		if (value == null) {
+			return null;
+		}
+		if (value instanceof String || value instanceof Number || value instanceof Boolean || value instanceof Enum<?>) {
+			return String.valueOf(value);
+		}
+		return null;
 	}
 
 	private ResponseEntity<ApiErrorResponse> error(HttpStatus status, String message, HttpServletRequest request) {

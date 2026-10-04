@@ -19,6 +19,7 @@ import com.etp.migration.connector.source.UnsupportedFileFormatException;
 import com.etp.migration.connector.source.csv.CsvSourceConnector;
 import com.etp.migration.connector.storage.ArtifactStorage;
 import com.etp.migration.connector.target.InvalidPromotionConfigurationException;
+import com.etp.migration.mapping.InvalidEntityRelationshipConfigurationException;
 import com.etp.migration.migration.dto.CreateMigrationDefinitionRequest;
 import com.etp.migration.migration.dto.MigrationDefinitionResponse;
 import com.etp.migration.migration.dto.PagedResponse;
@@ -29,6 +30,7 @@ import com.etp.migration.repository.MigrationSourceRepository;
 import com.etp.migration.run.InvalidStateTransitionException;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -342,6 +344,145 @@ class MigrationDefinitionServiceTest {
 	}
 
 	@Test
+	void activateRejectsEntityRelationshipRuleWithoutEntity() {
+		UUID id = UUID.randomUUID();
+		MigrationDefinition definition = readyDraft(id);
+		definition.getMapping().setConfiguration(singleEntityModel("Invoice"));
+		MigrationMappingRule rule = new MigrationMappingRule();
+		rule.setEnabled(true);
+		when(migrationDefinitionRepository.findByIdForUpdate(id)).thenReturn(Optional.of(definition));
+		when(migrationMappingRuleRepository.findByMapping_IdAndEnabledTrueOrderBySequenceNoAsc(definition.getMapping().getId()))
+				.thenReturn(List.of(rule));
+		when(migrationMappingRuleRepository.findByMapping_IdOrderBySequenceNoAsc(definition.getMapping().getId()))
+				.thenReturn(List.of(rule));
+
+		assertThatThrownBy(() -> service.activate(id))
+				.isInstanceOf(InvalidEntityRelationshipConfigurationException.class)
+				.hasMessage("Mapping rule entity is required for an ENTITY_RELATIONSHIP mapping.");
+		assertThat(definition.getStatus()).isEqualTo(MigrationConfigStatus.DRAFT);
+	}
+
+	@Test
+	void activateRejectsRuleEntityThatIsNotConfigured() {
+		UUID id = UUID.randomUUID();
+		MigrationDefinition definition = readyDraft(id);
+		definition.getMapping().setConfiguration(singleEntityModel("Invoice"));
+		MigrationMappingRule rule = new MigrationMappingRule();
+		rule.setEnabled(true);
+		rule.setEntityName("Address");
+		when(migrationDefinitionRepository.findByIdForUpdate(id)).thenReturn(Optional.of(definition));
+		when(migrationMappingRuleRepository.findByMapping_IdAndEnabledTrueOrderBySequenceNoAsc(definition.getMapping().getId()))
+				.thenReturn(List.of(rule));
+		when(migrationMappingRuleRepository.findByMapping_IdOrderBySequenceNoAsc(definition.getMapping().getId()))
+				.thenReturn(List.of(rule));
+
+		assertThatThrownBy(() -> service.activate(id))
+				.isInstanceOf(InvalidEntityRelationshipConfigurationException.class)
+				.hasMessage("Mapping rule entity 'Address' is not defined in the migration mapping configuration.");
+		assertThat(definition.getStatus()).isEqualTo(MigrationConfigStatus.DRAFT);
+	}
+
+	@Test
+	void activateAcceptsEntityScopedRule() {
+		UUID id = UUID.randomUUID();
+		MigrationDefinition definition = readyDraft(id);
+		definition.getMapping().setConfiguration(singleEntityModel("Invoice"));
+		MigrationMappingRule rule = new MigrationMappingRule();
+		rule.setEnabled(true);
+		rule.setEntityName("Invoice");
+		when(migrationDefinitionRepository.findByIdForUpdate(id)).thenReturn(Optional.of(definition));
+		when(migrationMappingRuleRepository.findByMapping_IdAndEnabledTrueOrderBySequenceNoAsc(definition.getMapping().getId()))
+				.thenReturn(List.of(rule));
+		when(migrationMappingRuleRepository.findByMapping_IdOrderBySequenceNoAsc(definition.getMapping().getId()))
+				.thenReturn(List.of(rule));
+		MigrationSource source = new MigrationSource();
+		source.setId(UUID.randomUUID());
+		source.setSourceType("FILE");
+		source.setConfiguration(new HashMap<>(fileSystemCsvConfiguration("demo/invoices.csv")));
+		when(migrationSourceRepository.findByMigrationDefinition_IdAndEnabledTrueOrderByCreatedAtAsc(definition.getId()))
+				.thenReturn(List.of(source));
+
+		assertThat(service.activate(id).status()).isEqualTo(MigrationConfigStatus.ACTIVE);
+	}
+
+	@Test
+	void activateAcceptsMultiFileLayoutWithoutUsingTheSingleFileConnector() {
+		UUID id = UUID.randomUUID();
+		MigrationDefinition definition = readyDraft(id);
+		definition.getMapping().setConfiguration(singleEntityModel("Invoice"));
+		MigrationMappingRule rule = new MigrationMappingRule();
+		rule.setEnabled(true);
+		rule.setEntityName("Invoice");
+		when(migrationDefinitionRepository.findByIdForUpdate(id)).thenReturn(Optional.of(definition));
+		when(migrationMappingRuleRepository.findByMapping_IdAndEnabledTrueOrderBySequenceNoAsc(definition.getMapping().getId()))
+				.thenReturn(List.of(rule));
+		when(migrationMappingRuleRepository.findByMapping_IdOrderBySequenceNoAsc(definition.getMapping().getId()))
+				.thenReturn(List.of(rule));
+		MigrationSource source = new MigrationSource();
+		source.setId(UUID.randomUUID());
+		source.setSourceType("FILE");
+		Map<String, Object> files = new LinkedHashMap<>();
+		files.put("Invoice", Map.of("file", "invoice.csv"));
+		Map<String, Object> configuration = new LinkedHashMap<>();
+		configuration.put("layoutType", "MULTI_FILE");
+		configuration.put("files", files);
+		source.setConfiguration(configuration);
+		when(migrationSourceRepository.findByMigrationDefinition_IdAndEnabledTrueOrderByCreatedAtAsc(definition.getId()))
+				.thenReturn(List.of(source));
+
+		assertThat(service.activate(id).status()).isEqualTo(MigrationConfigStatus.ACTIVE);
+		verify(artifactStorage, never()).exists(any(), any());
+	}
+
+	@Test
+	void activateRejectsMultiFileEntityThatIsNotConfigured() {
+		UUID id = UUID.randomUUID();
+		MigrationDefinition definition = readyDraft(id);
+		definition.getMapping().setConfiguration(singleEntityModel("Invoice"));
+		MigrationMappingRule rule = new MigrationMappingRule();
+		rule.setEnabled(true);
+		rule.setEntityName("Invoice");
+		when(migrationDefinitionRepository.findByIdForUpdate(id)).thenReturn(Optional.of(definition));
+		when(migrationMappingRuleRepository.findByMapping_IdAndEnabledTrueOrderBySequenceNoAsc(definition.getMapping().getId()))
+				.thenReturn(List.of(rule));
+		when(migrationMappingRuleRepository.findByMapping_IdOrderBySequenceNoAsc(definition.getMapping().getId()))
+				.thenReturn(List.of(rule));
+		MigrationSource source = new MigrationSource();
+		source.setSourceType("FILE");
+		source.setConfiguration(Map.of(
+				"layoutType", "MULTI_FILE",
+				"files", Map.of("Address", Map.of("file", "address.csv"))));
+		when(migrationSourceRepository.findByMigrationDefinition_IdAndEnabledTrueOrderByCreatedAtAsc(definition.getId()))
+				.thenReturn(List.of(source));
+
+		assertThatThrownBy(() -> service.activate(id))
+				.isInstanceOf(InvalidSourceConfigurationException.class)
+				.hasMessage("Source file entity 'Address' is not defined in the migration mapping configuration.");
+		assertThat(definition.getStatus()).isEqualTo(MigrationConfigStatus.DRAFT);
+	}
+
+	@Test
+	void activateRejectsInvalidEntityRelationshipConfiguration() {
+		UUID id = UUID.randomUUID();
+		MigrationDefinition definition = readyDraft(id);
+		definition.getMapping().setConfiguration(Map.of(
+				"modelType", "ENTITY_RELATIONSHIP",
+				"rootEntity", "Missing",
+				"entities", List.of(Map.of(
+						"name", "Invoice",
+						"targetEntity", "invoice",
+						"sourceKey", "invoice_id",
+						"targetKey", "id")),
+				"relationships", List.of()));
+		when(migrationDefinitionRepository.findByIdForUpdate(id)).thenReturn(Optional.of(definition));
+
+		assertThatThrownBy(() -> service.activate(id))
+				.isInstanceOf(InvalidEntityRelationshipConfigurationException.class)
+				.hasMessage("rootEntity 'Missing' does not match a configured entity");
+		assertThat(definition.getStatus()).isEqualTo(MigrationConfigStatus.DRAFT);
+	}
+
+	@Test
 	void activateRejectsInvalidPromotionConfiguration() {
 		UUID id = UUID.randomUUID();
 		MigrationDefinition definition = readyDraft(id);
@@ -352,6 +493,135 @@ class MigrationDefinitionServiceTest {
 				.isInstanceOf(InvalidPromotionConfigurationException.class)
 				.hasMessage("Promotion configuration must be an object");
 		assertThat(definition.getStatus()).isEqualTo(MigrationConfigStatus.DRAFT);
+	}
+
+	@Test
+	void activateLeavesOnlyTheRequestedVersionActive() {
+		UUID previousId = UUID.randomUUID();
+		UUID requestedId = UUID.randomUUID();
+		MigrationDefinition previous = readyDraft(previousId);
+		previous.setName("migrate_sample");
+		previous.setVersion("1.0");
+		previous.setStatus(MigrationConfigStatus.ACTIVE);
+		MigrationDefinition requested = readyDraft(requestedId);
+		requested.setName("migrate_sample");
+		requested.setVersion("1.1");
+		stubReadyGraph(requested);
+		when(migrationDefinitionRepository.findByIdForUpdate(requestedId)).thenReturn(Optional.of(requested));
+		when(migrationDefinitionRepository.findOtherActiveByNameForUpdate(
+				"migrate_sample", MigrationConfigStatus.ACTIVE, requestedId))
+				.thenReturn(List.of(previous));
+
+		MigrationDefinitionResponse response = service.activate(requestedId);
+
+		assertThat(response.status()).isEqualTo(MigrationConfigStatus.ACTIVE);
+		assertThat(requested.getStatus()).isEqualTo(MigrationConfigStatus.ACTIVE);
+		assertThat(previous.getStatus()).isEqualTo(MigrationConfigStatus.INACTIVE);
+	}
+
+	@Test
+	void activateDoesNotChangeDefinitionsWithADifferentName() {
+		UUID requestedId = UUID.randomUUID();
+		MigrationDefinition requested = readyDraft(requestedId);
+		requested.setName("migrate_sample");
+		requested.setVersion("1.1");
+		MigrationDefinition otherName = readyDraft(UUID.randomUUID());
+		otherName.setName("migrate_other");
+		otherName.setVersion("1.0");
+		otherName.setStatus(MigrationConfigStatus.ACTIVE);
+		stubReadyGraph(requested);
+		when(migrationDefinitionRepository.findByIdForUpdate(requestedId)).thenReturn(Optional.of(requested));
+		when(migrationDefinitionRepository.findOtherActiveByNameForUpdate(
+				"migrate_sample", MigrationConfigStatus.ACTIVE, requestedId))
+				.thenReturn(List.of());
+
+		service.activate(requestedId);
+
+		assertThat(requested.getStatus()).isEqualTo(MigrationConfigStatus.ACTIVE);
+		assertThat(otherName.getStatus()).isEqualTo(MigrationConfigStatus.ACTIVE);
+		verify(migrationDefinitionRepository).findOtherActiveByNameForUpdate(
+				"migrate_sample", MigrationConfigStatus.ACTIVE, requestedId);
+	}
+
+	@Test
+	void activateAlreadyActiveVersionIsIdempotent() {
+		UUID activeId = UUID.randomUUID();
+		UUID siblingId = UUID.randomUUID();
+		MigrationDefinition active = readyDraft(activeId);
+		active.setName("migrate_sample");
+		active.setVersion("1.1");
+		active.setStatus(MigrationConfigStatus.ACTIVE);
+		Instant previousUpdatedAt = active.getUpdatedAt();
+		MigrationDefinition sibling = readyDraft(siblingId);
+		sibling.setName("migrate_sample");
+		sibling.setVersion("1.0");
+		sibling.setStatus(MigrationConfigStatus.ACTIVE);
+		when(migrationDefinitionRepository.findByIdForUpdate(activeId)).thenReturn(Optional.of(active));
+		when(migrationDefinitionRepository.findOtherActiveByNameForUpdate(
+				"migrate_sample", MigrationConfigStatus.ACTIVE, activeId))
+				.thenReturn(List.of(sibling));
+
+		MigrationDefinitionResponse response = service.activate(activeId);
+
+		assertThat(response.status()).isEqualTo(MigrationConfigStatus.ACTIVE);
+		assertThat(active.getStatus()).isEqualTo(MigrationConfigStatus.ACTIVE);
+		assertThat(active.getUpdatedAt()).isEqualTo(previousUpdatedAt);
+		assertThat(sibling.getStatus()).isEqualTo(MigrationConfigStatus.INACTIVE);
+		verify(migrationMappingRuleRepository, never()).findByMapping_IdAndEnabledTrueOrderBySequenceNoAsc(any());
+		verify(migrationSourceRepository, never()).findByMigrationDefinition_IdAndEnabledTrueOrderByCreatedAtAsc(any());
+	}
+
+	@Test
+	void createAcceptsBulkPostgreSqlConfigurationWithStagingTable() {
+		when(migrationDefinitionRepository.existsByNameAndVersion("bulk-import", "1.0.0")).thenReturn(false);
+		when(migrationDefinitionRepository.save(any(MigrationDefinition.class)))
+				.thenAnswer(invocation -> invocation.getArgument(0));
+		Map<String, Object> configuration = new LinkedHashMap<>();
+		configuration.put("target", Map.of(
+				"mode", "UAM",
+				"schema", "app",
+				"stagingSchema", "migration_staging",
+				"stagingTable", "stage_table"));
+		configuration.put("promotion", Map.of("enabled", true));
+
+		MigrationDefinitionResponse response = service.create(new CreateMigrationDefinitionRequest(
+				"bulk-import",
+				"1.0.0",
+				null,
+				"FILE",
+				"POSTGRESQL",
+				null,
+				null,
+				null,
+				LoadMode.BULK,
+				configuration));
+
+		assertThat(response.status()).isEqualTo(MigrationConfigStatus.DRAFT);
+		assertThat(response.configuration()).containsKey("target");
+	}
+
+	@Test
+	void createRejectsBulkPostgreSqlConfigurationWithoutStagingTable() {
+		when(migrationDefinitionRepository.existsByNameAndVersion("bulk-import", "1.0.0")).thenReturn(false);
+
+		assertThatThrownBy(() -> service.create(new CreateMigrationDefinitionRequest(
+				"bulk-import",
+				"1.0.0",
+				null,
+				"FILE",
+				"POSTGRESQL",
+				null,
+				null,
+				null,
+				LoadMode.BULK,
+				Map.of("target", Map.of("stagingSchema", "migration_staging")))))
+				.isInstanceOfSatisfying(RequestValidationException.class, failure -> {
+					assertThat(failure.errors()).singleElement().satisfies(error -> {
+						assertThat(error.field()).isEqualTo("configuration.target.stagingTable");
+						assertThat(error.message()).isEqualTo("stagingTable is required for POSTGRESQL target");
+					});
+				});
+		verify(migrationDefinitionRepository, never()).save(any());
 	}
 
 	@Test
@@ -381,6 +651,20 @@ class MigrationDefinitionServiceTest {
 				.thenReturn(List.of(source));
 	}
 
+	private static Map<String, Object> singleEntityModel(String name) {
+		Map<String, Object> entity = new LinkedHashMap<>();
+		entity.put("name", name);
+		entity.put("targetEntity", "invoice");
+		entity.put("sourceKey", "invoice_id");
+		entity.put("targetKey", "id");
+		Map<String, Object> configuration = new LinkedHashMap<>();
+		configuration.put("modelType", "ENTITY_RELATIONSHIP");
+		configuration.put("rootEntity", name);
+		configuration.put("entities", List.of(entity));
+		configuration.put("relationships", List.of());
+		return configuration;
+	}
+
 	private static Map<String, Object> fileSystemCsvConfiguration(String objectKey) {
 		Map<String, Object> configuration = new HashMap<>();
 		configuration.put("provider", "FILE_SYSTEM");
@@ -403,7 +687,12 @@ class MigrationDefinitionServiceTest {
 		definition.setBatchSize(10_000);
 		definition.setLoadMode(LoadMode.BULK);
 		definition.setStatus(MigrationConfigStatus.DRAFT);
-		definition.setConfiguration(new HashMap<>());
+		Map<String, Object> target = new HashMap<>();
+		target.put("stagingSchema", "migration_staging");
+		target.put("stagingTable", "stage_table");
+		Map<String, Object> configuration = new HashMap<>();
+		configuration.put("target", target);
+		definition.setConfiguration(configuration);
 		definition.setCreatedAt(Instant.parse("2026-09-21T00:00:00Z"));
 		definition.setUpdatedAt(Instant.parse("2026-09-21T00:00:00Z"));
 		definition.setCreatedBy("system");

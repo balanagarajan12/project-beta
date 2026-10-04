@@ -7,6 +7,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.etp.migration.repository.MigrationMappingRuleRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -25,6 +26,9 @@ class MigrationDefinitionApiIntegrationTest {
 
 	@Autowired
 	private MockMvc mockMvc;
+
+	@Autowired
+	private MigrationMappingRuleRepository ruleRepository;
 
 	@MockitoBean
 	private JwtDecoder jwtDecoder;
@@ -174,7 +178,8 @@ class MigrationDefinitionApiIntegrationTest {
 								"""))
 				.andExpect(status().isCreated())
 				.andExpect(jsonPath("$.enabled").value(true))
-				.andExpect(jsonPath("$.mandatory").value(false));
+				.andExpect(jsonPath("$.mandatory").value(false))
+				.andExpect(jsonPath("$.entity").value(org.hamcrest.Matchers.nullValue()));
 
 		mockMvc.perform(post("/api/v1/mappings/{mappingId}/rules", mappingId)
 						.with(jwt())
@@ -190,7 +195,115 @@ class MigrationDefinitionApiIntegrationTest {
 
 		mockMvc.perform(get("/api/v1/mappings/{mappingId}/rules", mappingId).with(jwt()))
 				.andExpect(status().isOk())
-				.andExpect(jsonPath("$.content[0].sequenceNo").value(1));
+				.andExpect(jsonPath("$.content[0].sequenceNo").value(1))
+				.andExpect(jsonPath("$.content[0].entity").value(org.hamcrest.Matchers.nullValue()));
+	}
+
+	@Test
+	void entityScopedRulesRoundTripAndRejectUnknownEntities() throws Exception {
+		String unique = String.valueOf(System.nanoTime());
+		String mappingId = createRelationshipMapping(unique, "Customer", "Account");
+
+		mockMvc.perform(post("/api/v1/mappings/{mappingId}/rules", mappingId)
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("""
+								{
+								  "sequenceNo": 1,
+								  "entity": "Customer",
+								  "sourceField": "customer_name",
+								  "targetField": "name",
+								  "transformationType": "TRIM"
+								}
+								"""))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.entity").value("Customer"));
+
+		mockMvc.perform(get("/api/v1/mappings/{mappingId}/rules", mappingId).with(jwt()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.content[0].entity").value("Customer"));
+
+		assertThat(ruleRepository.findByMapping_IdAndEntityNameAndEnabledTrueOrderBySequenceNoAsc(
+				java.util.UUID.fromString(mappingId), "Customer"))
+				.singleElement()
+				.extracting(com.etp.migration.entity.MigrationMappingRule::getEntityName)
+				.isEqualTo("Customer");
+
+		mockMvc.perform(post("/api/v1/mappings/{mappingId}/rules", mappingId)
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("""
+								{
+								  "sequenceNo": 2,
+								  "sourceField": "customer_name",
+								  "targetField": "name",
+								  "transformationType": "TRIM"
+								}
+								"""))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.message").value(
+						"Mapping rule entity is required for an ENTITY_RELATIONSHIP mapping."));
+
+		mockMvc.perform(post("/api/v1/mappings/{mappingId}/rules", mappingId)
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("""
+								{
+								  "sequenceNo": 3,
+								  "entity": "Address",
+								  "sourceField": "customer_name",
+								  "targetField": "name",
+								  "transformationType": "TRIM"
+								}
+								"""))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.message").value(
+						"Mapping rule entity 'Address' is not defined in the migration mapping configuration."));
+	}
+
+	private String createRelationshipMapping(String unique, String root, String child) throws Exception {
+		MvcResult mapping = mockMvc.perform(post("/api/v1/mappings")
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("""
+								{
+								  "name": "phase2-map-%s",
+								  "version": "1.0.0",
+								  "sourceType": "FILE",
+								  "targetType": "POSTGRESQL",
+								  "configuration": {
+								    "modelType": "ENTITY_RELATIONSHIP",
+								    "rootEntity": "%s",
+								    "entities": [
+								      {
+								        "name": "%s",
+								        "targetEntity": "root_target",
+								        "sourceKey": "root_id",
+								        "targetKey": "id"
+								      },
+								      {
+								        "name": "%s",
+								        "targetEntity": "child_target",
+								        "sourceKey": "child_id",
+								        "targetKey": "id"
+								      }
+								    ],
+								    "relationships": [
+								      {
+								        "parent": "%s",
+								        "child": "%s",
+								        "cardinality": "ONE_TO_MANY",
+								        "keys": [
+								          { "parentField": "root_id", "childField": "root_id" }
+								        ]
+								      }
+								    ]
+								  }
+								}
+								""".formatted(unique, root, root, child, root, child)))
+				.andExpect(status().isCreated())
+				.andReturn();
+		return com.jayway.jsonpath.JsonPath.read(mapping.getResponse().getContentAsString(), "$.id");
 	}
 
 	@Test

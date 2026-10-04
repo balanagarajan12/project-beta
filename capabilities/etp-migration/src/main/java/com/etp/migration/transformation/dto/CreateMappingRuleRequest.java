@@ -11,6 +11,8 @@ public record CreateMappingRuleRequest(
 		@Positive(message = "sequenceNo must be greater than 0")
 		Integer sequenceNo,
 
+		String entity,
+
 		String sourceField,
 
 		@NotBlank(message = "targetField is required")

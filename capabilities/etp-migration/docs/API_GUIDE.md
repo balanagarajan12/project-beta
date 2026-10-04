@@ -289,7 +289,7 @@ Promotion batch statuses: `NOT_ELIGIBLE`, `ELIGIBLE`, `PROMOTING`, `PROMOTED`, `
 
 No body. Requires READY (409 `MIGRATION_PROMOTION_NOT_READY` if none). Already **PROMOTED** returns the stored result without rewriting.
 
-Writes parameterized INSERT or UPSERT into `promotion.schema.table`. Each ELIGIBLE batch is independently transactional; a failed batch does not roll back batches already committed (`PARTIALLY_PROMOTED` is possible). UPSERT is retry-safe when `conflictKeys` match target identity. INSERT is not inherently idempotent.
+When definition `target.mode` is `UAM`, the call allocates mapping-level target identities and inserts the configured canonical tables in one transaction per eligible batch. A failure rolls that UAM transaction back. Stored identity allocations are reused on retry. `ON CONFLICT (id) DO NOTHING` leaves an existing primary key in place. Flat mode writes parameterized INSERT or UPSERT into `promotion.schema.table`. A failed flat batch does not roll back batches already committed (`PARTIALLY_PROMOTED` is possible). The completed local demonstration is [ARCHITECTURE.md](ARCHITECTURE.md) §28. It is not a production UAM deployment.
 
 **200:** `ExecutePromotionResponse`  
 **400 / 404 / 409** as annotated on `PromotionController`

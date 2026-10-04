@@ -7,6 +7,7 @@ import com.etp.migration.connector.target.TargetInfrastructureException;
 import com.etp.migration.connector.target.TargetLoadModeNotSupportedException;
 import com.etp.migration.connector.target.TargetLoadResult;
 import com.etp.migration.entity.LoadMode;
+import com.etp.migration.processing.EntityIdempotencyKey;
 import com.etp.migration.processing.MigrationErrorCodes;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -20,6 +21,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import javax.sql.DataSource;
@@ -132,6 +134,7 @@ public class PostgreSqlTargetConnector implements MigrationTargetConnector {
 			connection.setAutoCommit(false);
 			try {
 				replaceStagingRows(connection, staging, context);
+				deleteEntityIdempotencyKeys(connection, staging, context, records);
 				long copied = streamCopy(connection, staging, context, records);
 				connection.commit();
 				return copied;
@@ -160,6 +163,39 @@ public class PostgreSqlTargetConnector implements MigrationTargetConnector {
 			statement.setObject(1, context.migrationRunId());
 			statement.setLong(2, context.migrationBatchId());
 			statement.executeUpdate();
+		}
+	}
+
+	private void deleteEntityIdempotencyKeys(
+			Connection connection,
+			PostgreSqlStagingTarget.Resolved staging,
+			MigrationTargetContext context,
+			List<LoadableTargetRecord> records) throws SQLException {
+		List<String> keys = new ArrayList<>();
+		for (LoadableTargetRecord record : records) {
+			if (EntityIdempotencyKey.isEntityKey(record.idempotencyKey())) {
+				keys.add(record.idempotencyKey());
+			}
+		}
+		int chunkSize = 500;
+		for (int offset = 0; offset < keys.size(); offset += chunkSize) {
+			List<String> chunk = keys.subList(offset, Math.min(offset + chunkSize, keys.size()));
+			StringBuilder placeholders = new StringBuilder();
+			for (int index = 0; index < chunk.size(); index++) {
+				if (index > 0) {
+					placeholders.append(',');
+				}
+				placeholders.append('?');
+			}
+			String sql = "DELETE FROM " + PostgreSqlStagingTarget.quoted(staging)
+					+ " WHERE migration_run_id = ? AND idempotency_key IN (" + placeholders + ")";
+			try (PreparedStatement statement = connection.prepareStatement(sql)) {
+				statement.setObject(1, context.migrationRunId());
+				for (int index = 0; index < chunk.size(); index++) {
+					statement.setString(index + 2, chunk.get(index));
+				}
+				statement.executeUpdate();
+			}
 		}
 	}
 

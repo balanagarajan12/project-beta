@@ -1,6 +1,5 @@
 package com.etp.migration.promotion;
 
-import com.etp.migration.connector.target.postgresql.PromotionTargetConfiguration;
 import com.etp.migration.entity.MigrationBatch;
 import com.etp.migration.entity.MigrationBatchStatus;
 import com.etp.migration.entity.MigrationDefinition;
@@ -85,7 +84,7 @@ public class PromotionPreparationService {
 				: definition.getConfiguration();
 
 		requirePostgresqlTarget(definition.getTargetType());
-		PromotionTargetConfiguration promotionConfig = requireEnabledPromotion(configuration);
+		PromotionConfigurationGate.requireEnabled(configuration);
 		requireExecutionComplete(run);
 		requireNoActiveBatches(runId);
 		requireReconciliation(runId);
@@ -195,23 +194,6 @@ public class PromotionPreparationService {
 					MigrationErrorCodes.PROMOTION_UNSUPPORTED_TARGET,
 					"Promotion is only supported for PostgreSQL targets");
 		}
-	}
-
-	private static PromotionTargetConfiguration requireEnabledPromotion(Map<String, Object> configuration) {
-		if (configuration == null || !configuration.containsKey("promotion")) {
-			throw new PromotionException(
-					HttpStatus.BAD_REQUEST.value(),
-					MigrationErrorCodes.PROMOTION_NOT_CONFIGURED,
-					"Promotion is not configured");
-		}
-		PromotionTargetConfiguration parsed = PromotionTargetConfiguration.parse(configuration);
-		if (!parsed.enabled()) {
-			throw new PromotionException(
-					HttpStatus.BAD_REQUEST.value(),
-					MigrationErrorCodes.PROMOTION_DISABLED,
-					"Promotion is disabled");
-		}
-		return parsed;
 	}
 
 	private static void requireExecutionComplete(MigrationRun run) {

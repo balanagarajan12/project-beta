@@ -3,6 +3,8 @@ package com.etp.migration.transformation;
 import com.etp.migration.entity.MigrationConfigStatus;
 import com.etp.migration.entity.MigrationMapping;
 import com.etp.migration.entity.MigrationMappingRule;
+import com.etp.migration.mapping.EntityRelationshipConfiguration;
+import com.etp.migration.mapping.InvalidEntityRelationshipConfigurationException;
 import com.etp.migration.migration.ControlPlaneSupport;
 import com.etp.migration.migration.DuplicateMigrationMappingException;
 import com.etp.migration.migration.DuplicateMappingRuleException;
@@ -15,6 +17,7 @@ import com.etp.migration.transformation.dto.CreateMigrationMappingRequest;
 import com.etp.migration.transformation.dto.MigrationMappingResponse;
 import com.etp.migration.transformation.dto.MigrationMappingRuleResponse;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
@@ -40,6 +43,7 @@ public class MigrationMappingService {
 		if (migrationMappingRepository.existsByNameAndVersion(request.name(), request.version())) {
 			throw new DuplicateMigrationMappingException(request.name(), request.version());
 		}
+		EntityRelationshipConfiguration.validate(request.configuration());
 
 		Instant now = Instant.now();
 		MigrationMapping mapping = new MigrationMapping();
@@ -94,10 +98,14 @@ public class MigrationMappingService {
 			throw new DuplicateMappingRuleException(request.sequenceNo());
 		}
 
+		String entityName = normalizeEntity(request.entity());
+		EntityRelationshipConfiguration.validateRuleEntity(mapping.getConfiguration(), entityName);
+
 		Instant now = Instant.now();
 		MigrationMappingRule rule = new MigrationMappingRule();
 		rule.setMapping(mapping);
 		rule.setSequenceNo(request.sequenceNo());
+		rule.setEntityName(entityName);
 		rule.setSourceField(request.sourceField());
 		rule.setTargetField(request.targetField());
 		rule.setTransformationType(request.transformationType());
@@ -135,6 +143,22 @@ public class MigrationMappingService {
 				result.getTotalPages());
 	}
 
+	@Transactional(readOnly = true)
+	public List<MigrationMappingRuleResponse> rulesForEntity(UUID mappingId, String entity) {
+		if (!migrationMappingRepository.existsById(mappingId)) {
+			throw new MappingNotFoundException(mappingId);
+		}
+		String entityName = normalizeEntity(entity);
+		if (entityName == null) {
+			throw new IllegalArgumentException("entity is required");
+		}
+		return migrationMappingRuleRepository
+				.findByMapping_IdAndEntityNameAndEnabledTrueOrderBySequenceNoAsc(mappingId, entityName)
+				.stream()
+				.map(this::toRuleResponse)
+				.toList();
+	}
+
 	private MigrationMappingResponse toMappingResponse(MigrationMapping mapping) {
 		return new MigrationMappingResponse(
 				mapping.getId(),
@@ -156,6 +180,7 @@ public class MigrationMappingService {
 				rule.getId(),
 				rule.getMapping().getId(),
 				rule.getSequenceNo(),
+				rule.getEntityName(),
 				rule.getSourceField(),
 				rule.getTargetField(),
 				rule.getTransformationType(),
@@ -166,5 +191,17 @@ public class MigrationMappingService {
 				rule.isEnabled(),
 				rule.getCreatedAt(),
 				rule.getUpdatedAt());
+	}
+
+	private static String normalizeEntity(String entity) {
+		if (entity == null || entity.isBlank()) {
+			return null;
+		}
+		String trimmed = entity.trim();
+		if (trimmed.length() > 100) {
+			throw new InvalidEntityRelationshipConfigurationException(
+					"Mapping rule entity exceeds 100 characters.");
+		}
+		return trimmed;
 	}
 }

@@ -76,7 +76,9 @@ class CompositeMigrationConfigurationIntegrationTest {
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.content.length()").value(2))
 				.andExpect(jsonPath("$.content[0].sequenceNo").value(1))
-				.andExpect(jsonPath("$.content[1].sequenceNo").value(2));
+				.andExpect(jsonPath("$.content[0].entity").value(org.hamcrest.Matchers.nullValue()))
+				.andExpect(jsonPath("$.content[1].sequenceNo").value(2))
+				.andExpect(jsonPath("$.content[1].entity").value(org.hamcrest.Matchers.nullValue()));
 		mockMvc.perform(get("/api/v1/migrations/{id}/sources/{sourceId}", definitionId, sourceId).with(jwt()))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.enabled").value(true));
@@ -107,7 +109,13 @@ class CompositeMigrationConfigurationIntegrationTest {
 								  "name": "phase14-def-%s",
 								  "version": "1.0.0",
 								  "sourceType": "FILE",
-								  "targetType": "POSTGRESQL"
+								  "targetType": "POSTGRESQL",
+								  "configuration": {
+								    "target": {
+								      "stagingSchema": "migration_staging",
+								      "stagingTable": "stage_table"
+								    }
+								  }
 								}
 								""".formatted(unique)))
 				.andExpect(status().isCreated());
@@ -205,6 +213,86 @@ class CompositeMigrationConfigurationIntegrationTest {
 	}
 
 	@Test
+	void entityRelationshipCompositePersistsScopedRules() throws Exception {
+		String unique = String.valueOf(System.nanoTime());
+		MvcResult created = mockMvc.perform(post("/api/v1/migration-configurations")
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(relationshipComposite(unique, "Product", "Variant", true)))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.rules[0].entity").value("Product"))
+				.andExpect(jsonPath("$.rules[1].entity").value("Variant"))
+				.andReturn();
+
+		String mappingId = read(created, "$.mapping.id");
+		assertThat(ruleRepository.findByMapping_IdAndEntityNameAndEnabledTrueOrderBySequenceNoAsc(
+				UUID.fromString(mappingId), "Product"))
+				.singleElement()
+				.extracting(com.etp.migration.entity.MigrationMappingRule::getEntityName)
+				.isEqualTo("Product");
+		assertThat(ruleRepository.findByMapping_IdOrderBySequenceNoAsc(UUID.fromString(mappingId)))
+				.extracting(com.etp.migration.entity.MigrationMappingRule::getEntityName)
+				.containsExactly("Product", "Variant");
+	}
+
+	@Test
+	void entityRelationshipCompositeRejectsUnknownRuleEntity() throws Exception {
+		String unique = String.valueOf(System.nanoTime());
+		String mappingName = "phase2-map-" + unique;
+		mockMvc.perform(post("/api/v1/migration-configurations")
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(relationshipComposite(unique, "Product", "Variant", false)))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.message").value(
+						"Mapping rule entity 'Address' is not defined in the migration mapping configuration."));
+
+		assertThat(mappingRepository.existsByNameAndVersion(mappingName, "1.0.0")).isFalse();
+	}
+
+	@Test
+	void entityRelationshipCompositeRejectsMissingRuleEntity() throws Exception {
+		String unique = String.valueOf(System.nanoTime());
+		mockMvc.perform(post("/api/v1/migration-configurations")
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(relationshipComposite(unique, "Product", "Variant", true).replace(
+								"\"entity\": \"Product\"",
+								"\"sourceField\": \"product_name\"")))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.message").value(
+						"Mapping rule entity is required for an ENTITY_RELATIONSHIP mapping."));
+	}
+
+	@Test
+	void multiFileSourceRejectsUnknownEntity() throws Exception {
+		String unique = String.valueOf(System.nanoTime());
+		String mappingName = "phase4-map-" + unique;
+		mockMvc.perform(post("/api/v1/migration-configurations")
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(multiFileComposite(unique, "Address", "address.csv")))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.message").value(
+						"Source file entity 'Address' is not defined in the migration mapping configuration."));
+
+		assertThat(mappingRepository.existsByNameAndVersion(mappingName, "1.0.0")).isFalse();
+	}
+
+	@Test
+	void multiFileSourcePersistsConfiguredFiles() throws Exception {
+		String unique = String.valueOf(System.nanoTime());
+		mockMvc.perform(post("/api/v1/migration-configurations")
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(multiFileComposite(unique, "Product", "product.csv")))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.sources[0].configuration.layoutType").value("MULTI_FILE"))
+				.andExpect(jsonPath("$.sources[0].configuration.files.Product.file").value("product.csv"))
+				.andExpect(jsonPath("$.sources[0].configuration.files.Variant.file").value("variant.csv"));
+	}
+
+	@Test
 	void existingFlatDefinitionCreateRemainsUnchanged() throws Exception {
 		String unique = "phase14-flat-" + System.nanoTime();
 		mockMvc.perform(post("/api/v1/migrations")
@@ -270,7 +358,26 @@ class CompositeMigrationConfigurationIntegrationTest {
 				    }
 				  }
 				}
-				""".formatted(definitionSuffix, configuration, mappingName, rules);
+				""".formatted(definitionSuffix, withStagingTable(configuration), mappingName, rules);
+	}
+
+	private static String withStagingTable(String configuration) {
+		if (configuration.contains("\"stagingTable\"")) {
+			return configuration;
+		}
+		String trimmed = configuration.trim();
+		String staging = """
+				"target": {
+				  "stagingSchema": "migration_staging",
+				  "stagingTable": "stage_table"
+				}""";
+		if (trimmed.equals("{}")) {
+			return "{\n" + staging + "\n}";
+		}
+		if (trimmed.startsWith("{")) {
+			return "{\n" + staging + "," + trimmed.substring(1);
+		}
+		return configuration;
 	}
 
 	private static String uniqueRules() {
@@ -318,6 +425,165 @@ class CompositeMigrationConfigurationIntegrationTest {
 				  }
 				}
 				""";
+	}
+
+	private static String relationshipComposite(String unique, String root, String child, boolean validRuleEntity) {
+		String secondEntity = validRuleEntity ? child : "Address";
+		return """
+				{
+				  "definition": {
+				    "name": "phase2-def-%s",
+				    "version": "1.0.0",
+				    "sourceType": "FILE",
+				    "targetType": "POSTGRESQL",
+				    "configuration": {
+				      "target": {
+				        "stagingSchema": "migration_staging",
+				        "stagingTable": "stage_table"
+				      }
+				    }
+				  },
+				  "mapping": {
+				    "name": "phase2-map-%s",
+				    "version": "1.0.0",
+				    "sourceType": "FILE",
+				    "targetType": "POSTGRESQL",
+				    "configuration": {
+				      "modelType": "ENTITY_RELATIONSHIP",
+				      "rootEntity": "%s",
+				      "entities": [
+				        {
+				          "name": "%s",
+				          "targetEntity": "root_target",
+				          "sourceKey": "root_id",
+				          "targetKey": "id"
+				        },
+				        {
+				          "name": "%s",
+				          "targetEntity": "child_target",
+				          "sourceKey": "child_id",
+				          "targetKey": "id"
+				        }
+				      ],
+				      "relationships": [
+				        {
+				          "parent": "%s",
+				          "child": "%s",
+				          "cardinality": "ONE_TO_MANY",
+				          "keys": [
+				            { "parentField": "root_id", "childField": "root_id" }
+				          ]
+				        }
+				      ]
+				    }
+				  },
+				  "rules": [
+				    {
+				      "sequenceNo": 1,
+				      "entity": "%s",
+				      "sourceField": "root_name",
+				      "targetField": "name",
+				      "transformationType": "TRIM"
+				    },
+				    {
+				      "sequenceNo": 2,
+				      "entity": "%s",
+				      "sourceField": "child_code",
+				      "targetField": "code",
+				      "transformationType": "TRIM"
+				    }
+				  ],
+				  "source": {
+				    "name": "csv-source",
+				    "sourceType": "FILE",
+				    "configuration": {
+				      "provider": "FILE_SYSTEM",
+				      "objectKey": "samples/phase2.csv",
+				      "fileFormat": "CSV"
+				    }
+				  }
+				}
+				""".formatted(unique, unique, root, root, child, root, child, root, secondEntity);
+	}
+
+	private static String multiFileComposite(String unique, String firstEntity, String firstFile) {
+		return """
+				{
+				  "definition": {
+				    "name": "phase4-def-%s",
+				    "version": "1.0.0",
+				    "sourceType": "FILE",
+				    "targetType": "POSTGRESQL",
+				    "configuration": {
+				      "target": {
+				        "stagingSchema": "migration_staging",
+				        "stagingTable": "stage_table"
+				      }
+				    }
+				  },
+				  "mapping": {
+				    "name": "phase4-map-%s",
+				    "version": "1.0.0",
+				    "sourceType": "FILE",
+				    "targetType": "POSTGRESQL",
+				    "configuration": {
+				      "modelType": "ENTITY_RELATIONSHIP",
+				      "rootEntity": "Product",
+				      "entities": [
+				        {
+				          "name": "Product",
+				          "targetEntity": "product",
+				          "sourceKey": "product_id",
+				          "targetKey": "id"
+				        },
+				        {
+				          "name": "Variant",
+				          "targetEntity": "variant",
+				          "sourceKey": "variant_id",
+				          "targetKey": "id"
+				        }
+				      ],
+				      "relationships": [
+				        {
+				          "parent": "Product",
+				          "child": "Variant",
+				          "cardinality": "ONE_TO_MANY",
+				          "keys": [
+				            { "parentField": "product_id", "childField": "product_id" }
+				          ]
+				        }
+				      ]
+				    }
+				  },
+				  "rules": [
+				    {
+				      "sequenceNo": 1,
+				      "entity": "Product",
+				      "sourceField": "product_id",
+				      "targetField": "id",
+				      "transformationType": "DIRECT"
+				    },
+				    {
+				      "sequenceNo": 2,
+				      "entity": "Variant",
+				      "sourceField": "variant_id",
+				      "targetField": "id",
+				      "transformationType": "DIRECT"
+				    }
+				  ],
+				  "source": {
+				    "name": "csv-source",
+				    "sourceType": "FILE",
+				    "configuration": {
+				      "layoutType": "MULTI_FILE",
+				      "files": {
+				        "%s": { "file": "%s" },
+				        "Variant": { "file": "variant.csv" }
+				      }
+				    }
+				  }
+				}
+				""".formatted(unique, unique, firstEntity, firstFile);
 	}
 
 	private static String read(MvcResult result, String path) throws Exception {

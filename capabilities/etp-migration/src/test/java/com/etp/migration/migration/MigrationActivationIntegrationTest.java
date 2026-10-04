@@ -150,7 +150,13 @@ class MigrationActivationIntegrationTest {
 								  "version": "1.0.0",
 								  "sourceType": "FILE_SYSTEM",
 								  "targetType": "POSTGRESQL",
-								  "mappingId": "%s"
+								  "mappingId": "%s",
+								  "configuration": {
+								    "target": {
+								      "stagingSchema": "migration_staging",
+								      "stagingTable": "stage_table"
+								    }
+								  }
 								}
 								""".formatted(System.nanoTime(), mappingId)))
 				.andExpect(status().isCreated())
@@ -194,7 +200,13 @@ class MigrationActivationIntegrationTest {
 								  "name": "phase14c-incomplete-%s",
 								  "version": "1.0.0",
 								  "sourceType": "FILE",
-								  "targetType": "POSTGRESQL"
+								  "targetType": "POSTGRESQL",
+								  "configuration": {
+								    "target": {
+								      "stagingSchema": "migration_staging",
+								      "stagingTable": "stage_table"
+								    }
+								  }
 								}
 								""".formatted(System.nanoTime())))
 				.andExpect(status().isCreated())
@@ -218,7 +230,13 @@ class MigrationActivationIntegrationTest {
 								  "version": "1.0.0",
 								  "sourceType": "FILE",
 								  "targetType": "POSTGRESQL",
-								  "mappingId": "%s"
+								  "mappingId": "%s",
+								  "configuration": {
+								    "target": {
+								      "stagingSchema": "migration_staging",
+								      "stagingTable": "stage_table"
+								    }
+								  }
 								}
 								""".formatted(System.nanoTime(), mappingId)))
 				.andExpect(status().isCreated())

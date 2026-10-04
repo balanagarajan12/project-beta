@@ -55,15 +55,30 @@ public final class BenchmarkDataGenerator {
 	public static void main(String[] args) {
 		int records = 1_000_000;
 		Path output = Path.of("./data/benchmark/addresses.csv");
+		String layout = "flat";
 		for (int i = 0; i < args.length; i++) {
 			if ("--records".equals(args[i]) && i + 1 < args.length) {
 				records = Integer.parseInt(args[++i]);
 			} else if ("--output".equals(args[i]) && i + 1 < args.length) {
 				output = Path.of(args[++i]);
+			} else if ("--layout".equals(args[i]) && i + 1 < args.length) {
+				layout = args[++i];
 			}
 		}
-		long bytes = generate(BenchmarkConfiguration.of(records, BenchmarkConfiguration.DEFAULT_BATCH_SIZE, output));
-		System.out.println("Wrote " + records + " records (" + bytes + " bytes) to " + output.toAbsolutePath());
+		if ("single".equalsIgnoreCase(layout)) {
+			EntityDatasetGenerator.Shape shape = EntityDatasetGenerator.writeSingle(output, records);
+			System.out.println("Wrote single-file entity dataset leaves=" + records
+					+ " entities=" + shape.entities() + " to " + output.toAbsolutePath());
+			return;
+		}
+		if ("multi".equalsIgnoreCase(layout)) {
+			EntityDatasetGenerator.Shape shape = EntityDatasetGenerator.writeMulti(output, records);
+			System.out.println("Wrote multi-file entity dataset leaves=" + records
+					+ " entities=" + shape.entities() + " to " + output.toAbsolutePath());
+			return;
+		}
+		long bytes = BenchmarkDataGenerator.generate(BenchmarkConfiguration.of(records, BenchmarkConfiguration.DEFAULT_BATCH_SIZE, output));
+		System.out.println("Wrote " + records + " flat records (" + bytes + " bytes) to " + output.toAbsolutePath());
 	}
 
 	static String row(int recordId) {

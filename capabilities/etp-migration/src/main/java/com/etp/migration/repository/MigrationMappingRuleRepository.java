@@ -14,4 +14,10 @@ public interface MigrationMappingRuleRepository extends JpaRepository<MigrationM
 	Page<MigrationMappingRule> findByMapping_Id(UUID mappingId, Pageable pageable);
 
 	List<MigrationMappingRule> findByMapping_IdAndEnabledTrueOrderBySequenceNoAsc(UUID mappingId);
+
+	List<MigrationMappingRule> findByMapping_IdOrderBySequenceNoAsc(UUID mappingId);
+
+	List<MigrationMappingRule> findByMapping_IdAndEntityNameAndEnabledTrueOrderBySequenceNoAsc(
+			UUID mappingId,
+			String entityName);
 }

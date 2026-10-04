@@ -130,9 +130,9 @@ class CompositeMigrationConfigurationServiceTest {
 				new CreateMigrationMappingRequest("addr-map", "1.0.0", "FILE", "POSTGRESQL", null, null),
 				List.of(
 						new CreateMappingRuleRequest(
-								1, "external_id", "external_id", TransformationType.DIRECT, null, null, null, true, true),
+								1, null, "external_id", "external_id", TransformationType.DIRECT, null, null, null, true, true),
 						new CreateMappingRuleRequest(
-								2, "city", "city", TransformationType.DIRECT, null, null, null, false, true)),
+								2, null, "city", "city", TransformationType.DIRECT, null, null, null, false, true)),
 				new CreateMigrationSourceRequest("csv", "FILE", Map.of("provider", "FILE_SYSTEM"), null));
 	}
 
@@ -146,7 +146,7 @@ class CompositeMigrationConfigurationServiceTest {
 	private static MigrationMappingRuleResponse ruleResponse(long id, int sequence) {
 		Instant now = Instant.parse("2026-09-21T00:00:00Z");
 		return new MigrationMappingRuleResponse(
-				id, MAPPING_ID, sequence, "f", "f", TransformationType.DIRECT, null, null, Map.of(),
+				id, MAPPING_ID, sequence, null, "f", "f", TransformationType.DIRECT, null, null, Map.of(),
 				false, true, now, now);
 	}
 

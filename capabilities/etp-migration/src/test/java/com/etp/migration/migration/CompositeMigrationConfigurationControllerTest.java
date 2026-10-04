@@ -4,6 +4,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -21,6 +22,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -97,7 +99,189 @@ class CompositeMigrationConfigurationControllerTest {
 								}
 								"""))
 				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("name is required")));
+				.andExpect(jsonPath("$.status").value(400))
+				.andExpect(jsonPath("$.error").value("Validation Failed"))
+				.andExpect(jsonPath("$.message").value("Request validation failed"))
+				.andExpect(jsonPath("$.path").value("/api/v1/migration-configurations"))
+				.andExpect(jsonPath("$.errors[?(@.field == 'definition.name')].message",
+						Matchers.hasItem("name is required")));
+	}
+
+	@Test
+	void invalidTransformationTypeReturnsFieldError() throws Exception {
+		mockMvc.perform(post("/api/v1/migration-configurations")
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(validBody().replace("\"DIRECT\"", "\"IDENTITY\"")))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.error").value("Validation Failed"))
+				.andExpect(jsonPath("$.message").value("Request validation failed"))
+				.andExpect(jsonPath("$.errors[0].field").value("rules[0].transformationType"))
+				.andExpect(jsonPath("$.errors[0].rejectedValue").value("IDENTITY"))
+				.andExpect(jsonPath("$.errors[0].message").value("Unsupported transformation type"))
+				.andExpect(jsonPath("$.errors[0].allowedValues", Matchers.hasItems(
+						"DIRECT", "TRIM", "UPPERCASE", "LOWERCASE", "DEFAULT", "CONCAT",
+						"SPLIT", "LOOKUP", "REGEX", "CONDITIONAL", "DATE_FORMAT", "CUSTOM")))
+				.andExpect(content().string(Matchers.not(Matchers.containsString("com.etp"))))
+				.andExpect(content().string(Matchers.not(Matchers.containsString("Exception"))));
+	}
+
+	@Test
+	void invalidLoadModeReturnsFieldError() throws Exception {
+		mockMvc.perform(post("/api/v1/migration-configurations")
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(validBody().replace(
+								"\"targetType\": \"POSTGRESQL\"",
+								"\"targetType\": \"POSTGRESQL\",\n    \"loadMode\": \"FAST\"")))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.errors[0].field").value("definition.loadMode"))
+				.andExpect(jsonPath("$.errors[0].rejectedValue").value("FAST"))
+				.andExpect(jsonPath("$.errors[0].message").value("Unsupported load mode"))
+				.andExpect(jsonPath("$.errors[0].allowedValues", Matchers.hasItems("SINGLE", "BATCH", "BULK")));
+	}
+
+	@Test
+	void multipleInvalidFieldsAreReturnedTogether() throws Exception {
+		mockMvc.perform(post("/api/v1/migration-configurations")
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("""
+								{
+								  "definition": {
+								    "version": "1.0.0",
+								    "sourceType": "FILE",
+								    "targetType": "POSTGRESQL"
+								  },
+								  "mapping": {
+								    "version": "1.0.0",
+								    "sourceType": "FILE",
+								    "targetType": "POSTGRESQL"
+								  },
+								  "rules": [
+								    {
+								      "sequenceNo": 1,
+								      "targetField": "external_id",
+								      "transformationType": "DIRECT"
+								    }
+								  ],
+								  "source": {
+								    "name": "csv",
+								    "sourceType": "FILE"
+								  }
+								}
+								"""))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.errors[*].field", Matchers.hasItems("definition.name", "mapping.name")))
+				.andExpect(jsonPath("$.errors.length()", Matchers.greaterThanOrEqualTo(2)));
+	}
+
+	@Test
+	void missingStagingTableReturnsFieldError() throws Exception {
+		mockMvc.perform(post("/api/v1/migration-configurations")
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("""
+								{
+								  "definition": {
+								    "name": "addr-import",
+								    "version": "1.0.0",
+								    "sourceType": "FILE",
+								    "targetType": "POSTGRESQL",
+								    "loadMode": "BULK",
+								    "configuration": {
+								      "target": {
+								        "mode": "UAM",
+								        "schema": "app",
+								        "stagingSchema": "migration_staging"
+								      }
+								    }
+								  },
+								  "mapping": {
+								    "name": "addr-map",
+								    "version": "1.0.0",
+								    "sourceType": "FILE",
+								    "targetType": "POSTGRESQL"
+								  },
+								  "rules": [
+								    {
+								      "sequenceNo": 1,
+								      "sourceField": "external_id",
+								      "targetField": "external_id",
+								      "transformationType": "DIRECT"
+								    }
+								  ],
+								  "source": {
+								    "name": "csv",
+								    "sourceType": "FILE"
+								  }
+								}
+								"""))
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.errors[0].field").value("definition.configuration.target.stagingTable"))
+				.andExpect(jsonPath("$.errors[0].message").value("stagingTable is required for POSTGRESQL target"));
+	}
+
+	@Test
+	void entityRelationshipConfigurationWithStagingTableIsAccepted() throws Exception {
+		when(compositeMigrationConfigurationService.create(any())).thenReturn(sampleResponse());
+
+		mockMvc.perform(post("/api/v1/migration-configurations")
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("""
+								{
+								  "definition": {
+								    "name": "item-import",
+								    "version": "1.0.0",
+								    "sourceType": "FILE",
+								    "targetType": "POSTGRESQL",
+								    "loadMode": "BULK",
+								    "configuration": {
+								      "target": {
+								        "stagingSchema": "migration_staging",
+								        "stagingTable": "stage_table"
+								      }
+								    }
+								  },
+								  "mapping": {
+								    "name": "item-map",
+								    "version": "1.0.0",
+								    "sourceType": "FILE",
+								    "targetType": "POSTGRESQL",
+								    "configuration": {
+								      "modelType": "ENTITY_RELATIONSHIP",
+								      "rootEntity": "Item",
+								      "entities": [
+								        {
+								          "name": "Item",
+								          "targetEntity": "item",
+								          "sourceKey": "item_id",
+								          "targetKey": "id"
+								        }
+								      ],
+								      "relationships": []
+								    }
+								  },
+								  "rules": [
+								    {
+								      "sequenceNo": 1,
+								      "entity": "Item",
+								      "sourceField": "item_id",
+								      "targetField": "id",
+								      "transformationType": "DIRECT"
+								    }
+								  ],
+								  "source": {
+								    "name": "csv",
+								    "sourceType": "FILE",
+								    "configuration": {
+								      "provider": "FILE_SYSTEM"
+								    }
+								  }
+								}
+								"""))
+				.andExpect(status().isCreated());
 	}
 
 	@Test
@@ -115,7 +299,13 @@ class CompositeMigrationConfigurationControllerTest {
 				    "name": "addr-import",
 				    "version": "1.0.0",
 				    "sourceType": "FILE",
-				    "targetType": "POSTGRESQL"
+				    "targetType": "POSTGRESQL",
+				    "configuration": {
+				      "target": {
+				        "stagingSchema": "migration_staging",
+				        "stagingTable": "stage_table"
+				      }
+				    }
 				  },
 				  "mapping": {
 				    "name": "addr-map",
@@ -155,7 +345,7 @@ class CompositeMigrationConfigurationControllerTest {
 						MAPPING_ID, "addr-map", "1.0.0", "FILE", "POSTGRESQL", null, Map.of(),
 						MigrationConfigStatus.DRAFT, now, "system", now, "system"),
 				List.of(new MigrationMappingRuleResponse(
-						1L, MAPPING_ID, 1, "external_id", "external_id", TransformationType.DIRECT,
+						1L, MAPPING_ID, 1, null, "external_id", "external_id", TransformationType.DIRECT,
 						null, null, Map.of(), true, true, now, now)),
 				List.of(new MigrationSourceResponse(
 						SOURCE_ID, DEFINITION_ID, "csv", "FILE", Map.of(), true, now, "system", now, "system")));

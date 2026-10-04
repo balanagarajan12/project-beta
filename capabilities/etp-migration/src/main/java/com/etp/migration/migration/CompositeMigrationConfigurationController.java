@@ -1,5 +1,6 @@
 package com.etp.migration.migration;
 
+import com.etp.migration.entity.LoadMode;
 import com.etp.migration.migration.dto.CompositeMigrationConfigurationRequest;
 import com.etp.migration.migration.dto.CompositeMigrationConfigurationResponse;
 import io.swagger.v3.oas.annotations.Operation;
@@ -38,6 +39,14 @@ public class CompositeMigrationConfigurationController {
 	@PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
 	public ResponseEntity<CompositeMigrationConfigurationResponse> create(
 			@Valid @RequestBody CompositeMigrationConfigurationRequest request) {
+		LoadMode loadMode = request.definition().loadMode() == null
+				? LoadMode.BULK
+				: request.definition().loadMode();
+		PostgreSqlBulkTargetRules.require(
+				request.definition().targetType(),
+				loadMode,
+				request.definition().configuration(),
+				"definition.configuration");
 		CompositeMigrationConfigurationResponse created = compositeMigrationConfigurationService.create(request);
 		return ResponseEntity
 				.created(URI.create("/api/v1/migrations/" + created.definition().id()))

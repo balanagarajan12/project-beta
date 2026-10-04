@@ -4,26 +4,46 @@ import com.etp.migration.connector.target.MigrationTargetReconciliationProviderR
 import com.etp.migration.connector.target.TargetInfrastructureException;
 import com.etp.migration.connector.target.TargetVerification;
 import com.etp.migration.connector.target.postgresql.PostgreSqlBusinessTargetVerifier;
+import com.etp.migration.entity.MigrationBatch;
 import com.etp.migration.entity.MigrationBatchStatus;
+import com.etp.migration.entity.MigrationError;
+import com.etp.migration.entity.MigrationMapping;
 import com.etp.migration.entity.MigrationReconciliation;
 import com.etp.migration.entity.MigrationRun;
 import com.etp.migration.entity.ReconciliationStatus;
 import com.etp.migration.entity.ReconciliationType;
+import com.etp.migration.execution.ExecutionMode;
+import com.etp.migration.mapping.EntityRelationshipConfiguration;
+import com.etp.migration.mapping.EntityRelationshipMapping;
+import com.etp.migration.mapping.RelationshipDefinition;
 import com.etp.migration.reconciliation.dto.MigrationReconciliationResponse;
 import com.etp.migration.reconciliation.dto.ReconciliationBundleResponse;
 import com.etp.migration.reconciliation.dto.ReconciliationItemResponse;
 import com.etp.migration.repository.MigrationBatchRepository;
+import com.etp.migration.repository.MigrationErrorRepository;
 import com.etp.migration.repository.MigrationReconciliationRepository;
 import com.etp.migration.repository.MigrationRunRepository;
 import com.etp.migration.processing.MigrationErrorCodes;
 import com.etp.migration.promotion.PromotionException;
 import com.etp.migration.run.MigrationRunNotFoundException;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import java.time.Instant;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Stream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -45,15 +65,20 @@ public class ReconciliationService {
 	private final MigrationRunRepository migrationRunRepository;
 	private final MigrationBatchRepository migrationBatchRepository;
 	private final MigrationReconciliationRepository reconciliationRepository;
+	private final MigrationErrorRepository migrationErrorRepository;
 	private final ReconciliationEngine reconciliationEngine;
 	private final MigrationTargetReconciliationProviderRegistry targetReconciliationRegistry;
 	private final PostgreSqlBusinessTargetVerifier businessTargetVerifier;
+
+	@PersistenceContext
+	private EntityManager entityManager;
 
 	public ReconciliationService(
 			PlatformTransactionManager transactionManager,
 			MigrationRunRepository migrationRunRepository,
 			MigrationBatchRepository migrationBatchRepository,
 			MigrationReconciliationRepository reconciliationRepository,
+			MigrationErrorRepository migrationErrorRepository,
 			ReconciliationEngine reconciliationEngine,
 			MigrationTargetReconciliationProviderRegistry targetReconciliationRegistry,
 			PostgreSqlBusinessTargetVerifier businessTargetVerifier) {
@@ -61,6 +86,7 @@ public class ReconciliationService {
 		this.migrationRunRepository = migrationRunRepository;
 		this.migrationBatchRepository = migrationBatchRepository;
 		this.reconciliationRepository = reconciliationRepository;
+		this.migrationErrorRepository = migrationErrorRepository;
 		this.reconciliationEngine = reconciliationEngine;
 		this.targetReconciliationRegistry = targetReconciliationRegistry;
 		this.businessTargetVerifier = businessTargetVerifier;
@@ -71,17 +97,40 @@ public class ReconciliationService {
 	}
 
 	public MigrationReconciliationResponse reconcile(UUID runId, String verificationScope) {
+		MigrationReconciliationResponse[] response = new MigrationReconciliationResponse[1];
+		com.etp.migration.processing.PipelineTiming.open(() -> {
+			long started = com.etp.migration.processing.PipelineTiming.start();
+			try {
+				response[0] = reconcileMeasured(runId, verificationScope);
+			} finally {
+				com.etp.migration.processing.PipelineTiming.stop(
+						com.etp.migration.processing.PipelineTiming.Stage.RECONCILIATION,
+						started);
+			}
+		});
+		return response[0];
+	}
+
+	private MigrationReconciliationResponse reconcileMeasured(UUID runId, String verificationScope) {
 		boolean businessTarget = isBusinessTarget(verificationScope);
 		PreparedRun prepared = transactionTemplate.execute(status -> prepare(runId));
 		TargetVerification verification = businessTarget
 				? verifyBusinessTarget(prepared)
 				: verifyTarget(prepared);
+		if (prepared.entityReconciliation() != null) {
+			applyTargetFacts(prepared, verification);
+		}
 		ReconciliationContext context = toContext(prepared.run(), verification);
 		ReconciliationComputation count = reconciliationEngine.count(context);
 		ReconciliationComputation checksum = reconciliationEngine.checksum(context);
 		ReconciliationComputation target = reconciliationEngine.target(context);
 		ReconciliationComputation full = reconciliationEngine.full(context, count, checksum, target);
-		return transactionTemplate.execute(status -> persist(runId, List.of(count, checksum, target, full)));
+		List<ReconciliationComputation> computations = List.of(count, checksum, target, full);
+		if (prepared.entityReconciliation() != null) {
+			computations = prepared.entityReconciliation().finish().apply(computations);
+		}
+		List<ReconciliationComputation> persisted = computations;
+		return transactionTemplate.execute(status -> persist(runId, persisted));
 	}
 
 	public MigrationReconciliationResponse get(UUID runId) {
@@ -107,12 +156,18 @@ public class ReconciliationService {
 		if (active > 0) {
 			throw new ReconciliationNotReadyException("Migration run still has active batches");
 		}
+		Map<String, Object> mappingConfiguration = mappingConfiguration(run);
+		EntityReconciliationAccumulator entityReconciliation = null;
+		if (ExecutionMode.entityRelationship(mappingConfiguration)) {
+			entityReconciliation = observeEntityRun(runId, mappingConfiguration);
+		}
 		return new PreparedRun(
 				run,
 				run.getMigrationDefinition().getTargetType(),
 				run.getMigrationDefinition().getConfiguration() == null
 						? Map.of()
-						: new HashMap<>(run.getMigrationDefinition().getConfiguration()));
+						: new HashMap<>(run.getMigrationDefinition().getConfiguration()),
+				entityReconciliation);
 	}
 
 	private TargetVerification verifyBusinessTarget(PreparedRun prepared) {
@@ -260,11 +315,82 @@ public class ReconciliationService {
 		return verificationScope != null && "BUSINESS_TARGET".equalsIgnoreCase(verificationScope.trim());
 	}
 
+	private EntityReconciliationAccumulator observeEntityRun(UUID runId, Map<String, Object> mappingConfiguration) {
+		EntityReconciliationAccumulator accumulator = new EntityReconciliationAccumulator();
+		EntityRelationshipMapping mapping = EntityRelationshipConfiguration.parse(mappingConfiguration);
+		for (RelationshipDefinition relationship : mapping.relationships()) {
+			if (relationship.cardinality() != null) {
+				accumulator.noteCardinality(relationship.parent(), relationship.child(), relationship.cardinality().name());
+			}
+		}
+		int page = 0;
+		Page<MigrationBatch> batchPage;
+		do {
+			batchPage = migrationBatchRepository.findByMigrationRun_Id(
+					runId,
+					PageRequest.of(page, 20, Sort.by("batchNumber")));
+			for (MigrationBatch batch : batchPage.getContent()) {
+				accumulator.beginBatch();
+				EntityRunFacts.foldLocator(accumulator, batch.getSourceLocator());
+				entityManager.detach(batch);
+			}
+			page++;
+		} while (batchPage.hasNext());
+		try (Stream<MigrationError> errors = migrationErrorRepository.streamByMigrationRunId(runId)) {
+			errors.forEach(error -> {
+				EntityRunFacts.foldError(
+						accumulator,
+						error.getErrorCode(),
+						error.getErrorType(),
+						error.getSourceRecordKey(),
+						error.getErrorDetails());
+				entityManager.detach(error);
+			});
+		}
+		return accumulator;
+	}
+
+	private void applyTargetFacts(PreparedRun prepared, TargetVerification verification) {
+		EntityReconciliationAccumulator accumulator = prepared.entityReconciliation();
+		if (verification.available() && verification.targetCount() != null) {
+			accumulator.targetCount(verification.targetCount());
+		} else {
+			accumulator.targetCountUnavailable();
+		}
+		var provider = targetReconciliationRegistry.find(prepared.targetType());
+		if (provider.isEmpty() || !provider.get().entityProjectionAvailable()) {
+			accumulator.markTargetResultsUnavailable();
+			return;
+		}
+		try {
+			accumulator.markTargetResultsKnown();
+			provider.get().streamStagedEntities(
+					prepared.run().getId(),
+					prepared.configuration(),
+					view -> EntityRunFacts.foldStaged(accumulator, view));
+		} catch (TargetInfrastructureException ex) {
+			log.warn("Entity target projection failed runId={}", prepared.run().getId());
+			accumulator.markTargetResultsUnavailable();
+		}
+	}
+
+	private static Map<String, Object> mappingConfiguration(MigrationRun run) {
+		MigrationMapping mapping = run.getMigrationDefinition().getMapping();
+		if (mapping == null || mapping.getConfiguration() == null) {
+			return Map.of();
+		}
+		return mapping.getConfiguration();
+	}
+
 	private static long nz(Long value) {
 		return value == null ? 0L : value;
 	}
 
-	private record PreparedRun(MigrationRun run, String targetType, Map<String, Object> configuration) {
+	private record PreparedRun(
+			MigrationRun run,
+			String targetType,
+			Map<String, Object> configuration,
+			EntityReconciliationAccumulator entityReconciliation) {
 	}
 
 	private record ChecksumInfo(String value, String algorithm) {

@@ -2,11 +2,17 @@ package com.etp.migration.migration;
 
 import com.etp.migration.connector.source.InvalidSourceConfigurationException;
 import com.etp.migration.connector.source.MigrationSourceConnectorRegistry;
+import com.etp.migration.connector.source.csv.SourceLayout;
+import com.etp.migration.connector.source.csv.SourceLayoutConfiguration;
+import com.etp.migration.connector.source.csv.SourceLayoutType;
 import com.etp.migration.connector.target.postgresql.PromotionTargetConfiguration;
+import com.etp.migration.connector.target.uam.UamStagingPromotion;
+import com.etp.migration.mapping.EntityRelationshipConfiguration;
 import com.etp.migration.entity.LoadMode;
 import com.etp.migration.entity.MigrationConfigStatus;
 import com.etp.migration.entity.MigrationDefinition;
 import com.etp.migration.entity.MigrationMapping;
+import com.etp.migration.entity.MigrationMappingRule;
 import com.etp.migration.entity.MigrationSource;
 import com.etp.migration.migration.dto.CreateMigrationDefinitionRequest;
 import com.etp.migration.migration.dto.MigrationDefinitionResponse;
@@ -21,6 +27,7 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
@@ -79,7 +86,12 @@ public class MigrationDefinitionService {
 		definition.setLoadMode(request.loadMode() != null ? request.loadMode() : LoadMode.BULK);
 		definition.setStatus(MigrationConfigStatus.DRAFT);
 		definition.setConfiguration(copyConfiguration(request.configuration()));
-		PromotionTargetConfiguration.parse(definition.getConfiguration());
+		validatePromotionConfiguration(definition.getConfiguration());
+		PostgreSqlBulkTargetRules.require(
+				definition.getTargetType(),
+				definition.getLoadMode(),
+				definition.getConfiguration(),
+				"configuration");
 		definition.setCreatedAt(now);
 		definition.setUpdatedAt(now);
 		definition.setCreatedBy(SYSTEM_ACTOR);
@@ -106,14 +118,18 @@ public class MigrationDefinitionService {
 	public MigrationDefinitionResponse activate(UUID migrationId) {
 		MigrationDefinition definition = migrationDefinitionRepository.findByIdForUpdate(migrationId)
 				.orElseThrow(() -> new MigrationDefinitionNotFoundException(migrationId));
-		if (definition.getStatus() == MigrationConfigStatus.ACTIVE) {
-			return toResponse(definition);
-		}
-		if (definition.getStatus() != MigrationConfigStatus.DRAFT) {
+		if (definition.getStatus() != MigrationConfigStatus.ACTIVE
+				&& definition.getStatus() != MigrationConfigStatus.DRAFT) {
 			throw new InvalidStateTransitionException(
 					"Migration definition " + migrationId + " cannot be activated from " + definition.getStatus());
 		}
-		validateReadyForActivation(definition);
+		if (definition.getStatus() == MigrationConfigStatus.DRAFT) {
+			validateReadyForActivation(definition);
+		}
+		deactivateOtherActiveVersions(definition);
+		if (definition.getStatus() == MigrationConfigStatus.ACTIVE) {
+			return toResponse(definition);
+		}
 		Instant now = Instant.now();
 		definition.setStatus(MigrationConfigStatus.ACTIVE);
 		definition.setUpdatedAt(now);
@@ -135,6 +151,13 @@ public class MigrationDefinitionService {
 				result.getTotalPages());
 	}
 
+	private static void validatePromotionConfiguration(Map<String, Object> configuration) {
+		if (UamStagingPromotion.configured(configuration) && UamStagingPromotion.promotionEnabled(configuration)) {
+			return;
+		}
+		PromotionTargetConfiguration.parse(configuration);
+	}
+
 	private void validateReadyForActivation(MigrationDefinition definition) {
 		if (definition.getBatchSize() == null || definition.getBatchSize() <= 0) {
 			throw new IllegalArgumentException("batchSize must be greater than 0");
@@ -142,17 +165,28 @@ public class MigrationDefinitionService {
 		if (definition.getLoadMode() == null) {
 			throw new IllegalArgumentException("loadMode is required");
 		}
-		PromotionTargetConfiguration.parse(definition.getConfiguration());
+		validatePromotionConfiguration(definition.getConfiguration());
+		PostgreSqlBulkTargetRules.require(
+				definition.getTargetType(),
+				definition.getLoadMode(),
+				definition.getConfiguration(),
+				"configuration");
 
 		MigrationMapping mapping = definition.getMapping();
 		if (mapping == null) {
 			throw new IllegalArgumentException("Migration mapping is not configured");
 		}
+		EntityRelationshipConfiguration.validate(mapping.getConfiguration());
 		if (migrationMappingRuleRepository
 				.findByMapping_IdAndEnabledTrueOrderBySequenceNoAsc(mapping.getId())
 				.isEmpty()) {
 			throw new IllegalArgumentException("At least one enabled mapping rule is required");
 		}
+		EntityRelationshipConfiguration.validateRuleEntities(
+				mapping.getConfiguration(),
+				migrationMappingRuleRepository.findByMapping_IdOrderBySequenceNoAsc(mapping.getId()).stream()
+						.map(MigrationMappingRule::getEntityName)
+						.toList());
 
 		List<MigrationSource> sources = migrationSourceRepository
 				.findByMigrationDefinition_IdAndEnabledTrueOrderByCreatedAtAsc(definition.getId());
@@ -163,7 +197,25 @@ public class MigrationDefinitionService {
 			throw new InvalidSourceConfigurationException(
 					"Migration definition has multiple enabled sources; specify sourceId");
 		}
+		Optional<SourceLayout> layout = SourceLayoutConfiguration.parseIfDeclared(sources.get(0).getConfiguration());
+		if (layout.isPresent() && layout.get().type() == SourceLayoutType.MULTI_FILE) {
+			SourceLayoutConfiguration.validateEntities(layout.get(), mapping.getConfiguration());
+			return;
+		}
 		sourceConnectorRegistry.require(sources.get(0));
+	}
+
+	private void deactivateOtherActiveVersions(MigrationDefinition definition) {
+		List<MigrationDefinition> others = migrationDefinitionRepository.findOtherActiveByNameForUpdate(
+				definition.getName(),
+				MigrationConfigStatus.ACTIVE,
+				definition.getId());
+		Instant now = Instant.now();
+		for (MigrationDefinition other : others) {
+			other.setStatus(MigrationConfigStatus.INACTIVE);
+			other.setUpdatedAt(now);
+			other.setUpdatedBy(SYSTEM_ACTOR);
+		}
 	}
 
 	private MigrationMapping resolveMapping(UUID mappingId) {

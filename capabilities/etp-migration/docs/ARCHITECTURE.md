@@ -1,7 +1,7 @@
 # ETP Migration Capability — Architecture
 
-**Module:** `capabilities/etp-migration` (`com.etp:etp-migration:0.0.1-SNAPSHOT`)  
-**Implementation status:** Current as of Flyway **V2**, Spring Boot **4.1.0**, Java **21**, Phase 12–14C plus OpenAPI JWT attachment and Testcontainers integration-test isolation.  
+**Module:** `capabilities/etp-migration` (`com.etp:etp-migration:0.0.1-SNAPSHOT`)
+**Implementation status:** Phases **0–10** are complete. Canonical target loading adds Flyway **V4** (per-run identity assignment) and **V5** (numeric range allocator). Spring Boot **4.1.0**, Java **21**. Default suite: **542** tests, 0 failures, 0 errors, 0 skipped.
 **Related docs:** [DATABASE_MODEL.md](DATABASE_MODEL.md), [USER_GUIDE.md](USER_GUIDE.md), [API_GUIDE.md](API_GUIDE.md), [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md), [CLAUDE_CONTEXT.md](CLAUDE_CONTEXT.md)
 
 This document describes the **implemented** architecture. Items that exist only as schema placeholders, unused enums, or extension points are labeled **not implemented**.
@@ -10,17 +10,19 @@ This document describes the **implemented** architecture. Items that exist only 
 
 ## 1. Overview
 
-ETP Migration is a reusable Spring Boot capability that moves records from a configured source into a **PostgreSQL staging table**, then (when configured and invoked) **promotes** staged rows into a separate PostgreSQL business table. Operators drive the work through HTTP APIs. There is no GUI, Kafka consumer, or background scheduler in this module.
+ETP Migration is a reusable Spring Boot capability that moves records from a configured source into a **PostgreSQL staging table**, reconciles that staging result, then (when configured and invoked) **promotes** staged rows into a business target. The demonstrated business target is a local canonical UAM schema loaded from staging. Operators drive the work through HTTP APIs. There is no GUI, Kafka consumer, or background scheduler in this module.
+
+The authoritative flow is source → staging → promotion → business target. It is not source → UAM direct loading. For the local UAM demonstration that flow is source → staging → promotion → UAM. See §28.
 
 **Problem it solves (current scope):** repeatable, metadata-driven file-to-PostgreSQL migrations with batch restart, record-level validation errors, explicit reconciliation, and explicit promotion.
 
 **Architectural goals that the code actually follows:**
 
-- Configuration persisted on definitions/sources/mappings (JSONB), not hard-coded per customer application.
+- Configuration persisted on definitions/sources/mappings (JSONB), not hard-coded per customer application. New business entities are configuration-driven. The demonstrated multi-entity model did not require an entity-specific production Java branch.
 - Cloud-agnostic *design*: storage and target types are selected from configuration. **Implemented storage is local filesystem only.** Object stores listed in the schema (`MINIO`, `S3`, `AZURE_BLOB`, `GCS`) throw `UnsupportedStorageProviderException` if selected.
-- Generic engine: no UAM domain services in the promotion/staging path. A placeholder REST connector exists for `targetType=UAM` (SINGLE HTTP POST). The local demo business table (`uam_migration_test.address`) is a **simulated** PostgreSQL table, not the UAM product.
-- Staging load is not the same as writing the application table. `COMPLETED` / `COMPLETED_WITH_ERRORS` mean **staging** finished.
-- Reconciliation and promotion are **user-invoked**, not automatic after execute.
+- Generic engine: staging and the canonical loader are driven by mapping and definition JSON. A separate REST connector exists for `targetType=UAM` (SINGLE HTTP POST). That REST adapter is a placeholder. It is not the loader used by the local canonical demonstration. The older flat stand-in `uam_migration_test.address` is also not that demonstration.
+- Staging load is not the same as writing the application tables. `COMPLETED` / `COMPLETED_WITH_ERRORS` mean **staging** finished.
+- Reconciliation and promotion are **user-invoked**, not automatic after execute. Staging reconciliation does not verify the final UAM tables.
 
 ---
 
@@ -29,9 +31,9 @@ ETP Migration is a reusable Spring Boot capability that moves records from a con
 ### What the capability does
 
 - Persist mapping rules, sources, and a migration definition (DRAFT, then optionally ACTIVE).
-- Create a run against an **ACTIVE** definition, inspect a filesystem CSV, plan batches, claim one batch at a time, transform/validate, COPY into staging.
-- Reconcile source vs processing vs staging (default) or vs promoted business rows (`verificationScope=BUSINESS_TARGET`).
-- Prepare and execute PostgreSQL INSERT/UPSERT promotion from staging, then query promotion state.
+- Create a run against an **ACTIVE** definition, inspect a filesystem CSV, extract configured entities, resolve relationships, plan batches, transform/validate, and COPY into staging.
+- Reconcile logical entity counts and relationships against staging (default) or, for the flat promotion contract, compare promoted rows (`verificationScope=BUSINESS_TARGET`).
+- Prepare promotion, allocate mapping-level target identities, and load the canonical UAM tables. The flat INSERT/UPSERT writer remains for definitions that are not in canonical mode.
 
 ### What it does not do
 
@@ -41,8 +43,8 @@ ETP Migration is a reusable Spring Boot capability that moves records from a con
 - Kafka, Spark, Airflow, Redis, Kubernetes operators, or a scheduler.
 - GUI.
 - Automatic promotion or automatic reconciliation after execute.
-- Production UAM application integration (no UAM OpenAPI in this repo; REST adapter is a placeholder).
-- Proven 10M/30M production capacity (see [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md)).
+- A production UAM deployment. The local canonical load in §28 used a PostgreSQL schema named `uam` on a workstation database. It is not a production UAM environment and not a UAM OpenAPI integration. The REST adapter remains a placeholder.
+- A production-capacity claim for 10M, 30M, or 50M records. The 515-record local demonstration is not that claim. Phase 10 measured a local prepare baseline of about 1.01 million generated entities. That is not a capacity claim. See [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md).
 
 ### Current implementation boundaries
 
@@ -50,13 +52,34 @@ ETP Migration is a reusable Spring Boot capability that moves records from a con
 |------|-------------|---------------------------|
 | Source | Filesystem CSV via `CsvSourceConnector` (`provider=FILE_SYSTEM`, `fileFormat=CSV`) | SFTP, S3, other formats/providers |
 | Staging target | PostgreSQL `COPY` (`PostgreSqlTargetConnector`, `LoadMode.BULK`) | PostgreSQL SINGLE/BATCH load modes |
-| REST target | `UamTargetConnector`, `LoadMode.SINGLE` only (HTTP placeholder) | Production UAM-specific connector; BATCH/BULK UAM APIs |
-| Promotion | Configuration-driven PostgreSQL INSERT/UPSERT (`PostgreSqlPromotionWriter`) | Promotion for UAM REST |
+| REST target | `UamTargetConnector`, `LoadMode.SINGLE` only (HTTP placeholder) | Production UAM HTTP API; BATCH/BULK UAM REST |
+| Canonical promotion | Local PostgreSQL load of configured UAM tables from staging (`target.mode=UAM`), with promotion-time identity allocation | Production UAM deployment |
+| Flat promotion | Configuration-driven PostgreSQL INSERT/UPSERT (`PostgreSqlPromotionWriter`) when canonical mode is not selected | |
 | Activation | DRAFT → ACTIVE; ACTIVE → ACTIVE idempotent | INACTIVE transition API; environment/PROD checks in this capability |
 | Execute facade | **Synchronous** create → inspect/prepare → loop `processNextBatch` | Scheduler, Kafka trigger, `@Async` / background worker |
 | Composite config | `POST /migration-configurations` (`@Transactional`) | Separate promotion-create API |
 | Security | JWT resource server; OpenAPI `bearer-jwt` scheme **and** operation `SecurityRequirement` | Role/scope/`@PreAuthorize` model |
 | Integration tests | Shared PostgreSQL 17 Testcontainer `etp_migration_test` | Writing to the developer demo database |
+
+### Phase status
+
+| Phase | Subject | Status |
+|-------|---------|--------|
+| 0 | Domain neutrality | Complete |
+| 1 | Entity/relationship configuration | Complete |
+| 2 | Entity-scoped mapping rules | Complete |
+| 3 | CSV single-file, multiple entities | Complete |
+| 4 | CSV multi-file relationships | Complete |
+| 5 | Logical migration scope | Complete |
+| 6 | Streaming execution planner | Complete |
+| 7 | Identity resolution | Complete |
+| 8 | Entity-aware CSV execution | Complete |
+| 9 | Entity-aware reconciliation | Complete |
+| 10 | CSV performance, scalability, and hardening | Complete |
+| 11 | XLSX single sheet | Future |
+| 12 | XLSX multiple sheets | Future |
+
+XLSX is not implemented. The historical performance note named “Phase 12” in [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md) is an older flat-pipeline measurement from 2026-09-20. It is not this roadmap’s Phase 12, and its ~9,650 records/sec figure is not the Phase 10 result.
 
 ---
 
@@ -76,11 +99,11 @@ ETP Migration is a reusable Spring Boot capability that moves records from a con
 | **Promotion** | `migration_promotion` | Separate lifecycle from the run. |
 | **Promotion batch** | `migration_promotion_batch` | Eligibility and promote outcome per execution batch. |
 | **Source connector** | Java SPI-style beans | `MigrationSourceConnector.supports(MigrationSource)` then inspect/read. |
-| **Target connector** | Registry by `targetType` string | Staging load (PostgreSQL COPY or UAM REST). |
+| **Target connector** | Registry by `targetType` string | Staging load is PostgreSQL COPY. Canonical promotion uses the UAM table loader. The UAM REST bean is a separate placeholder. |
 | **Transformation** | `TransformationEngine` | Applied in `sequence_no` order. |
 | **Validation** | `ValidationEngine` | Mandatory target fields non-blank after transform. |
 | **Staging** | Operator-created table, not Flyway | JSONB `target_payload` plus run/batch/record keys. |
-| **Business-target promotion** | Config `configuration.promotion` | Writes configured schema.table via `PostgreSqlPromotionWriter`. |
+| **Business-target promotion** | Config `configuration.promotion` plus canonical `tables`, `loadOrder`, `foreignKeys`, `loadTimestampColumns`, and `columnTypes` when `target.mode` is `UAM` | Canonical loader writes the configured UAM tables. Flat mode writes one schema.table via `PostgreSqlPromotionWriter`. |
 
 ---
 
@@ -100,22 +123,21 @@ flowchart TD
     MAP[MappingEngine / TransformationEngine]
     VAL[ValidationEngine]
     TC[PostgreSqlTargetConnector COPY]
-    STG[migration_staging.*]
+    STG[migration_staging]
   end
   subgraph post [Post-execution — explicit APIs]
     REC[Staging reconciliation]
     PREP[Promotion preparation]
-    PRO[PostgreSQL promotion]
-    BIZ[Business-target stand-in]
-    BREC[Business-target reconciliation]
+    ID[Identity allocation]
+    PRO[Canonical UAM loader]
+    UAM[Local uam schema]
   end
   API --> CP
   API --> exec
   API --> post
   SRC --> SC --> MAP --> VAL --> TC --> STG
   STG --> REC
-  STG --> PREP --> PRO --> BIZ
-  BIZ --> BREC
+  STG --> PREP --> ID --> PRO --> UAM
 ```
 
 **Three planes (implemented):**
@@ -123,40 +145,52 @@ flowchart TD
 | Plane | What lives there | Examples |
 |-------|------------------|----------|
 | **Control plane** | Capability PostgreSQL `etp_migration` + HTTP APIs | Definition, mapping, rules, source, run, batch, artifact metadata, error, reconciliation, promotion, promotion batch |
-| **Migration execution / data plane** | Source I/O, transform/validate, staging COPY | Filesystem CSV → `migration_staging.address_load` |
-| **Business target** | Application table named in `configuration.promotion` | Local demo stand-in `uam_migration_test.address` — **not** production UAM |
+| **Migration execution / data plane** | Source I/O, entity extraction, transform/validate, staging COPY | Filesystem CSV → `migration_staging`. The local demonstration used `uam_entity_stage`. |
+| **Business target** | Canonical tables named by `configuration.tables`, or one flat table named in `configuration.promotion` | Local demonstration schema `uam` on the target PostgreSQL instance. That schema is a local stand-in, not a production UAM deployment. The older flat stand-in `uam_migration_test.address` is a separate historical illustration. |
 
 Control-plane data lives in the capability database. Staging and business tables are **not** created by Flyway; they are named in definition JSON and must exist on the PostgreSQL target datasource (`etp.migration.target.postgresql.*`).
 
 ### Staging-first model
 
 ```text
-Source (CSV)
-  → migration_staging.<stagingTable>     (execute / COPY)
-  → staging reconciliation               (explicit POST)
-  → optional promotion prepare/execute   (explicit POSTs)
-  → business target table                (INSERT/UPSERT)
-  → business-target reconciliation       (explicit POST, optional)
+CSV
+  → Source connector
+  → Entity extraction
+  → Relationship resolution
+  → Logical scoping
+  → Batch planning
+  → Transformation / mapping
+  → Validation
+  → PostgreSQL staging
+  → Reconciliation
+  → Promotion preparation
+  → Identity resolution / allocation
+  → UAM canonical target loader
+  → UAM
 ```
 
-`COMPLETED` / `COMPLETED_WITH_ERRORS` mean **staging** finished. They do **not** mean the business table was written.
+Mappings without `modelType` stay on the flat CSV path: source read, mapping, validation, staging COPY, then optional flat INSERT/UPSERT promotion. That path does not extract entities.
+
+`COMPLETED` / `COMPLETED_WITH_ERRORS` mean **staging** finished. They do **not** mean the business tables were written. Target identities are not allocated during staging.
 
 ### End-to-end execution flow (implemented)
 
 ```text
 Migration configuration
   → Source inspection
-  → Batch planning
+  → Entity extraction and relationship resolution
+  → Logical scoping and batch planning
   → Batch claim (SKIP LOCKED)
-  → Source read
-  → Mapping / transformation
+  → Transformation / mapping
   → Validation
-  → Target staging (PostgreSQL COPY)
-  → Reconciliation (default STAGING)
+  → PostgreSQL staging (COPY)
+  → Staging reconciliation
   → Promotion preparation
-  → Business-target promotion
-  → Business-target reconciliation (verificationScope=BUSINESS_TARGET)
+  → Identity allocation from mapping targetIdentity
+  → Canonical UAM load
 ```
+
+Flat definitions skip entity extraction. Their promotion step is INSERT/UPSERT into one configured table. `verificationScope=BUSINESS_TARGET` applies to that flat contract. The local canonical demonstration verified staging reconciliation and the UAM row counts after promotion. It did not use business-target reconciliation as the proof of the UAM load.
 
 Reconciliation and promotion are **not** started by execute. There is no scheduler, Kafka consumer, or `@Async` worker looping batches in the background.
 
@@ -231,7 +265,8 @@ Package roots under `com.etp.migration`:
 ### Retry / idempotency
 
 - `POST .../retry` re-queues FAILED / COMPLETED_WITH_ERRORS batches; successful batches are not duplicated.
-- Staging retry: DELETE existing rows for that run+batch then COPY.
+- Flat staging retry: DELETE existing rows for that run and batch, then COPY.
+- Entity staging retry uses the same batch lifecycle. The connector deletes the current batch’s rows, then deletes earlier rows in the same run whose `entity-v1:` keys are being loaded, then COPY. See §27. The retry mechanism itself was not redesigned.
 - Run create: optional `idempotencyKey` unique per definition.
 - Promote of already **PROMOTED** promotion returns the existing result without rewriting.
 - Prepare of existing READY / PROMOTING / PROMOTED returns stored promotion (PROMOTING is 409 on prepare).
@@ -308,14 +343,22 @@ Inspect counts all data rows, SHA-256 of the file stream, header columns. `Recor
 - Requires `etp.migration.target.postgresql.url` (non-blank) to create the target `DataSource`.
 - Staging table columns expected: `migration_run_id`, `migration_batch_id`, `source_record_number`, `target_payload` JSONB, `idempotency_key`, `loaded_at`.
 - `COPY ... FROM STDIN` CSV; payload is JSON of mapped fields.
-- Per batch: DELETE those run+batch rows, then COPY, one JDBC transaction.
+- Flat keys: DELETE rows for that run and batch, then COPY, one JDBC transaction.
+- Entity keys (`entity-v1:`): after that batch delete, DELETE earlier rows in the same run that carry the entity keys in the current load, then COPY. Flat keys are not matched by that second delete. Operator uniqueness differs for the two layouts; see §27 and [DATABASE_MODEL.md](DATABASE_MODEL.md).
 
-### UAM REST — **HTTP placeholder only (not production UAM)**
+### Canonical UAM load — **local demonstration, not a production deployment**
+
+When `target.mode` is `UAM` and `promotion.enabled` is true, promotion reads one staged batch, allocates target identities, fills parent target identities, and inserts configured canonical tables. Staging itself stays on `PostgreSqlTargetConnector`. The definition `targetType` remains `POSTGRESQL`.
+
+The loader uses `configuration.tables`, `loadOrder`, and `foreignKeys`. `loadTimestampColumns` fills a blank timestamp. `columnTypes` binds `numeric` and `timestamptz` values. One promotion batch is one database transaction. A failure rolls that batch back. `ON CONFLICT (id) DO NOTHING` leaves an existing primary key in place, so a retry does not duplicate it.
+
+This path was demonstrated locally against schema `uam`. It is not a production UAM deployment and it does not call a UAM HTTP API.
+
+### UAM REST — **HTTP placeholder only**
 
 - `UamTargetConnector` (`UAM`), **SINGLE** only: `POST {baseUrl}/api/v1/{entity}` with mapped JSON. Default path from `etp.migration.target.uam.*`. Optional client-credentials token.
-- There is **no** UAM-specific production Java implementation for staging or promotion. Promotion SQL is generic (`PostgreSqlPromotionSql` + validated identifiers).
-- The local demonstration business table **`uam_migration_test.address`** is a **PostgreSQL stand-in**, not the UAM product and not a real UAM integration.
 - Promotion does **not** use `UamTargetConnector`.
+- The older flat illustration table **`uam_migration_test.address`** is a PostgreSQL stand-in for the flat INSERT/UPSERT contract. It is not the canonical demonstration in §28.
 
 ### Other connectors
 
@@ -374,13 +417,25 @@ Requires `targetType` POSTGRESQL, `promotion.enabled=true`, run COMPLETED or COM
 
 **Prepare:** counts staging rows per batch. COMPLETED / COMPLETED_WITH_ERRORS with staged rows → ELIGIBLE. Zero staged or failed execution batch → NOT_ELIGIBLE. Status **READY**. Does not write the business table.
 
-**Execute:** requires READY. Sets PROMOTING. Each ELIGIBLE batch: target TX INSERT or UPSERT (`PostgreSqlPromotionSql`). Failed batch does not roll back previously successful batches → PARTIALLY_PROMOTED. All fail → PROMOTION_FAILED. All succeed → PROMOTED. INSERT vs UPSERT and `conflictKeys` from JSON.
+**Execute:** requires READY. Sets PROMOTING. Canonical mode (`target.mode=UAM`) loads configured UAM tables in one transaction per eligible batch. A failure rolls that UAM transaction back and marks the batch failed. Identity allocations are stored before that transaction and are reused on retry. Flat mode uses INSERT or UPSERT (`PostgreSqlPromotionSql`). A failed flat batch does not roll back previously successful batches → PARTIALLY_PROMOTED. All fail → PROMOTION_FAILED. All succeed → PROMOTED. An already PROMOTED promotion returns the stored result.
 
 **GET** `/promotion`: read-only latest promotion by `created_at` desc + batches; 404 if none. Does not prepare.
 
 There is **no** `GET /api/v1/promotions/{promotionId}`.
 
-### PostgreSQL promotion behavior (implemented)
+### Canonical UAM promotion (implemented, demonstrated locally)
+
+| Topic | Behavior |
+|-------|----------|
+| Selection | `target.mode=UAM` and `promotion.enabled=true`. Flat schema/table/columns/conflictKeys are not the canonical contract. |
+| Staging | Read as stored. `targetIdentity` and `parentTargetIdentity` are null at staging time. |
+| Identity | `mapping.entities[].targetIdentity` is the authoritative format. `PREFIX_SEQUENCE` reserves a number and formats `prefix` plus `sequenceLength` digits. The assignment is stored on `migration_identity_allocation`. `definition.configuration.identity` is not read. |
+| Parents | Parent target identities are filled from those allocations before the insert. |
+| Transaction | One eligible batch, one target transaction. Failure rolls the UAM inserts back. The allocation rows remain. |
+| Retry | The same run reuses the stored target identities. `ON CONFLICT (id) DO NOTHING` skips a row whose primary key is already present. |
+| Idempotent completion | A promotion that is already `PROMOTED` is returned without another load. |
+
+### Flat PostgreSQL promotion behavior (implemented)
 
 | Topic | Behavior |
 |-------|----------|
@@ -488,13 +543,13 @@ This is **not** a production IAM hardening guide.
 |------|------------------------|
 | Process | `mvn spring-boot:run` (optional `-Dspring-boot.run.profiles=dev`) |
 | HTTP | `ETP_MIGRATION_SERVER_PORT` default **8082** |
-| Control DB | PostgreSQL database `etp_migration`, JDBC `localhost:55433` (`ETP_MIGRATION_DB_URL`) |
-| Target DB | Typically the same instance (`ETP_MIGRATION_TARGET_POSTGRESQL_URL`) |
-| Postgres container | **etp-migration** Compose: `capabilities/etp-migration/docker-compose.yml`, service `etp-migration-postgres`, image `postgres:17`, host port **55433** |
+| Control DB | PostgreSQL database `etp_migration`, JDBC `localhost:55433` (`ETP_MIGRATION_DB_URL`), container `etp-migration-postgres` |
+| Target DB | Local demonstration: PostgreSQL database `etp_migration` on `localhost:55432` (`ETP_MIGRATION_TARGET_POSTGRESQL_URL`). Staging schema `migration_staging`, staging table `uam_entity_stage`, canonical schema `uam`. |
+| Postgres containers | Control plane: `capabilities/etp-migration/docker-compose.yml`, host port **55433**. The local UAM schema was placed on the existing PostgreSQL instance at **55432** because a separate UAM project container was not available. That split is a local demonstration arrangement, not the production deployment architecture. |
 | Storage | `etp.migration.storage.root` default `./data/migration` |
 | JWT issuer | Keycloak **8180** (required when the `dev` profile is not used) |
 
-IAM Compose still publishes Postgres on **55432** (`etp_iam`). That instance is **not** the etp-migration demo datasource. There is no production deployment descriptor in this module. Do not treat workstation Phase 12 numbers as cloud capacity.
+There is no production deployment descriptor in this module. Do not treat the local 515-record demonstration, or the historical flat throughput figure, as cloud capacity.
 
 ---
 
@@ -515,7 +570,7 @@ IAM Compose still publishes Postgres on **55432** (`etp_iam`). That instance is 
 - Deduplication: **not implemented**.
 - Scheduler / Kafka / `@Async` workers: **not implemented**. `process-next-batch` is an explicit HTTP call; execute loops it in-process.
 - GUI: **not implemented**.
-- Scale: **30M is not claimed.** Local 1M measured; 10M/30M **not executed** (see [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md)).
+- Scale: 10M, 30M, and 50M are not demonstrated. Phase 10 established a local prepare baseline at about 1.01 million generated entities. The historical flat end-to-end run (~9,650 records/sec) is a different pipeline. See §27.
 - Multi-worker run counters can under-count.
 - Per-batch full-file SHA-256 cost grows with file size × batch count.
 - `migration_record` unused by the worker.
@@ -528,7 +583,7 @@ IAM Compose still publishes Postgres on **55432** (`etp_iam`). That instance is 
 
 ## 19. Future extension points (**not implemented**)
 
-Labeled future only: additional `MigrationSourceConnector` beans; `ArtifactStorage` for S3/MinIO; atomic run-counter SQL; checksum-once-per-run; scheduler claiming `claimNextBatch()` without runId; `GET /api/v1/promotions/{id}`; enrichment/dedup engines; INACTIVE workflow. Implement only when required.
+Labeled future only: XLSX single sheet (Phase 11) and XLSX multiple sheets (Phase 12); additional `MigrationSourceConnector` beans; `ArtifactStorage` for S3/MinIO; atomic run-counter SQL; checksum-once-per-run; scheduler claiming `claimNextBatch()` without runId; `GET /api/v1/promotions/{id}`; enrichment/dedup engines; INACTIVE workflow. Implement only when required. XLSX is not implemented.
 
 ---
 
@@ -541,13 +596,15 @@ Labeled future only: additional `MigrationSourceConnector` beans; `ArtifactStora
 | `@SpringBootTest`, `@DataJpaTest` | Shared Testcontainers PostgreSQL **17** (`postgres:17`), database **`etp_migration_test`**, ephemeral mapped port |
 | `@WebMvcTest`, plain unit tests | No container; no JDBC |
 
-Spring obtains the test DataSource via a test `ContextCustomizerFactory` (`PostgreSqlTestcontainersContextCustomizerFactory`) that starts one JVM-scoped container and sets `spring.datasource.*` and `etp.migration.target.postgresql.*`. Those inlined properties override `.env` / `ETP_MIGRATION_DB_URL`. Flyway V1+V2 run against the **empty** test database. Isolation is the container, **not** TRUNCATE/DELETE cleanup.
+Spring obtains the test DataSource via a test `ContextCustomizerFactory` (`PostgreSqlTestcontainersContextCustomizerFactory`) that starts one JVM-scoped container and sets `spring.datasource.*` and `etp.migration.target.postgresql.*`. Those inlined properties override `.env` / `ETP_MIGRATION_DB_URL`. Flyway V1–V5 run against the **empty** test database. Isolation is the container, **not** TRUNCATE/DELETE cleanup.
 
 Testcontainers Java **1.21.4**. Docker Engine 29 compatibility uses test `docker-java.properties` (`api.version=1.44`).
 
 ---
 
-## 21. Local demonstration (semantics, not instance IDs)
+## 21. Historical flat CSV illustration
+
+This is an earlier flat-pipeline illustration. It is not the current end-to-end demonstration. The current demonstration is §28.
 
 | Item | Value |
 |------|--------|
@@ -584,19 +641,473 @@ POST /api/v1/migration-runs/{runId}/reconcile?verificationScope=BUSINESS_TARGET
 
 - Configuration-driven migration definitions, mappings, mapping rules, sources
 - Transformation (`TransformationEngine` types listed in §10) and mandatory-field validation
-- CSV filesystem source; PostgreSQL staging; PostgreSQL bulk COPY
+- CSV filesystem source; `ENTITY_RELATIONSHIP` extraction, relationships, logical scoping, and batch planning
+- PostgreSQL staging; PostgreSQL bulk COPY
 - Batching, SKIP LOCKED claim, retry/recovery (`POST .../retry`, staging DELETE+COPY)
-- Staging reconciliation and business-target reconciliation
-- Configuration-driven PostgreSQL promotion (INSERT/UPSERT)
+- Staging reconciliation, including logical entity and relationship checks
+- Mapping-level target identity allocation during promotion, with retry reuse
+- Canonical UAM promotion from staging, including repeated-parent `ONE_TO_MANY` resolution, batch rollback, and idempotent completion
+- Flat PostgreSQL promotion (INSERT/UPSERT) when canonical mode is not selected
 - Composite configuration facade; execution facade; definition activation
 - JWT authentication; Swagger/OpenAPI `bearer-jwt` security requirement
 - Isolated integration-test PostgreSQL Testcontainer
+- Local end-to-end demonstration (§28): 110 physical CSV rows expanded to 515 logical entity records, staged, reconciled, and promoted
 
-**Not implemented**
+**Not claimed**
 
+- 30M, 10M, or 50M production-scale support. The 515-record demonstration does not establish that claim.
+- Production UAM deployment or production operational readiness
+- All source and target technologies
 - Enrichment engine; deduplication engine
 - GUI; scheduler; Kafka-triggered execution
 - SFTP source; S3 source
-- Production UAM-specific connector
+- Production UAM HTTP API (`UamTargetConnector` remains a SINGLE placeholder)
 - Automatic environment promotion / deployment governance
-- Proven 10M/30M production capacity (`30M` is **not** a supported-capacity claim)
+- XLSX
+
+---
+
+## 23. Logical migration scope
+
+Entity-relationship migrations distinguish these units. They are not interchangeable.
+
+| Unit | What it is |
+|------|------------|
+| **Physical source record** | One row from a source. It is not an entity. |
+| **Entity record** | One extracted entity instance: entity name, source identity, source record number, and that entity's source fields. |
+| **Resolved relationship** | A source-side link between two entity identities. It does not carry full source payloads or target ids. |
+| **Logical migration scope** | The relationship scope rooted at one source identity of the configured `rootEntity`. Members are identities plus provenance. Relationships stay as parent/child references. |
+| **Execution batch** | A persisted `migration_batch`: a restartable slice of physical source throughput. Logical-scope planning does not change this table. |
+| **Execution batch plan** | A bounded in-memory list of work items from `ExecutionPlanner`. It is not a `migration_batch` row. One logical scope can produce many plans. |
+
+**Logical Migration Scope is the business/entity relationship unit; Execution Batch is the throughput unit.**
+
+A scope is built by `LogicalMigrationScopeBuilder` from an `EntityRelationshipMapping`, entity records, and resolved relationships. One scope is emitted per distinct root source identity. Reachable identities are members. The same `(entityName, sourceIdentity)` is stored once even when several paths reach it. Entities with no relationship path to that root are left out. Source field maps are not copied into the scope.
+
+The builder is not called by flat CSV execution, the physical batch planner, target loading, promotion, or reconciliation. Nothing in the scope model is written to the control-plane database. The in-memory scope identity index is retained until the scope stream closes. Phase 10 kept that index after measurement. See §27.
+
+`ExecutionPlanner` reads that scope stream and emits `ExecutionBatchPlan` values. Batch size is the maximum number of work items. One logical scope can produce many plans. One plan can contain work items from more than one scope. Every work item keeps its root identity and its direct parent identities, so a batch boundary does not drop scope or dependency information. A child is not ordered before its parent. Flat CSV execution does not use these plans. An `ENTITY_RELATIONSHIP` run stores each plan's work-item identities in `migration_batch.source_locator` and processes one stored batch at a time.
+
+## 24. Identity resolution
+
+Identity resolution answers one question: given a source entity identity, which target identity represents it. It does not create or update the target entity. Target loading is a separate step.
+
+```text
+source identity
+    -> IdentityResolutionService
+    -> TargetIdentityLookup
+         -> existing lookup, when a target id is already known
+         -> generated id, when the entity configures targetIdentity
+    -> ResolvedIdentity
+```
+
+An identity is scoped by entity. The key is `(entityName, sourceIdentity)`. The same source text on two entity types is two identities. A source identity and its target identity are different values. The configured `sourceKey` and `targetKey` may also differ. `targetEntity` is the configured target identifier, not a physical table name.
+
+`IdentityResolutionService` reads one `ExecutionBatchPlan` and does not modify it. It groups source identities by entity, including direct parent identities, and asks a `TargetIdentityLookup` for each entity. Lookups follow entity dependency order so a parent entity is looked up before a child entity. Each call sends a bounded list of source identities. The caller supplies the chunk size. There is no application-wide identity map and no use of `migration_record` as an identity index.
+
+A hit becomes a `ResolvedIdentity` that keeps the source identity, the target identity, and lightweight parent identity references. A miss is an `UnresolvedIdentity` with `TARGET_IDENTITY_NOT_FOUND`. A provider error is `LOOKUP_FAILED` for that chunk. Neither case invents a target id or copies the source id into the target id. A child can still carry an unresolved parent reference. Multiple parents stay on the one child identity.
+
+The identity service does not insert or update target rows. Flat process-batch does not call it. Staging calls a lookup and, when no id is already known, stores the entity with a null target identity. It does not allocate. Canonical promotion is the step that generates ids from `mapping.entities[].targetIdentity`. A definition-level `configuration.identity` object is not an identity source.
+
+### Target identity format and allocation
+
+These are different responsibilities.
+
+The mapping answers what the id looks like. Each entity carries `targetIdentity`. That mapping field is the authoritative identity configuration. There is no `start` value. A stored definition object named `identity` with strategy `SEQUENCE` is not read.
+
+```json
+"targetIdentity": { "strategy": "PREFIX_SEQUENCE", "prefix": "LOC-", "sequenceLength": 9 }
+```
+
+`PREFIX_SOURCE_VALUE` uses the same prefix field and appends the source identity. It does not reserve a number.
+
+`prefix` and `sequenceLength` are configuration. The next number is runtime state on `target_identity_allocator`, keyed by the prefix. Two prefixes do not share a counter, even when both entities write the same physical table. `PostgresTargetIdentityAllocator.reserve` locks that row and returns a contiguous range. Two concurrent runs cannot receive the same range.
+
+The first reservation for a prefix may read the highest existing target id that matches that prefix and digit length. That read happens once (`floor_established`). Later reservations advance `current_value` and do not scan the target table. `PostgreSqlTargetIdentityFloorProbe` runs that read only when `target.schema` is set, using the entity `targetEntity` and `targetKey` as the table and column. It is not UAM-specific SQL.
+
+A reserved number is formatted by `PrefixSequenceFormatter` (`LOC-` + 9 digits → `LOC-000001251`). The formatted value is stored on `migration_identity_allocation` for `(migration run, entity name, source identity)`. A retry of that run reads the stored value and does not reserve another number. The assignment row and the range reservation commit together, before the target insert. A failed target batch rolls back its own rows and still resolves the same ids on retry.
+
+## 25. Entity-relationship execution
+
+Mappings without `modelType` stay on the flat path:
+
+```text
+CSV -> SourceRecord -> MappingEngine -> Validation -> Target -> batch completion
+```
+
+`modelType = ENTITY_RELATIONSHIP` uses one entity pipeline for a single CSV and for `MULTI_FILE`:
+
+```text
+Source
+  -> entity extraction
+  -> relationship resolution
+  -> logical scope
+  -> execution planning
+  -> entity mapping
+  -> validation
+  -> PostgreSQL staging
+  -> staging reconciliation
+  -> promotion preparation
+  -> identity allocation
+  -> canonical UAM load
+```
+
+Prepare streams execution batches and writes one `migration_batch` per batch. `batchSize` on an entity run is the maximum number of work items. The locator stores identities, not payloads. Process-next-batch loads source fields only for that batch, resolves identities in chunked groups, maps with the existing `MappingEngine`, validates, and loads through `MigrationTargetConnector`. The batch plan is not modified. Payloads are discarded when the batch returns.
+
+The staged payload is generic: entity name, configured `targetEntity`, source identity, mapped attributes, and parent source identities. Target identities are left null. Source identities are not written as target ids or foreign keys. Multiple parents stay on the one child.
+
+PostgreSQL staging is the entity-aware execution target. The connector writes the payload JSON. Canonical UAM tables are loaded later, during promotion, after identities are allocated. A missing target identity or a missing parent target identity fails that canonical load. Checksum re-verification on process stays on the flat path. Entity extraction and relationship failures are stored as `migration_error` rows with `entityName` and `sourceIdentity` in `error_details`. A physical source row that does not instantiate an entity is not an extraction failure. Flat counter meaning is unchanged. For an entity batch, processed count is the number of execution work items.
+
+Flat staging uniqueness stays `(migration_run_id, migration_batch_id, source_record_number)`. Entity staging uses the idempotency key in section 27. One physical source row may produce several entities, so those entities do not share that flat key.
+
+## 26. Entity-aware reconciliation
+
+Reconciliation observes a finished run. It does not retry work, repair rows, insert or update target data, resolve identities, or change mapping configuration, batch status, or source data. Migration run status stays whatever execution already set.
+
+```text
+Source entity counts
+    -> execution results
+    -> identity resolution results
+    -> relationship results
+    -> entity-level reconciliation
+    -> overall reconciliation
+```
+
+Mappings without `modelType` keep COUNT, CHECKSUM, TARGET, and FULL exactly as before. `POST /api/v1/migration-runs/{runId}/reconcile` is still the only reconciliation entry point. Re-running it updates the existing row for each type.
+
+`ENTITY_RELATIONSHIP` uses those same four types. The database check constraint does not allow additional type values, so entity count, entity result, relationship, and overall views are sections of `migration_reconciliation.details`. The nested object is `entityReconciliation`. Counts are entity instances `(entityName, sourceIdentity)`. One physical CSV row that yields three entities counts as three. Multi-file and single-file runs use the same fold. Address `A001` and Site `A001` stay separate.
+
+The fold reads stored batch locators, `migration_error`, and a staged-entity projection from the target provider. It does not open the source files again and it does not run a second relationship resolver. Cardinality violations are the ones relationship resolution already recorded. Per-entity target totals come only from that projection. If a connector cannot supply them, the metric is `unavailable`. A missing total is not stored as zero.
+
+`details` holds aggregate counters, relationship totals, and at most 100 discrepancy examples. It does not hold every successful identity, payload, or relationship. `migration_error` remains the detailed error store. Checksum comparison is still not performed. When the canonical checksum cannot be compared with the source representation, CHECKSUM is `PASSED_WITH_WARNINGS` and the overall status is `PASSED_WITH_WARNINGS` even though the entity and relationship checks passed. That warning is not a migration failure. This reconciliation verifies staging. It does not verify the final UAM tables. An entity run can finish `COMPLETED_WITH_ERRORS` while reconciliation is `FAILED`, or the other way around. Those statuses are independent.
+
+Extracted-entity totals are not retained after prepare, so `extractedEntityCount` is `unavailable`. Planned and processed totals come from stored work items. Success and resolved relationship targets come from the staged projection when the connector provides it.
+
+## 27. CSV performance and entity idempotency
+
+Phase 10 measured the current CSV pipeline and hardened entity staging identity. It did not add workers or a control-plane table. Phase 10 left Flyway at V3. Target identity assignment and range allocation were added later as V4 and V5.
+
+### Instrumentation
+
+`PipelineTiming` records ten stage totals and a small set of counters for one pass. It does not store a timing event per row. Stage times are inclusive and overlap: relationship resolution includes source reading and extraction, and planning includes walking scopes. Do not add the stage times together and call the sum elapsed time.
+
+### What was measured
+
+The numbers below are a **local benchmark measurement** on this workstation (Windows, JDK 21, Maven Surefire). They are not production capacity. The older flat end-to-end figure of about 9,650 records/sec is a different pipeline and is not the entity result. 30 million and 50 million records were not run.
+
+Prepare time is planning only: read, extract, resolve relationships, build scopes, and plan batches. It does not include PostgreSQL staging. Process time, where shown, re-reads the source once per batch and loads a recording target in memory. Reconciliation time is an in-memory fold of the planned work items, reported separately. Staging copy time is a separate PostgreSQL measurement.
+
+Observed heap is one `MemoryMXBean` sample of used heap, not a guaranteed peak and not process RSS. The 1.7–1.9 GB samples on the 1,011,000-entity prepare runs are total used JVM heap during that run. They are not the scope index. The scope-index estimate at that size is about 198 MB. Scope bytes, relationship-parent-index bytes, the resolved relationship list, and observed heap are four different figures.
+
+| Scenario | Leaves | Entities | Prepare | Leaves/sec | Entities/sec | Reconcile fold | Observed heap | Source opens |
+|----------|--------|----------|---------|------------|--------------|----------------|---------------|--------------|
+| Flat CSV source read | 10,000 rows | — | 246 ms | 40,650 | — | — | 59 MB | — |
+| Flat CSV source read | 100,000 rows | — | 266 ms | 375,940 | — | — | 107 MB | — |
+| Single-file entity prepare | 10,000 | 10,110 | 4,009 ms | 2,494 | 2,522 | 77 ms | 113 MB | 5 |
+| Multi-file entity prepare | 10,000 | 10,110 | 796 ms | 12,563 | 12,701 | 183 ms | 152 MB | 7 |
+| Single-file entity prepare | 100,000 | 101,100 | 6,290 ms | 15,898 | 16,073 | 99 ms | 340 MB | 5 |
+| Multi-file entity prepare | 100,000 | 101,100 | 1,852 ms | 53,996 | 54,590 | 58 ms | 505 MB | 7 |
+| Single-file entity prepare | 1,000,000 | 1,011,000 | 47,468 ms | 21,067 | 21,299 | 277 ms | 1,904 MB | 5 |
+| Multi-file entity prepare | 1,000,000 | 1,011,000 | 20,590 ms | 48,567 | 49,102 | 300 ms | 1,739 MB | 7 |
+
+Batch size was 10,000 work items. One worker. Generated entity names were EntityA, EntityB, and EntityC, with counts leaves/1000, leaves/100, and leaves (at least one root). These are not production datasets. Generated files were not committed.
+
+1,011,000 entities were successfully measured locally during the prepare benchmark. Phase 10 established a local benchmark baseline at approximately 1.01 million generated entities for the prepare path. The figure is that local prepare measurement. It is not a production capacity figure, and it is not a linear extrapolation.
+
+Process-batch, recording target, source re-read once per batch, not included in the prepare column:
+
+| Layout | Leaves | Batches | Process | Entities/sec | Identity lookup calls |
+|--------|--------|---------|---------|--------------|------------------------|
+| Single-file | 10,000 | 2 | 1,070 ms | 9,449 | 104 |
+| Multi-file | 10,000 | 2 | 2,021 ms | 5,002 | 104 |
+| Single-file | 100,000 | 11 | 11,855 ms | 8,528 | 1,032 |
+| Multi-file | 100,000 | 11 | 6,406 ms | 15,782 | 1,032 |
+
+1,000,000-leaf process-batch was not run. One hundred and two full source re-reads were not measured.
+
+PostgreSQL staging copy, 10,000 rows, reconciliation not included:
+
+| Target | Table | Copy | Rows/sec | Retry copy | Rows after retry |
+|--------|-------|------|----------|------------|------------------|
+| Flat | `migration_staging.flat_benchmark` | 773 ms | 12,937 | — | 10,000 |
+| Entity | `migration_staging.entity_identity_benchmark` | 841 ms | 11,891 | 469 ms | 10,000 |
+
+The entity retry loaded the same identities under another batch id. The row count stayed 10,000.
+
+### Scope index
+
+The scope index stores, per distinct `(entityName, sourceIdentity)`, the source record number and the child links. It does not store source field maps. It lives until the scope stream is closed.
+
+Measured estimate, about 196 bytes per identity:
+
+| Identities | Estimated index | Largest scope in that run |
+|------------|-----------------|---------------------------|
+| 10,110 | 1.9 MB | 1,011 members |
+| 101,100 | 19.6 MB | 1,011 members |
+| 1,011,000 | 198 MB | 1,011 members |
+
+The benchmark splits leaves across parents, so one scope stayed about 1,011 members. A separate unit test materialized one scope of 1,000, 10,000, and 100,000 members. Estimated bytes grew about tenfold at each step. 100,000 members is the largest single scope that test built. A 1,000,000-member scope was not built.
+
+### Relationship index
+
+The parent index is keyed by relationship-key values and stores parent name, source identity, and source record number. At 1,000,000 leaves the index held 11,000 parents (the roots and middle entities) and about 1.9 MB. It did not grow with the leaf count. A unit test indexed 1,000, 10,000, and 100,000 distinct parents; estimated bytes grew about tenfold at each step. The index is discarded when resolution returns.
+
+The resolved relationship list is a different object. It has one entry per child link and stays reachable until prepare finishes consuming it. At 1,000,000 leaves that list has 1,010,000 relationships. That list, not the parent index, is the large relationship-shaped cost.
+
+### Scalability decision
+
+Phase 10 kept the current in-memory indexes:
+
+- the scope identity index
+- the relationship parent index
+
+No persisted identity index was added. This is a measured decision for the sizes that were run. It is not a claim of unlimited scale. Memory still grows with entity count and with the resolved relationship list. Identity lookup stays batch-local and chunked at 100. Source matching keeps only the identities in the current batch, and the processor clears that map before it returns. Prepare opened each single file 5 times and each three-file layout 7 times.
+
+### Entity idempotency
+
+Flat key, unchanged: `runId:batchId:sourceRecordNumber`.
+
+Entity key: `entity-v1:` plus the hex SHA-256 of `runId`, entity name, and source identity, separated by a unit separator. Batch id is not part of the key. The same `(run, entity, source identity)` in a later batch is the same logical entity. The latest load is the one staging row. A second copy of that entity inside one batch is counted as a duplicate and is not loaded twice.
+
+The connector still deletes the current batch's rows, then deletes any earlier rows in the same run whose idempotency key is one of the entity keys being loaded, then COPY. Flat keys do not use the `entity-v1:` prefix, so that second delete does not apply to them.
+
+Staging tables are operator DDL, outside Flyway. A JSONB configuration cannot enforce uniqueness across staging rows. The entity table should use `UNIQUE (migration_run_id, idempotency_key)`. The flat table keeps `UNIQUE (migration_run_id, migration_batch_id, source_record_number)`. Flyway V4 and V5 create the control-plane identity tables. They do not create the staging table.
+
+Retry uses the existing batch lifecycle. A successful entity is not inserted a second time. An entity that never loaded can be inserted on retry. Source identity and the hashed key stay the same across the retry.
+
+### Known limitations
+
+1. Process-next-batch rereads the source once per batch.
+2. The scope index and the resolved relationship list are retained through prepare.
+3. The Phase 10 benchmark supplied a lookup that prefixes the source identity. The later control-plane allocator (V4 and V5) is what canonical promotion uses. The benchmark result is not that allocator's measurement.
+4. Phase 10 benchmarks use a recording target or PostgreSQL staging. They did not load canonical UAM tables. The local canonical load is §28, at 515 records, and is not a scale result.
+5. A 1,000,000-leaf process-batch was not measured.
+6. A 1,000,000-row staging copy was not measured.
+7. A full 1,000,000-entity migration through staging and HTTP reconciliation was not measured.
+8. A single scope of 1,000,000 members was not measured. The unit test stopped at 100,000 members.
+9. 10M, 30M, and 50M datasets were not demonstrated.
+10. Observed heap is a sample, not an exact peak-memory measurement.
+11. Pipeline stage timings overlap. Do not add them into an elapsed time.
+
+### Measured and not demonstrated
+
+**Measured locally**
+
+- Flat CSV source read at 10,000 and 100,000 rows
+- Entity single-file prepare at 10,000, 100,000, and 1,000,000 leaves (10,110, 101,100, and 1,011,000 entities)
+- Entity multi-file prepare at the same three sizes
+- Entity process-batch at 10,000 and 100,000 leaves
+- PostgreSQL staging copy at 10,000 flat rows and 10,000 entity rows
+- Entity staging retry at 10,000 rows, with the row count left at 10,000
+- Scope footprint through 100,000 members in one scope
+- About 1,011,000 identities across many scopes
+- Relationship parent-index behavior through the 100,000-parent unit test, and the 11,000-parent index inside the 1,000,000-leaf prepare
+
+**Not demonstrated**
+
+- 1,000,000-leaf process-batch
+- 1,000,000-row staging copy
+- 1,000,000-entity migration through staging and HTTP reconciliation
+- One logical scope of 1,000,000 members
+- 10M, 30M, and 50M
+
+The local canonical demonstration in §28 is a functional proof at 515 logical records. It is not one of the measurements above and it does not change them.
+
+---
+
+## 28. Local End-to-End Migration Demonstration
+
+**Status:** COMPLETED
+
+The migration engine has been demonstrated locally on the configuration-driven path CSV → staging → promotion → UAM. This is a workstation demonstration. It is not a production UAM deployment and it is not evidence of 30M production support.
+
+### Local topology
+
+| Item | Value |
+|------|--------|
+| Application | `http://localhost:8082` |
+| Control-plane PostgreSQL | `localhost:55433`, database `etp_migration` |
+| Target PostgreSQL | `localhost:55432`, database `etp_migration` |
+| Staging | schema `migration_staging`, table `uam_entity_stage` |
+| Canonical schema | `uam` |
+
+The local `uam` schema was hosted on the existing PostgreSQL instance at port 55432 because a separate UAM project container was not available. That arrangement is local infrastructure. It is not the production UAM deployment architecture.
+
+### Definition and run
+
+| Item | Value |
+|------|--------|
+| Definition ID | `59fc4cc1-85cf-44bd-870b-dd56ae3ca1ae` |
+| Name | `migrate_geographicAddress_test01` |
+| Version | 1.2 |
+| Definition status | ACTIVE |
+| Run ID | `f9e9fd4f-cc61-4d0f-8e71-e3333f09b431` |
+| Run number | 2 |
+| Promotion ID | `2994bce6-6033-4b9a-94ba-f5b2c3e1a561` |
+
+### Dataset
+
+The CSV contains 110 physical rows: 100 SFU address rows, one MDU address represented by 10 sub-address rows, and latitude/longitude. Six entities and eight relationships are configured. The engine expands the physical rows into logical entity records.
+
+```text
+110 physical CSV rows
+        ↓
+515 logical entity records
+        ↓
+515 staged records
+        ↓
+515 reconciled records
+        ↓
+515 promoted records
+```
+
+### Entities and relationships
+
+| Entity | Staged and promoted |
+|--------|---------------------|
+| AddressLocation | 101 |
+| GeographicPointLocation | 101 |
+| GeographicAddress | 101 |
+| GeographicLocation | 101 |
+| LocationGeometry | 101 |
+| GeographicSubAddress | 10 |
+
+| Relationship | Cardinality |
+|--------------|-------------|
+| AddressLocation → GeographicAddress | ONE_TO_ONE |
+| AddressLocation → GeographicPointLocation | ONE_TO_ONE |
+| GeographicPointLocation → GeographicLocation | ONE_TO_ONE |
+| GeographicPointLocation → LocationGeometry | ONE_TO_ONE |
+| GeographicLocation → GeographicAddress | ONE_TO_ONE |
+| GeographicLocation → LocationGeometry | ONE_TO_ONE |
+| GeographicAddress → GeographicSubAddress | ONE_TO_MANY |
+| GeographicLocation → GeographicSubAddress | ONE_TO_MANY |
+
+The ONE_TO_MANY case was part of the successful promotion. Ten sub-address records share one geographic address and one geographic location.
+
+### Execution
+
+| Counter | Result |
+|---------|--------|
+| status | COMPLETED |
+| totalRecords | 515 |
+| processedRecords | 515 |
+| successRecords | 515 |
+| duplicateRecords | 0 |
+| validationFailures | 0 |
+| enrichmentFailures | 0 |
+| loadFailures | 0 |
+| rejectedRecords | 0 |
+| totalBatches | 1 |
+| completedBatches | 1 |
+| failedBatches | 0 |
+
+### Staging reconciliation
+
+Overall status **PASSED_WITH_WARNINGS**. Source count, planned entity count, processed entity count, and successful entity count are each 515. Failed entities, unresolved identities, load failures, relationship failures, and the difference are 0.
+
+| Entity | Result |
+|--------|--------|
+| AddressLocation | 101 / 101 successful |
+| GeographicAddress | 101 / 101 successful |
+| GeographicLocation | 101 / 101 successful |
+| GeographicPointLocation | 101 / 101 successful |
+| GeographicSubAddress | 10 / 10 successful |
+| LocationGeometry | 101 / 101 successful |
+
+All eight configured relationships have expected equal to resolved, unresolved 0, and status PASSED.
+
+The warning exists because canonical checksum comparison is not available between the source representation and the canonical staging representation. It is not a migration failure. This reconciliation verifies staging. It does not verify the final UAM tables. The 100 SFU rows that do not instantiate `GeographicSubAddress` are not extraction failures. The entity source count is the planned logical records (515), not the 110 physical CSV rows.
+
+### Promotion
+
+| Counter | Result |
+|---------|--------|
+| status | PROMOTED |
+| totalRecords | 515 |
+| promotedRecords | 515 |
+| failedRecords | 0 |
+| skippedRecords | 0 |
+| totalBatches | 1 |
+| promotedBatches | 1 |
+| failedBatches | 0 |
+
+### UAM rows
+
+| Table | Rows |
+|-------|------|
+| `uam.location` | 202 |
+| `uam.geographic_address` | 101 |
+| `uam.geographic_location` | 101 |
+| `uam.location_geometry` | 101 |
+| `uam.geographic_sub_address` | 10 |
+| Total | 515 |
+
+`uam.location` holds 202 rows because both `AddressLocation` (101) and `GeographicPointLocation` (101) load that table.
+
+### Repeated parent
+
+The ten sub-address target identities are `SUB-000000011` through `SUB-000000020`. All ten reference the same geographic address `ADDR-0000000202` and the same geographic location `GEO-000000202`.
+
+```text
+MDU
+ ├── one GeographicAddress
+ │    ├── SubAddress 101
+ │    ├── SubAddress 102
+ │    ├── ...
+ │    └── SubAddress 110
+ │
+ └── one GeographicLocation
+      └── LocationGeometry
+```
+
+That result is the demonstrated repeated-parent and ONE_TO_MANY behavior during promotion.
+
+### Identity configuration
+
+Target identities are not allocated during staging. Staging keeps source identities and relationship links. Allocation runs during promotion from `mapping.entities[].targetIdentity`:
+
+| Entity | Strategy | Prefix | sequenceLength |
+|--------|----------|--------|----------------|
+| AddressLocation | PREFIX_SEQUENCE | `LOC-` | 9 |
+| GeographicPointLocation | PREFIX_SEQUENCE | `GEO-LOC-` | 9 |
+| GeographicAddress | PREFIX_SEQUENCE | `ADDR-` | 10 |
+| GeographicSubAddress | PREFIX_SEQUENCE | `SUB-` | 9 |
+| GeographicLocation | PREFIX_SEQUENCE | `GEO-` | 9 |
+| LocationGeometry | PREFIX_SEQUENCE | `GEOM-` | 9 |
+
+That mapping field is the authoritative identity configuration. A definition-level `identity` object is not used.
+
+### Earlier failure and retry
+
+An earlier local promotion, not run `f9e9fd4f-cc61-4d0f-8e71-e3333f09b431`, failed while loading the canonical tables. The UAM transaction rolled back. The identity allocations for that run remained. A later promotion could reuse those allocations, and a successful load then committed. A promotion that is already `PROMOTED` is returned without writing the batch again. `ON CONFLICT (id) DO NOTHING` leaves an existing primary key in place. Run 2 above is the clean completed demonstration. It is not that failed attempt.
+
+### What this demonstration shows
+
+The local run shows that the engine can:
+
+- ingest file-based source data
+- expand physical rows into logical entity records
+- process multiple configured entities
+- resolve configured entity relationships
+- support ONE_TO_ONE and ONE_TO_MANY relationships
+- transform and validate data
+- stage records with PostgreSQL bulk loading
+- reconcile logical entity counts and relationships
+- allocate target identities during promotion
+- resolve repeated parent identities
+- promote staged records into the local UAM canonical model
+- roll back a failed canonical batch and retry with the same identities
+- treat an already promoted batch as complete
+
+New business entities should normally be configuration-driven. The demonstrated `GeographicSubAddress` case did not require an entity-specific production Java branch.
+
+### What is not claimed
+
+- 30M production-scale support
+- a production UAM deployment
+- production operational readiness
+- every source or target technology
+- enrichment and deduplication
+
+Phase 10 and the historical flat measurement remain the performance records. They are unchanged by this 515-record demonstration. See [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md).

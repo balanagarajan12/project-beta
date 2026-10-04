@@ -151,13 +151,20 @@ public class CsvSourceConnector implements MigrationSourceConnector {
 
 												@Override
 												public com.etp.migration.processing.SourceRecord next() {
-													if (!hasNext()) {
-														throw new java.util.NoSuchElementException();
+													long started = com.etp.migration.processing.PipelineTiming.start();
+													try {
+														if (!hasNext()) {
+															throw new java.util.NoSuchElementException();
+														}
+														CSVRecord csvRecord = records.next();
+														remaining--;
+														Map<String, Object> fields = toFields(csvRecord, headers, config.hasHeader());
+														return new com.etp.migration.processing.SourceRecord(recordNumber++, fields);
+													} finally {
+														com.etp.migration.processing.PipelineTiming.stop(
+																com.etp.migration.processing.PipelineTiming.Stage.SOURCE_READ,
+																started);
 													}
-													CSVRecord csvRecord = records.next();
-													remaining--;
-													Map<String, Object> fields = toFields(csvRecord, headers, config.hasHeader());
-													return new com.etp.migration.processing.SourceRecord(recordNumber++, fields);
 												}
 											},
 											java.util.Spliterator.ORDERED),
@@ -202,6 +209,70 @@ public class CsvSourceConnector implements MigrationSourceConnector {
 					// close quietly after a read failure
 				}
 			}
+		}
+	}
+
+	public java.util.stream.Stream<SourceRecord> readAll(CsvFileSourceConfiguration config) {
+		if (config == null) {
+			throw new InvalidSourceConfigurationException("Source configuration is required");
+		}
+		if (!artifactStorage.exists(config.provider(), config.objectKey())) {
+			throw new com.etp.migration.connector.storage.ArtifactNotFoundException(config.objectKey());
+		}
+		InputStream input = null;
+		BufferedReader reader = null;
+		CSVParser parser = null;
+		try {
+			input = artifactStorage.open(config.provider(), config.objectKey());
+			reader = new BufferedReader(new InputStreamReader(input, config.encoding()));
+			parser = csvFormat(config).parse(reader);
+			List<String> headers = config.hasHeader() ? List.copyOf(parser.getHeaderNames()) : List.of();
+			Iterator<CSVRecord> records = parser.iterator();
+			final CSVParser openParser = parser;
+			final BufferedReader openReader = reader;
+			final InputStream openInput = input;
+			return java.util.stream.StreamSupport.stream(
+							java.util.Spliterators.spliteratorUnknownSize(
+									new Iterator<SourceRecord>() {
+										long recordNumber = 1;
+
+										@Override
+										public boolean hasNext() {
+											return records.hasNext();
+										}
+
+										@Override
+										public SourceRecord next() {
+											long started = com.etp.migration.processing.PipelineTiming.start();
+											try {
+												if (!hasNext()) {
+													throw new java.util.NoSuchElementException();
+												}
+												CSVRecord csvRecord = records.next();
+												return new SourceRecord(
+														recordNumber++,
+														toFields(csvRecord, headers, config.hasHeader()));
+											} finally {
+												com.etp.migration.processing.PipelineTiming.stop(
+														com.etp.migration.processing.PipelineTiming.Stage.SOURCE_READ,
+														started);
+											}
+										}
+									},
+									java.util.Spliterator.ORDERED),
+							false)
+					.onClose(() -> closeQuietly(openParser, openReader, openInput));
+		} catch (com.etp.migration.connector.storage.ArtifactNotFoundException
+				| InvalidSourceConfigurationException
+				| UnsupportedSourceTypeException ex) {
+			closeQuietly(parser, reader, input);
+			throw ex;
+		} catch (Exception ex) {
+			closeQuietly(parser, reader, input);
+			throw new com.etp.migration.processing.BatchProcessingException(
+					com.etp.migration.processing.MigrationErrorCodes.SOURCE_READ_ERROR,
+					"Unable to read source batch",
+					ex);
 		}
 	}
 

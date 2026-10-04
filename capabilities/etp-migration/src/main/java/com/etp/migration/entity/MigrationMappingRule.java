@@ -42,6 +42,9 @@ public class MigrationMappingRule {
 	@Column(name = "sequence_no", nullable = false)
 	private Integer sequenceNo;
 
+	@Column(name = "entity_name", length = 100)
+	private String entityName;
+
 	@Column(name = "source_field", length = 500)
 	private String sourceField;
 
@@ -111,6 +114,14 @@ public class MigrationMappingRule {
 
 	public void setSequenceNo(Integer sequenceNo) {
 		this.sequenceNo = sequenceNo;
+	}
+
+	public String getEntityName() {
+		return entityName;
+	}
+
+	public void setEntityName(String entityName) {
+		this.entityName = entityName;
 	}
 
 	public String getSourceField() {

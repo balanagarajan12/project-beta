@@ -18,6 +18,11 @@ import com.etp.migration.connector.target.TargetLoadResult;
 import com.etp.migration.connector.target.TargetRecordError;
 import com.etp.migration.connector.target.UnsupportedTargetTypeException;
 import com.etp.migration.entity.LoadMode;
+import com.etp.migration.execution.EntityBatchOutcome;
+import com.etp.migration.execution.EntityFailureRecorder;
+import com.etp.migration.execution.EntityRelationshipBatchProcessor;
+import com.etp.migration.execution.ExecutionMode;
+import com.etp.migration.execution.StoredEntityBatch;
 import com.etp.migration.entity.MigrationBatch;
 import com.etp.migration.entity.MigrationError;
 import com.etp.migration.entity.MigrationMapping;
@@ -63,6 +68,8 @@ public class MigrationBatchWorker {
 	private final MigrationTargetConnectorRegistry targetConnectorRegistry;
 	private final ArtifactChecksumCalculator checksumCalculator;
 	private final MigrationRecordProcessor recordProcessor;
+	private final EntityRelationshipBatchProcessor entityBatchProcessor;
+	private final EntityFailureRecorder entityFailureRecorder;
 
 	public MigrationBatchWorker(
 			PlatformTransactionManager transactionManager,
@@ -76,7 +83,9 @@ public class MigrationBatchWorker {
 			MigrationSourceConnectorRegistry connectorRegistry,
 			MigrationTargetConnectorRegistry targetConnectorRegistry,
 			ArtifactChecksumCalculator checksumCalculator,
-			MigrationRecordProcessor recordProcessor) {
+			MigrationRecordProcessor recordProcessor,
+			EntityRelationshipBatchProcessor entityBatchProcessor,
+			EntityFailureRecorder entityFailureRecorder) {
 		this.transactionTemplate = new TransactionTemplate(transactionManager);
 		this.migrationBatchQueueService = migrationBatchQueueService;
 		this.workerIdentity = workerIdentity;
@@ -89,6 +98,8 @@ public class MigrationBatchWorker {
 		this.targetConnectorRegistry = targetConnectorRegistry;
 		this.checksumCalculator = checksumCalculator;
 		this.recordProcessor = recordProcessor;
+		this.entityBatchProcessor = entityBatchProcessor;
+		this.entityFailureRecorder = entityFailureRecorder;
 	}
 
 	public Optional<ProcessBatchResponse> processNextBatch() {
@@ -170,6 +181,7 @@ public class MigrationBatchWorker {
 		definition.getTargetEntity();
 		definition.getLoadMode();
 		definition.getConfiguration();
+		mapping.getConfiguration();
 		return new BatchWork(
 				batch,
 				run,
@@ -179,10 +191,15 @@ public class MigrationBatchWorker {
 				definition.getTargetType(),
 				definition.getTargetEntity(),
 				definition.getLoadMode(),
-				definition.getConfiguration() == null ? Map.of() : new HashMap<>(definition.getConfiguration()));
+				definition.getConfiguration() == null ? Map.of() : new HashMap<>(definition.getConfiguration()),
+				mapping.getConfiguration() == null ? Map.of() : new HashMap<>(mapping.getConfiguration()),
+				batch.getSourceLocator() == null ? Map.of() : new HashMap<>(batch.getSourceLocator()));
 	}
 
 	private void verifyChecksum(BatchWork work) {
+		if (ExecutionMode.entityRelationship(work.mappingConfiguration())) {
+			return;
+		}
 		if (work.expectedChecksum() == null || work.expectedChecksum().isBlank()) {
 			return;
 		}
@@ -196,6 +213,9 @@ public class MigrationBatchWorker {
 	}
 
 	private BatchCompletionCounters processRecords(BatchWork work) {
+		if (ExecutionMode.entityRelationship(work.mappingConfiguration())) {
+			return processEntityBatch(work);
+		}
 		MigrationSourceConnector connector = connectorRegistry.require(work.source());
 		int processed = 0;
 		int success = 0;
@@ -214,7 +234,10 @@ public class MigrationBatchWorker {
 						loadable.add(new LoadableTargetRecord(
 								processedRecord.sourceRecordNumber(),
 								processedRecord.target(),
-								work.run().getId() + ":" + work.batch().getId() + ":" + processedRecord.sourceRecordNumber()));
+								FlatIdempotencyKey.of(
+										work.run().getId(),
+										work.batch().getId(),
+										processedRecord.sourceRecordNumber())));
 					} else if (processedRecord.status() == MigrationRecordStatus.VALIDATION_FAILED) {
 						validationFailures++;
 						buffer.addAll(toPending(processedRecord));
@@ -257,6 +280,24 @@ public class MigrationBatchWorker {
 				success,
 				validationFailures + rejected + loadFailures);
 		return new BatchCompletionCounters(processed, success, 0, validationFailures, 0, loadFailures, rejected);
+	}
+
+	private BatchCompletionCounters processEntityBatch(BatchWork work) {
+		EntityBatchOutcome outcome = entityBatchProcessor.process(new StoredEntityBatch(
+				work.batch().getId(),
+				work.batch().getBatchNumber(),
+				work.batch().getRecordCount() == null ? 0 : work.batch().getRecordCount(),
+				work.run().getId(),
+				work.source().getConfiguration() == null ? Map.of() : new HashMap<>(work.source().getConfiguration()),
+				work.mappingConfiguration(),
+				work.rules(),
+				work.sourceLocator(),
+				work.targetType(),
+				work.targetEntity(),
+				work.loadMode(),
+				work.targetConfiguration()));
+		entityFailureRecorder.save(work.run().getId(), work.batch().getId(), outcome.failures());
+		return outcome.counters();
 	}
 
 	private TargetLoadResult loadTargets(BatchWork work, List<LoadableTargetRecord> loadable) {
@@ -422,7 +463,9 @@ public class MigrationBatchWorker {
 			String targetType,
 			String targetEntity,
 			LoadMode loadMode,
-			Map<String, Object> targetConfiguration
+			Map<String, Object> targetConfiguration,
+			Map<String, Object> mappingConfiguration,
+			Map<String, Object> sourceLocator
 	) {
 	}
 }
