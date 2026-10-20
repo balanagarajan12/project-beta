@@ -81,10 +81,10 @@ No Kubernetes manifests, Helm charts, or k8s configuration found in the reposito
 |----------|-------------------|
 | `ETP_CURRENT_DATA_MODEL.md` | Platform + IAM database overview (note: IAM Flyway section may lag implementation) |
 | `etp-platform-service/README.md` | `etp_platform` setup, env vars, Docker Compose |
-| `etp-platform-service/ARCHITECTURE.md` | Metadata store, Flyway, isolation principles |
+| `ETP-ARCHITECTURE.md` | Metadata store, Flyway, isolation principles |
 | `capabilities/etp-iam/README.md`, `ETP_IAM_CAPABILITY_DEPLOYMENT.md` | `etp_iam` setup |
 | `capabilities/etp-iam/etp-iam-capability-registration.json` | PostgreSQL listed as **external** dependency of IAM |
-| `etp-platform-service/docs/CAPABILITY_REGISTRY.md` | Capability model (no Postgres capability today) |
+| `ETP_APIS.md` and `ETP_CAPABILITY_DEFINITION.md` | Capability model (no Postgres capability registered today) |
 
 ## Relevant file paths (complete list)
 
@@ -237,7 +237,7 @@ UAM PostgreSQL Database (e.g. etp_uam)
 | Registered `etp.postgresql` capability | **No** | Only test fixture code `etp.postgresql` in `CapabilityApiIntegrationTest` |
 | Platform API to provision application databases | **No** | No provisioning service or REST API |
 | Application Registry wiring DB to apps | **No** | `application_definition.definition_document` JSONB exists; no initializer service |
-| Documented pattern: dedicated DB per service | **Yes** | Platform README, ARCHITECTURE.md, IAM deployment guide |
+| Documented pattern: dedicated DB per service | **Yes** | Platform README, ETP-ARCHITECTURE.md, IAM deployment guide |
 | Consumer uses Spring Data JPA directly | **Yes** | Platform + IAM |
 | Consumer uses Flyway for schema | **Yes** | Platform + IAM |
 | Shared database across services | **No** | Explicit separation `etp_platform` vs `etp_iam` |
@@ -300,7 +300,7 @@ Suggested implementation metadata (analogous to IAM):
 | Capability contract documenting security baseline | No `etp.postgresql` contract yet |
 | Secret handling documented in contract `configuration` | Pattern exists in IAM external deps; not formalized for Postgres capability |
 | Explicit “no credentials in registry” rule | Already practiced for `etp.iam`; must repeat for Postgres capability |
-| Database-per-application isolation pattern documented | Partially in ARCHITECTURE.md; needs capability contract section |
+| Database-per-application isolation pattern documented | Partially in ETP-ARCHITECTURE.md; needs capability contract section |
 | Dev default passwords | Document as **dev-only**; production must use secret manager |
 
 ## FUTURE ENHANCEMENT
@@ -544,9 +544,9 @@ Follow the **etp.iam** reference lifecycle:
 | IAM Postgres compose | `capabilities/etp-iam/docker-compose.yml` |
 | Data model | `ETP_CURRENT_DATA_MODEL.md` |
 | IAM onboarding reference | `capabilities/etp-iam/ETP_IAM_CAPABILITY_READINESS.md` |
-| Registry model | `etp-platform-service/docs/CAPABILITY_REGISTRY.md` |
+| Registry model | `ETP_CAPABILITY_DEFINITION.md` |
 | Contract schema | `etp-platform-service/src/main/resources/schemas/capability-contract-base.schema.json` |
-| Architecture guardrails | `etp-platform-service/ARCHITECTURE.md` |
+| Architecture guardrails | `ETP-ARCHITECTURE.md` |
 
 ---
 

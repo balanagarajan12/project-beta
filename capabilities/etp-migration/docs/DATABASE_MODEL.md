@@ -4,7 +4,7 @@
 **Current Flyway version:** **V5**. Flyway location: `classpath:db/migration`. Hibernate `ddl-auto=validate`.
 **Control-plane database (local default):** PostgreSQL database `etp_migration` on **localhost:55433** (`capabilities/etp-migration/docker-compose.yml`). Integration tests use a separate Testcontainers database `etp_migration_test` and must not write to this demo instance.
 
-Related: [ARCHITECTURE.md](ARCHITECTURE.md).
+Related: [ARCHITECTURE.md](ARCHITECTURE.md), [migration-e2e-test-guide.md](migration-e2e-test-guide.md).
 
 **Implementation status:** Tables below are created by Flyway. Staging and business/demo tables are **not** Flyway-managed.
 
@@ -25,6 +25,7 @@ V1 file header text mentions “runs up to 30M+ records”. That comment is **no
 | `public` (typical search_path) | Yes — control-plane tables | `migration_*` tables |
 | `migration_staging` (conventional) | **No** | Operator staging tables such as `address_load` and `entity_load`. Not control-plane tables. |
 | `uam_migration_test` (local demo) | **No** | Simulated business table `address` — **not** a platform control-plane table |
+| `uam` (local canonical stand-in) | **No** | Operator-created business tables. Canonical load reads `information_schema.columns` at insert time. Flyway does not own this schema. See [ARCHITECTURE.md](ARCHITECTURE.md) §29. |
 | `promo_app` (integration tests) | **No** | Test business table only |
 
 ---
@@ -344,7 +345,7 @@ See §3.9. `details` JSON holds verification attributes (`verificationScope`, `b
 
 ## 17. Audit fields
 
-Control entities generally have `created_at` / `updated_at`; definitions, sources, mappings also `created_by` / `updated_by` (activation sets `updated_by` to `system`). Promotion uses `requested_by` / `requested_at`. There is no separate audit-event table in this module.
+Control entities generally have `created_at` / `updated_at`; definitions, sources, mappings also `created_by` / `updated_by`. Runs use `requested_by`; promotion uses `requested_by` / `requested_at`. The `*_by` values come from the authenticated token (`AuditActor`): the JWT `sub`, or `client:<azp>` when there is no subject. Calls without authentication record `system`, and anonymous calls under the `dev` profile record `anonymous`. Rows written before this change hold `system`. There is no separate audit-event table in this module.
 
 ---
 
@@ -389,7 +390,7 @@ This table is still operator DDL. It is not a Flyway migration. The control-plan
 
 `uam_migration_test.address` is an older **flat** illustration table. It is not an ETP control-plane table and is not created by V1–V5.
 
-The completed local canonical demonstration used schema **`uam`** on the target database (`localhost:55432` / `etp_migration`): `location`, `geographic_address`, `geographic_location`, `location_geometry`, and `geographic_sub_address`. Staging for that run is `migration_staging.uam_entity_stage` on the same target instance. The control plane stays on `localhost:55433`. Hosting `uam` on the existing local PostgreSQL instance was a workstation arrangement because a separate UAM container was not available. It is not a production UAM deployment. The column list used locally is `local/uam-target.sql`. That script does not replace a production UAM schema.
+The completed local canonical demonstration used schema **`uam`** on the target database (`localhost:55432` / `etp_migration`): `location`, `geographic_address`, `geographic_location`, `location_geometry`, and `geographic_sub_address`. Staging for that run is `migration_staging.uam_entity_stage` on the same target instance. The control plane stays on `localhost:55433`. Hosting `uam` on the existing local PostgreSQL instance was a workstation arrangement because a separate UAM container was not available. It is not a production UAM deployment. The column list used locally is `local/uam-target.sql`. In that script, `geographic_sub_address.private_street_name` and `private_street_number` are nullable. The script also drops `NOT NULL` when those columns already exist. That script does not replace a production UAM schema. Flyway does not manage it.
 
 Integration tests also use `promo_app.address` similarly for the flat contract.
 

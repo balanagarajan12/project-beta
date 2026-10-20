@@ -88,6 +88,22 @@ class CompositeMigrationConfigurationServiceTest {
 	}
 
 	@Test
+	void singleEntityWithoutTargetEntityIsRejectedBeforePersistence() {
+		CompositeMigrationConfigurationRequest request = new CompositeMigrationConfigurationRequest(
+				new CompositeDefinitionRequest(
+						"addr-import", "1.0.0", null, "FILE", "POSTGRESQL", " ", null, null, Map.of()),
+				new CreateMigrationMappingRequest("addr-map", "1.0.0", "FILE", "POSTGRESQL", null, null),
+				List.of(new CreateMappingRuleRequest(
+						1, null, "external_id", "external_id", TransformationType.DIRECT, null, null, null, true, true)),
+				new CreateMigrationSourceRequest("csv", "FILE", Map.of("provider", "FILE_SYSTEM"), null));
+
+		assertThatThrownBy(() -> service.create(request))
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessage("definition.targetEntity is required for a single-entity migration");
+		verify(migrationMappingService, never()).create(any());
+	}
+
+	@Test
 	void duplicateDefinitionStopsBeforeSourceCreate() {
 		when(migrationMappingService.create(any())).thenReturn(mappingResponse());
 		when(migrationMappingService.createRule(eq(MAPPING_ID), any())).thenReturn(ruleResponse(1L, 1));

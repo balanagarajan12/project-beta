@@ -13,10 +13,14 @@ import com.etp.migration.entity.MigrationDefinition;
 import com.etp.migration.repository.MigrationDefinitionRepository;
 import com.etp.migration.repository.MigrationErrorRepository;
 import com.etp.migration.repository.MigrationRecordRepository;
+import com.etp.migration.run.MigrationRunService;
+import com.etp.migration.support.CapturedLogs;
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.UUID;
+import org.slf4j.MDC;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -210,6 +214,61 @@ class MigrationBatchWorkerIntegrationTest {
 		mockMvc.perform(post("/api/v1/migration-runs/{runId}/process-next-batch", runId).with(jwt()))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.status").value("COMPLETED"));
+	}
+
+	@Test
+	void workerAndRetryLogsCarryTheRunAndBatchIdentifiers() throws Exception {
+		String objectKey = "samples/log-correlation-" + System.nanoTime() + ".csv";
+		writeCsv(objectKey, """
+				addr1,city
+				123 Main St,Salem
+				""");
+		String mappingId = createMapping(true);
+		String definitionId = createActiveDefinition(mappingId, 10_000, "UAM", "SINGLE");
+		createSource(definitionId, objectKey);
+		String runId = createRun(definitionId);
+		prepare(runId);
+		Files.delete(storageRoot.resolve(objectKey));
+
+		try (CapturedLogs logs = CapturedLogs.of(MigrationBatchWorker.class, MigrationRunService.class)) {
+			MvcResult failed = mockMvc.perform(post("/api/v1/migration-runs/{runId}/process-next-batch", runId).with(jwt()))
+					.andExpect(status().isOk())
+					.andExpect(jsonPath("$.status").value("FAILED"))
+					.andReturn();
+			assertThat(MDC.getCopyOfContextMap()).isNullOrEmpty();
+			String batchId = String.valueOf(com.jayway.jsonpath.JsonPath.<Object>read(
+					failed.getResponse().getContentAsString(), "$.batchId"));
+			writeCsv(objectKey, """
+					addr1,city
+					123 Main St,Salem
+					""");
+			mockMvc.perform(post("/api/v1/migration-runs/{runId}/retry", runId).with(jwt()))
+					.andExpect(status().isOk());
+			mockMvc.perform(post("/api/v1/migration-runs/{runId}/process-next-batch", runId).with(jwt()))
+					.andExpect(status().isOk())
+					.andExpect(jsonPath("$.status").value("COMPLETED"));
+			assertThat(MDC.getCopyOfContextMap()).isNullOrEmpty();
+
+			Map<String, String> batchContext = Map.of(
+					MigrationLogContext.RUN_ID, runId,
+					MigrationLogContext.BATCH_ID, batchId);
+			assertThat(logs.containing("Batch processing started")).hasSize(2)
+					.allSatisfy(entry -> assertThat(entry.mdc()).containsAllEntriesOf(batchContext));
+			assertThat(logs.containing("Batch processing failed")).singleElement()
+					.satisfies(entry -> {
+						assertThat(entry.mdc()).containsAllEntriesOf(batchContext);
+						assertThat(entry.message()).contains("errorCode=").doesNotContain(objectKey);
+					});
+			assertThat(logs.containing("Batch processing finished")).hasSize(2)
+					.allSatisfy(entry -> assertThat(entry.mdc()).containsAllEntriesOf(batchContext));
+			assertThat(logs.containing("Batch marked for retry")).singleElement()
+					.satisfies(entry -> assertThat(entry.mdc()).containsAllEntriesOf(batchContext));
+			assertThat(logs.containing("Migration run marked for retry")).singleElement()
+					.satisfies(entry -> {
+						assertThat(entry.mdc()).containsEntry(MigrationLogContext.RUN_ID, runId);
+						assertThat(entry.mdc()).doesNotContainKey(MigrationLogContext.BATCH_ID);
+					});
+		}
 	}
 
 	@Test

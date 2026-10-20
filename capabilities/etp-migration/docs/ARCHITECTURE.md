@@ -1,8 +1,8 @@
 # ETP Migration Capability — Architecture
 
 **Module:** `capabilities/etp-migration` (`com.etp:etp-migration:0.0.1-SNAPSHOT`)
-**Implementation status:** Phases **0–10** are complete. Canonical target loading adds Flyway **V4** (per-run identity assignment) and **V5** (numeric range allocator). Spring Boot **4.1.0**, Java **21**. Default suite: **542** tests, 0 failures, 0 errors, 0 skipped.
-**Related docs:** [DATABASE_MODEL.md](DATABASE_MODEL.md), [USER_GUIDE.md](USER_GUIDE.md), [API_GUIDE.md](API_GUIDE.md), [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md), [CLAUDE_CONTEXT.md](CLAUDE_CONTEXT.md)
+**Implementation status:** Phases **0–10** are complete. Canonical target loading adds Flyway **V4** (per-run identity assignment) and **V5** (numeric range allocator). Spring Boot **4.1.0**, Java **21**. The earlier full-suite figure of 542 tests is not restated here. The catalog-load tests re-run for this documentation pass are recorded in [migration-e2e-test-guide.md](migration-e2e-test-guide.md).
+**Related docs:** [DATABASE_MODEL.md](DATABASE_MODEL.md), [USER_GUIDE.md](USER_GUIDE.md), [API_GUIDE.md](API_GUIDE.md), [migration-e2e-test-guide.md](migration-e2e-test-guide.md), [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md), [CLAUDE_CONTEXT.md](CLAUDE_CONTEXT.md)
 
 This document describes the **implemented** architecture. Items that exist only as schema placeholders, unused enums, or extension points are labeled **not implemented**.
 
@@ -50,7 +50,7 @@ The authoritative flow is source → staging → promotion → business target. 
 
 | Area | Implemented | Not implemented / unused |
 |------|-------------|---------------------------|
-| Source | Filesystem CSV via `CsvSourceConnector` (`provider=FILE_SYSTEM`, `fileFormat=CSV`) | SFTP, S3, other formats/providers |
+| Source | CSV from the filesystem (`CsvSourceConnector`, `provider=FILE_SYSTEM`) or from SFTP (`SftpCsvSourceConnector`, `provider=SFTP`). Both use `CsvRecordReader` | S3 and other object stores, formats other than CSV, multi-file SFTP |
 | Staging target | PostgreSQL `COPY` (`PostgreSqlTargetConnector`, `LoadMode.BULK`) | PostgreSQL SINGLE/BATCH load modes |
 | REST target | `UamTargetConnector`, `LoadMode.SINGLE` only (HTTP placeholder) | Production UAM HTTP API; BATCH/BULK UAM REST |
 | Canonical promotion | Local PostgreSQL load of configured UAM tables from staging (`target.mode=UAM`), with promotion-time identity allocation | Production UAM deployment |
@@ -103,7 +103,7 @@ XLSX is not implemented. The historical performance note named “Phase 12” in
 | **Transformation** | `TransformationEngine` | Applied in `sequence_no` order. |
 | **Validation** | `ValidationEngine` | Mandatory target fields non-blank after transform. |
 | **Staging** | Operator-created table, not Flyway | JSONB `target_payload` plus run/batch/record keys. |
-| **Business-target promotion** | Config `configuration.promotion` plus canonical `tables`, `loadOrder`, `foreignKeys`, `loadTimestampColumns`, and `columnTypes` when `target.mode` is `UAM` | Canonical loader writes the configured UAM tables. Flat mode writes one schema.table via `PostgreSqlPromotionWriter`. |
+| **Business-target promotion** | Config `configuration.promotion` plus canonical `tables`, optional `loadOrder`, `foreignKeys`, `loadTimestampColumns`, and `columnTypes` when `target.mode` is `UAM` | Canonical loader writes the configured UAM tables. A live load reads `information_schema` and converts values from that catalog. `columnTypes` remains a planning fallback for `numeric` and `timestamptz`. Flat mode writes one schema.table via `PostgreSqlPromotionWriter`. |
 
 ---
 
@@ -118,8 +118,9 @@ flowchart TD
     CP[Control-plane tables]
   end
   subgraph exec [Execution]
-    SRC[Filesystem CSV]
-    SC[CsvSourceConnector]
+    FS[FILE_SYSTEM + CSV]
+    SFTP[SFTP + CSV]
+    CSV[CsvRecordReader]
     MAP[MappingEngine / TransformationEngine]
     VAL[ValidationEngine]
     TC[PostgreSqlTargetConnector COPY]
@@ -135,7 +136,9 @@ flowchart TD
   API --> CP
   API --> exec
   API --> post
-  SRC --> SC --> MAP --> VAL --> TC --> STG
+  FS --> CSV
+  SFTP --> CSV
+  CSV --> MAP --> VAL --> TC --> STG
   STG --> REC
   STG --> PREP --> ID --> PRO --> UAM
 ```
@@ -145,7 +148,7 @@ flowchart TD
 | Plane | What lives there | Examples |
 |-------|------------------|----------|
 | **Control plane** | Capability PostgreSQL `etp_migration` + HTTP APIs | Definition, mapping, rules, source, run, batch, artifact metadata, error, reconciliation, promotion, promotion batch |
-| **Migration execution / data plane** | Source I/O, entity extraction, transform/validate, staging COPY | Filesystem CSV → `migration_staging`. The local demonstration used `uam_entity_stage`. |
+| **Migration execution / data plane** | Source I/O, entity extraction, transform/validate, staging COPY | Filesystem or SFTP CSV → `migration_staging`. The local demonstration used `uam_entity_stage`. |
 | **Business target** | Canonical tables named by `configuration.tables`, or one flat table named in `configuration.promotion` | Local demonstration schema `uam` on the target PostgreSQL instance. That schema is a local stand-in, not a production UAM deployment. The older flat stand-in `uam_migration_test.address` is a separate historical illustration. |
 
 Control-plane data lives in the capability database. Staging and business tables are **not** created by Flyway; they are named in definition JSON and must exist on the PostgreSQL target datasource (`etp.migration.target.postgresql.*`).
@@ -171,7 +174,7 @@ CSV
 
 Mappings without `modelType` stay on the flat CSV path: source read, mapping, validation, staging COPY, then optional flat INSERT/UPSERT promotion. That path does not extract entities.
 
-`COMPLETED` / `COMPLETED_WITH_ERRORS` mean **staging** finished. They do **not** mean the business tables were written. Target identities are not allocated during staging.
+`COMPLETED` / `COMPLETED_WITH_ERRORS` mean **staging** finished. They do **not** mean the business tables were written. Target identities are not allocated during staging. Canonical inserts are a later promotion step. That step reads the target catalog, converts values, and inserts in its own transaction. See §29.
 
 ### End-to-end execution flow (implemented)
 
@@ -230,9 +233,11 @@ Package roots under `com.etp.migration`:
 1. **Configuration** — composite `POST /api/v1/migration-configurations` (`@Transactional`: mapping → mapping rules → definition → source) or stepwise mapping/definition/source APIs. Status **DRAFT**. Promotion stays in `definition.configuration.promotion` (no separate promotion-create API).
 2. **Activation** — `POST /api/v1/migrations/{id}/activate`. Validates mapping rules, one enabled source, connector `require()`, optional promotion JSON via `PromotionTargetConfiguration.parse`. **Does not inspect the file or run I/O beyond registry validation.** Idempotent if already ACTIVE. INACTIVE cannot be activated (409).
 3. **Execute** — `POST /api/v1/migrations/{id}/execute` (`MigrationExecutionService`):
-   - `MigrationRunService.create` (definition must be ACTIVE → 409 `DefinitionNotActiveException` otherwise). Run goes CREATED → **QUEUED** in the same create method.
-   - `SourceInspectionService.prepare` (inspect CSV, persist checksum/count, plan batches).
-   - Loop `MigrationBatchWorker.processNextBatch(runId)` until none remain.
+   - `MigrationRunService.create` (definition must be ACTIVE → 409 `DefinitionNotActiveException` otherwise). Run goes CREATED → **QUEUED** in the same create method. `POST .../runs` stops here. That run stays QUEUED until its own execute or process call. A later execute creates a different run.
+   - `SourceInspectionService.prepare` (inspect CSV, persist checksum/count, plan batches). A failure on a still-QUEUED, unprepared run writes `migration_error` and sets the run FAILED. A run that already has in-flight batches is not failed by that recorder.
+   - `RunExecutionLifecycle.beginExecution` moves that run QUEUED → RUNNING.
+   - Loop `MigrationBatchWorker.processNextBatch(runId)` until none remain. Each terminal batch recalculates the parent run. An expired CLAIMED or PROCESSING lease can be claimed again; a QUEUED run with no execution attempt is not swept.
+   - `RunExecutionLifecycle.finalizeIfIdle` sets COMPLETED, COMPLETED_WITH_ERRORS, or FAILED when nothing is still in flight. Zero batches becomes COMPLETED.
    - Return `GET`-equivalent `MigrationRunResponse`.
 4. **Not** wrapped in one `@Transactional`. Each claim/complete uses short transactions; COPY uses its own JDBC transaction on the **target** datasource.
 
@@ -264,12 +269,20 @@ Package roots under `com.etp.migration`:
 
 ### Retry / idempotency
 
-- `POST .../retry` re-queues FAILED / COMPLETED_WITH_ERRORS batches; successful batches are not duplicated.
+- `POST .../retry` re-queues FAILED / COMPLETED_WITH_ERRORS batches; successful batches are not duplicated. It returns 409 `MIGRATION_RETRY_BLOCKED_BY_PROMOTION` once a promotion is `PROMOTING` or `PROMOTED`. The check runs after `SELECT ... FOR UPDATE` on the run row, which promotion prepare and begin also take, so it cannot interleave with a promotion start. A `READY` promotion does not block retry. Its batch eligibility was computed before the retry, and `prepare` returns that existing `READY` promotion. This is a known limitation, not changed here.
 - Flat staging retry: DELETE existing rows for that run and batch, then COPY.
 - Entity staging retry uses the same batch lifecycle. The connector deletes the current batch’s rows, then deletes earlier rows in the same run whose `entity-v1:` keys are being loaded, then COPY. See §27. The retry mechanism itself was not redesigned.
 - Run create: optional `idempotencyKey` unique per definition.
 - Promote of already **PROMOTED** promotion returns the existing result without rewriting.
 - Prepare of existing READY / PROMOTING / PROMOTED returns stored promotion (PROMOTING is 409 on prepare).
+
+### Shutdown and interrupted work
+
+- `server.shutdown=graceful`. On SIGTERM the web server stops accepting new requests, and requests already running get up to `spring.lifecycle.timeout-per-shutdown-phase` (`ETP_MIGRATION_SHUTDOWN_GRACE_PERIOD`, default `30s`) to finish.
+- `ShutdownSignal` is set when the application context starts closing. `POST /api/v1/migrations/{id}/execute` checks it before claiming each batch. It finishes the batch it is processing, claims no more, logs a WARN with the run ID, and returns the run with the remaining batches still `PENDING`. Continue the run with `POST /api/v1/migration-runs/{runId}/process-next-batch`.
+- `process-next-batch` handles one batch per request, so it only needs that batch to finish within the grace period.
+- Queued work does not drain automatically. Nothing resumes a run after a restart. There is no scheduler or background consumer; an operator or client calls `process-next-batch` (or `retry` for failed batches).
+- If a batch does not finish within the grace period, shutdown continues and the batch stays `CLAIMED` or `PROCESSING` with its lease. After `lease_until` (5 minutes after the last claim or renewal) `process-next-batch` can claim it again with a higher attempt number. The fencing check rejects any late write from the interrupted attempt. Staging writes for a batch delete that batch's rows and copy them again in one target transaction, so a reclaimed batch does not duplicate staging rows. The forced-termination path itself is not covered by an automated test. Lease expiry and stale-claim fencing are covered by `MigrationBatchConcurrencyIntegrationTest`.
 
 ### Why the whole migration is not one transaction
 
@@ -305,12 +318,36 @@ Runtime file path with default `etp.migration.storage.root=./data/migration`:
 | Field | Where | How used |
 |-------|--------|----------|
 | `sourceType` | `migration_source.source_type` VARCHAR | Required non-blank for `MigrationSourceConnectorRegistry.require()`. **Not** a Java enum. `CsvSourceConnector.supports()` does **not** switch on this string; it parses `configuration`. `FILE_SYSTEM` is the documented demo value; a non-blank value such as `FILE` also works if configuration is valid. |
-| `configuration.provider` | JSON | Must be `FILE_SYSTEM` (`StorageProvider`). Other providers throw `UnsupportedStorageProviderException`. |
-| `configuration.fileFormat` | JSON | Must be `CSV`. |
-| `configuration.objectKey` | JSON | Path relative to `etp.migration.storage.root`. |
-| `configuration.hasHeader` | JSON | Default `true`. |
+| `configuration.provider` | JSON | `FILE_SYSTEM` selects `CsvSourceConnector`. `SFTP` selects `SftpCsvSourceConnector`. Other known providers still throw `UnsupportedStorageProviderException`. |
+| `configuration.fileFormat` | JSON | Must be `CSV` for both providers. |
+| `configuration.objectKey` | JSON | Filesystem path relative to `etp.migration.storage.root`. Not used by SFTP. |
+| `configuration.remotePath` | JSON | SFTP remote CSV path. Required when `provider` is `SFTP`. |
+| `configuration.host`, `port`, `credentialRef` | JSON | SFTP connection. The password is not part of this JSON. |
+| `configuration.hasHeader` | JSON | Default `true` for both providers. |
+| `configuration.delimiter` | JSON | Default `,` for both providers. |
 
-Connector selection is therefore **configuration-driven** (`CsvFileSourceConfiguration.from`), consistent with the implemented CSV filesystem connector.
+`FILE_SYSTEM` and `SFTP` are transports. CSV parsing is shared. Connector selection is configuration-driven: the registry uses the first `supports()` match. A non-blank `sourceType` label such as `FILE` still works when the JSON is valid.
+
+**SFTP source configuration:**
+
+```json
+{
+  "name": "sftp-source",
+  "sourceType": "FILE",
+  "configuration": {
+    "provider": "SFTP",
+    "fileFormat": "CSV",
+    "host": "sftp.example",
+    "port": 22,
+    "credentialRef": "local-sftp",
+    "remotePath": "/inbound/rows.csv",
+    "hasHeader": true,
+    "delimiter": ","
+  }
+}
+```
+
+The password is resolved from `etp.migration.source.sftp.credentials.<credentialRef>.username` and `.password`. Do not put `password`, `privateKey`, or `passphrase` in the migration definition. Responses and error messages do not include those values. Host keys are verified by `SftpHostKeyVerifier` on every connection. Fingerprints in `etp.migration.source.sftp.credentials.<credentialRef>.host-key-fingerprints` decide when present. Otherwise `etp.migration.source.sftp.known-hosts-file` is checked through SSHD's `KnownHostsServerKeyVerifier`, which is read only. With neither configured the connection is refused before it opens. `etp.migration.source.sftp.accept-unknown-host-keys` defaults to false; when true it admits only hosts with no trusted entry and logs a warning. A changed key is always rejected. SFTP reads one remote CSV. `layoutType=MULTI_FILE` stays on the filesystem connector.
 
 Definition `configuration` typically includes:
 
@@ -334,6 +371,8 @@ ETP Migration Engine
 │
 ├── Source Connectors
 │   ├── CsvSourceConnector
+│   ├── SftpCsvSourceConnector
+│   ├── CsvRecordReader
 │   └── MultiFileEntitySource
 │
 ├── Staging / PostgreSQL Target
@@ -351,9 +390,21 @@ ETP Migration Engine
     └── PostgreSqlTargetReconciliationProvider
 ```
 
-`MigrationSourceConnectorRegistry` selects the first source bean whose `supports` method accepts the source. The only source connector bean is `CsvSourceConnector`. `MigrationTargetConnectorRegistry` selects a target bean by `targetType()`. Implemented target types are `POSTGRESQL` (staging COPY) and `UAM` (REST). The demonstrated promotion path keeps definition `targetType` as `POSTGRESQL` and selects the canonical loader with `target.mode=UAM`.
+`MigrationSourceConnectorRegistry` selects the first source bean whose `supports` method accepts the source. `provider=FILE_SYSTEM` and `fileFormat=CSV` select `CsvSourceConnector`. `provider=SFTP` and `fileFormat=CSV` select `SftpCsvSourceConnector`. `MigrationTargetConnectorRegistry` selects a target bean by `targetType()`. Implemented target types are `POSTGRESQL` (staging COPY) and `UAM` (REST). The demonstrated promotion path keeps definition `targetType` as `POSTGRESQL` and selects the canonical loader with `target.mode=UAM`.
 
 There is no Kafka connector, no S3 or other object-storage source, no database source connector, and no REST connector other than `UamTargetConnector`.
+
+```text
+FILE_SYSTEM + CSV
+        \
+         \
+          → Generic migration pipeline
+         /
+SFTP + CSV
+        /
+```
+
+SFTP changes only how the CSV bytes are acquired. Extraction, relationship resolution, planning, identity resolution, mapping, validation, staging, reconciliation, and promotion are unchanged.
 
 ### Source connectors
 
@@ -364,15 +415,26 @@ There is no Kafka connector, no S3 or other object-storage source, no database s
 - It accepts a source when `CsvFileSourceConfiguration` can parse the source JSON. It does not switch on the free-form `sourceType` label. `FILE_SYSTEM` is the documented value. A non-blank label such as `FILE` also works when the JSON is valid.
 - Source configuration includes `provider`, `fileFormat`, `objectKey`, `hasHeader`, and `delimiter`. Encoding defaults to UTF-8. `objectKey` is relative to `etp.migration.storage.root`.
 - Inspect counts data rows, records a SHA-256 of the file stream, and reads header columns. Flat batch planning then splits that count into row ranges.
-- It does not contain UAM-specific logic, does not allocate target identities, and does not write UAM tables.
+- `CsvRecordReader` drops a leading byte-order mark (U+FEFF) after decoding, so it never becomes part of the first header or the first value. The SHA-256 is taken from the raw bytes and still includes the mark. Header names are compared exactly: case-sensitive and without trimming, the same way mapping rules look up fields. A repeated name is rejected with `CsvHeaderException`, an `InvalidSourceConfigurationException` (HTTP 400), because the earlier column would otherwise be unreachable. `id` and `ID`, or `id` and ` id`, are different columns and are both kept. The same rules apply to the SFTP connector.
+- It does not contain business-target logic, does not allocate target identities, and does not write business tables.
+
+#### SftpCsvSourceConnector
+
+`SftpCsvSourceConnector` reads one remote CSV over SFTP and passes the open stream to `CsvRecordReader`. Header handling, delimiter handling, and record conversion match the filesystem CSV source.
+
+- Configuration is `host`, `port`, `credentialRef`, `remotePath`, `fileFormat=CSV`, `hasHeader`, and `delimiter`. The password is resolved from application properties by `credentialRef`. It is not stored on the migration definition.
+- The remote file is read as an `InputStream`. The file is not loaded into a `List`. The SFTP session and stream close when parsing finishes or fails.
+- `etp.migration.source.sftp.idle-timeout` (default `PT10M`, must be positive) is applied as SSHD's `IDLE_TIMEOUT` on the client. It bounds two things: the wait for each SFTP response (stat, open and every read chunk), measured from when the reader starts waiting for that response; and how long the SSH session may carry no traffic in either direction before SSHD closes it. SSHD checks session idleness on a timer, so the close can come up to about a second after the limit. It is not a limit on total transfer time: a slow transfer that keeps delivering data within the limit runs to completion. A consumer that stops reading for longer than the limit loses the session, and the next read fails with `MIGRATION_SFTP_READ_FAILED`. `connect-timeout` separately bounds TCP connect and authentication.
+- Connection, authentication, missing file, permission, read, and CSV parse failures use `MIGRATION_SFTP_CONNECTION_FAILED`, `MIGRATION_SFTP_AUTHENTICATION_FAILED`, `MIGRATION_SFTP_FILE_NOT_FOUND`, `MIGRATION_SFTP_PERMISSION_DENIED`, `MIGRATION_SFTP_READ_FAILED`, and `MIGRATION_CSV_PARSE_FAILED`. Untrusted or changed host keys use `MIGRATION_SFTP_HOST_KEY_REJECTED`; missing or invalid trust configuration uses `MIGRATION_SFTP_HOST_KEY_CONFIGURATION_INVALID`. Messages do not include passwords, private keys, or stack traces.
+- It does not map entities, resolve relationships, allocate identities, validate rules, write staging, or promote.
 
 #### MultiFileEntitySource
 
 `MultiFileEntitySource` is the multi-file source capability. A migration does not have to be one physical CSV.
 
-`SourceLayoutConfiguration` reads optional `layoutType` from the source configuration. When `layoutType` is omitted, the source stays on the single-object CSV path. `SourceLayoutType` is `SINGLE_FILE` or `MULTI_FILE`. `SourceLayout` names the CSV bound to each configured entity. `MultiFileEntitySource` opens one of those files through `CsvSourceConnector` and extracts only the entity that file is mapped to. Relationship resolution stays outside this class.
+`SourceLayoutConfiguration` reads optional `layoutType` from the source configuration. When `layoutType` is omitted, the source stays on the single-object CSV path. `SourceLayoutType` is `SINGLE_FILE` or `MULTI_FILE`. `SourceLayout` names the CSV bound to each configured entity. `MultiFileEntitySource` opens one of those filesystem files through `CsvSourceConnector` and extracts only the entity that file is mapped to. Relationship resolution stays outside this class. SFTP does not use the multi-file layout.
 
-No other file format is implemented.
+No file format other than CSV is implemented.
 
 ### Staging / PostgreSQL target
 
@@ -448,7 +510,9 @@ When `target.mode` is `UAM`, it reads the staged batch, allocates target identit
 
 `UamPostgreSqlTargetConnector` is the canonical UAM business-target implementation used by the demonstrated promotion path. Its connector type is `UAM_POSTGRESQL`. It is not selected as the execution staging target.
 
-It receives prepared canonical rows and inserts the configured UAM tables in one database transaction per promotion batch. `tables`, `loadOrder`, and `foreignKeys` choose the tables and parent columns. `loadTimestampColumns` fills a blank timestamp. `columnTypes` binds `numeric` and `timestamptz` values. A failure rolls that target transaction back. `ON CONFLICT (id) DO NOTHING` leaves an existing primary key in place, so a retry that reuses `migration_identity_allocation` does not duplicate it. An already `PROMOTED` promotion returns the stored result.
+It receives prepared canonical rows and inserts the configured UAM tables in one database transaction per promotion batch. `tables` maps entity names to physical tables. `loadOrder`, when present, is the insert order; when it is omitted, parent entities are ordered before children. `foreignKeys` assign parent values to child columns. `loadTimestampColumns` fills a blank timestamp during planning. `columnTypes` still converts `numeric` and `timestamptz` during that same planning step. The live load then reads `information_schema.columns` and converts again from the catalog. See §29.
+
+A failure during the insert transaction rolls that target transaction back. The statement is `ON CONFLICT (<first column>) DO NOTHING`. The first column is the payload `targetKey`. The UAM fixtures use `id`. If that column would be omitted, the load fails before the statement is sent. A retry that reuses `migration_identity_allocation` therefore does not insert a second row for an existing key. An already `PROMOTED` promotion returns the stored result.
 
 The local demonstration loaded:
 
@@ -586,8 +650,8 @@ There is **no** `GET /api/v1/promotions/{promotionId}`.
 | Staging | Read as stored. `targetIdentity` and `parentTargetIdentity` are null at staging time. |
 | Identity | `mapping.entities[].targetIdentity` is the authoritative format. `PREFIX_SEQUENCE` reserves a number and formats `prefix` plus `sequenceLength` digits. The assignment is stored on `migration_identity_allocation`. `definition.configuration.identity` is not read. |
 | Parents | Parent target identities are filled from those allocations before the insert. |
-| Transaction | One eligible batch, one target transaction. Failure rolls the UAM inserts back. The allocation rows remain. |
-| Retry | The same run reuses the stored target identities. `ON CONFLICT (id) DO NOTHING` skips a row whose primary key is already present. |
+| Transaction | One eligible batch, one target transaction around the inserts. Catalog conversion errors are raised before that transaction starts. An insert failure rolls the UAM inserts back. The allocation rows remain. Staging rows are not deleted by that rollback. |
+| Retry | The same run reuses the stored target identities. `ON CONFLICT (<targetKey>) DO NOTHING` skips a row whose conflict key is already present. The UAM fixtures use `targetKey` `id`. |
 | Idempotent completion | A promotion that is already `PROMOTED` is returned without another load. |
 
 ### Flat PostgreSQL promotion behavior (implemented)
@@ -623,7 +687,7 @@ INACTIVE exists in DB/enum. **No HTTP API** sets INACTIVE.
 
 ### Migration run (`MigrationRunStatus`)
 
-Create immediately transitions CREATED → QUEUED. Processing → RUNNING. Terminal: COMPLETED, COMPLETED_WITH_ERRORS, FAILED, CANCELLED. PAUSED has no transitions implemented. CANCEL_REQUESTED cancels PENDING/RETRY_PENDING batches.
+Create immediately transitions CREATED → QUEUED. That QUEUED run stays QUEUED until its own execution starts (`beginExecution` or the first batch claim). Execute then uses QUEUED → RUNNING, and RUNNING → COMPLETED, COMPLETED_WITH_ERRORS, or FAILED once no batch is PENDING, RETRY_PENDING, CLAIMED, or PROCESSING. FAILED and COMPLETED_WITH_ERRORS can return to QUEUED on retry. PAUSED has no transitions implemented. CANCEL_REQUESTED cancels PENDING/RETRY_PENDING batches, then CANCELLED when nothing is claimed or processing. Batch transitions: PENDING or RETRY_PENDING → CLAIMED → PROCESSING → COMPLETED, COMPLETED_WITH_ERRORS, or FAILED. FAILED and COMPLETED_WITH_ERRORS → RETRY_PENDING. An expired lease returns CLAIMED or PROCESSING to a new claim. CANCELLED is terminal.
 
 **COMPLETED means staging complete, not promoted.**
 
@@ -681,12 +745,19 @@ Stepwise APIs (`POST /mappings`, `/migrations`, `/sources`, `/runs`, `/prepare`,
 
 - Spring Security OAuth2 resource server JWT (`ETP_MIGRATION_KEYCLOAK_ISSUER_URI`, default Keycloak `http://localhost:8180/realms/etp`).
 - Identity provider is **Keycloak / ETP IAM**. This module does **not** own login, users, or token issuance.
+- Token validation: signature (JWKS from the issuer's discovery document), expiry, and `iss`. Audience is validated only when `ETP_MIGRATION_JWT_AUDIENCES` (`spring.security.oauth2.resourceserver.jwt.audiences`, comma-separated) is set. In that case the token's `aud` must contain at least one listed value, or the request gets 401 `invalid_token`. Unset keeps issuer-only validation. Keycloak puts a client in `aud` only when the client has an Audience mapper.
 - OpenAPI scheme name: **`bearer-jwt`** (HTTP bearer, JWT). Global `SecurityRequirement` plus `OpenApiCustomizer` copies the requirement onto documented operations so Swagger UI sends `Authorization: Bearer <JWT>` after Authorize.
-- PermitAll (public): `/actuator/health`, `/actuator/health/**`, `/v3/api-docs/**`, `/swagger-ui/**`, `/swagger-ui.html`.
+- PermitAll (public): `/actuator/health`, `/actuator/health/**`. `/v3/api-docs`, `/v3/api-docs/**`, `/swagger-ui/**` and `/swagger-ui.html` are public only when `etp.migration.openapi.enabled=true` (`ETP_MIGRATION_OPENAPI_ENABLED`). That defaults to false and to true in the `dev` profile, and it also sets `springdoc.api-docs.enabled` and `springdoc.swagger-ui.enabled`. When it is false those paths require authentication and return 404.
 - All other routes **authenticated**, including migration APIs.
 - Spring profile **`dev` only:** `DevMigrationApiSecurityConfig` permitAll on `/api/v1/migrations/**`, `/migration-configurations/**`, `/mappings/**`, `/migration-runs/**`. JWT validation remains configured on the default chain for other paths/profiles.
 - CSRF disabled; stateless sessions.
 - No method-level `@PreAuthorize`, roles, or OAuth scopes are implemented in this module.
+- **Audit identity** (`AuditActor`). `created_by`, `updated_by` and `requested_by` always come from the authenticated principal, never from request bodies. `PreparePromotionRequest.requestedBy` is accepted but ignored.
+  - JWT with `sub`, user or service account: the `sub` value. Keycloak service accounts have a stable `sub` of their own, so they are recorded the same way as users.
+  - JWT without `sub`: `client:<azp>`, or `client:<client_id>` when `azp` is absent.
+  - Rejected with 403 `MIGRATION_AUDIT_IDENTITY_INVALID` before anything is written: a token with neither `sub` nor a client identifier; an identity longer than the 100-character columns (it is not truncated, because truncation could merge identities); control characters; or a `sub` of `system` or `anonymous`, or starting with `client:`.
+  - No authentication (internal calls): `system`. Anonymous access under the `dev` profile: `anonymous`.
+- **Target failure disclosure.** `TargetInfrastructureException` returns HTTP 500 with its `code` and the generic message `Target system operation failed (reference <uuid>)`. `GlobalExceptionHandler` logs that reference at ERROR with the code, method, path, exception message and `TargetFailureDiagnostics` summary. No stack trace is logged, because cause messages from the driver can contain row values. Database-derived text in exception messages, stored batch and promotion-batch errors, and worker or promotion failure logs (`cause=`) is limited to the sanitized summary described in §29.
 
 This is **not** a production IAM hardening guide.
 
@@ -705,6 +776,53 @@ This is **not** a production IAM hardening guide.
 | JWT issuer | Keycloak **8180** (required when the `dev` profile is not used) |
 
 There is no production deployment descriptor in this module. Do not treat the local 515-record demonstration, or the historical flat throughput figure, as cloud capacity.
+
+### Health probes
+
+Only the `health` endpoint is exposed, with `show-details=never`. The probes are public and return only `{"status":...}`.
+
+| Endpoint | Contributors | Down means |
+|----------|--------------|------------|
+| `/actuator/health/liveness` | `livenessState` | The process is broken and should be restarted. A database outage does not change it. |
+| `/actuator/health/readiness` | `readinessState`, `controlPlaneDb` | Do not route traffic. `controlPlaneDb` runs a validation query on the control-plane pool only. |
+| `/actuator/health` | All contributors, including `db` for both pools | Overall status. Not intended as a probe. |
+
+While the control-plane database is unreachable, a readiness call can take up to the pool's connection timeout (10 s) before it answers `DOWN`. Set the probe timeout above that, or accept that a probe timeout also counts as not ready.
+
+The target PostgreSQL pool is left out of readiness on purpose. The control-plane API works without it, and target failures are recorded on the batch and can be retried. Stopping traffic to every instance because the target is down would also block run inspection and retry.
+
+### Connection pools
+
+Both datasources use HikariCP 7.0.2. `HikariPoolSettings` checks each pool at startup and stops startup if a setting would make Hikari silently replace it or wait without a bound:
+
+- `connection-timeout` must be between 250 ms and 5 minutes. Hikari treats `0` as about 24.8 days.
+- `validation-timeout` must be at least 250 ms and shorter than `connection-timeout`.
+- `max-lifetime` must be `0` or at least 30 s.
+- `keepalive-time` must be `0` or at least 30 s, and shorter than `max-lifetime`.
+- `idle-timeout` must be `0` or at least 10 s, and at least 1 s shorter than `max-lifetime`.
+
+| Setting | Control plane (`spring.datasource.hikari.*`, milliseconds) | Target (`etp.migration.target.postgresql.*`, durations) |
+|---------|-----------------------------------------------------------|---------------------------------------------------------|
+| Pool name | `etp-migration-control-plane` | `etp-migration-postgresql-target` |
+| Maximum size | `10` (`ETP_MIGRATION_DB_POOL_MAX_SIZE`) | `4` (`max-pool-size`) |
+| Minimum idle | equal to maximum (fixed pool) | Hikari default (equal to maximum) |
+| Connection acquisition timeout | `10000` | `pool.connection-timeout=10s` |
+| Validation timeout | `5000` | `pool.validation-timeout=5s` |
+| Idle timeout | `600000` (only applies when minimum idle is below maximum) | `pool.idle-timeout=10m` |
+| Maximum lifetime | `1800000` | `pool.max-lifetime=30m` |
+| Keepalive | `120000` | `pool.keepalive-time=2m` |
+
+The acquisition timeout was lowered from Hikari's 30 s default to 10 s so that a request waiting for an exhausted or unreachable pool fails well inside a typical proxy timeout. The other values are Hikari's defaults, now set explicitly. Set `max-lifetime` a few seconds or minutes shorter than any database or network idle limit. The control-plane values bind only to the `@Primary` datasource in `ControlPlaneDataSourceConfig`. The target values bind only to `PostgreSqlTargetClientConfig`.
+
+### Log correlation
+
+`MigrationLogContext` puts `migrationRunId` and `migrationBatchId` into the SLF4J MDC. The scope restores the previous values on close, including when an exception is thrown, so request threads reused by Tomcat do not keep identifiers from an earlier request.
+
+- `MigrationBatchWorker` uses a run-and-batch scope for each claimed batch: started (INFO), finished (INFO with status and counts), failed (WARN with `errorCode` and exception type) and claim lost (WARN).
+- `MigrationExecutionService.execute` uses a run scope, so inspection and the shutdown WARN carry the run ID.
+- `MigrationRunService.retry` logs each batch it resets to `RETRY_PENDING` (run and batch) and the run summary (run only).
+
+The failure log does not include the exception message or stack trace, because messages can quote source values. The message is stored on the batch and in `migration_error`. `logging.pattern.correlation` adds `run=<id> batch=<id>` to Boot's default console and file patterns when those keys are set, and nothing otherwise.
 
 ---
 
@@ -796,17 +914,17 @@ POST /api/v1/migration-runs/{runId}/reconcile?verificationScope=BUSINESS_TARGET
 
 - Configuration-driven migration definitions, mappings, mapping rules, sources
 - Transformation (`TransformationEngine` types listed in §10) and mandatory-field validation
-- CSV filesystem source; `ENTITY_RELATIONSHIP` extraction, relationships, logical scoping, and batch planning
+- CSV filesystem source and SFTP CSV source (`SftpCsvSourceConnector`); `ENTITY_RELATIONSHIP` extraction, relationships, logical scoping, and batch planning
 - PostgreSQL staging; PostgreSQL bulk COPY
 - Batching, SKIP LOCKED claim, retry/recovery (`POST .../retry`, staging DELETE+COPY)
 - Staging reconciliation, including logical entity and relationship checks
 - Mapping-level target identity allocation during promotion, with retry reuse
-- Canonical UAM promotion from staging, including repeated-parent `ONE_TO_MANY` resolution, batch rollback, and idempotent completion
+- Canonical UAM promotion from staging, including catalog-driven value conversion for the verified column types, batch rollback, and idempotent completion. See §29.
 - Flat PostgreSQL promotion (INSERT/UPSERT) when canonical mode is not selected
 - Composite configuration facade; execution facade; definition activation
 - JWT authentication; Swagger/OpenAPI `bearer-jwt` security requirement
 - Isolated integration-test PostgreSQL Testcontainer
-- Local end-to-end demonstration (§28): 110 physical CSV rows expanded to 515 logical entity records, staged, reconciled, and promoted
+- Historical local demonstration (§28): 110 physical CSV rows expanded to 515 logical entity records. Those counts were not re-measured for this documentation pass.
 
 **Not claimed**
 
@@ -815,7 +933,8 @@ POST /api/v1/migration-runs/{runId}/reconcile?verificationScope=BUSINESS_TARGET
 - All source and target technologies
 - Enrichment engine; deduplication engine
 - GUI; scheduler; Kafka-triggered execution
-- SFTP source; S3 source
+- S3 and other object-storage sources. SFTP is implemented for one remote CSV. Multi-file SFTP is not implemented.
+- Complete PostgreSQL type conversion. Arrays, enums, domains, `bytea`, `money`, `interval`, `xml`, `inet`, and other unrecognized `udt_name` values are left unchanged. They are outside the verified UAM table set (`varchar`, `text`, `timestamptz`, `numeric`, `jsonb`). See §29.
 - Production UAM HTTP API (`UamTargetConnector` remains a SINGLE placeholder)
 - Automatic environment promotion / deployment governance
 - XLSX
@@ -1072,7 +1191,9 @@ The local canonical demonstration in §28 is a functional proof at 515 logical r
 
 ## 28. Local End-to-End Migration Demonstration
 
-**Status:** COMPLETED
+**Status:** historical workstation record. The counts below were recorded for definition `59fc4cc1-85cf-44bd-870b-dd56ae3ca1ae` and run `f9e9fd4f-cc61-4d0f-8e71-e3333f09b431`. They were not re-measured while updating this document.
+
+`private_street_name` and `private_street_number` are nullable in `local/uam-target.sql` and in the integration-test table. A blank mapped value is stored as SQL `NULL`. Flyway V1–V5 do not create this table. See §29 and [migration-e2e-test-guide.md](migration-e2e-test-guide.md).
 
 The migration engine has been demonstrated locally on the configuration-driven path CSV → staging → promotion → UAM. This is a workstation demonstration. It is not a production UAM deployment and it is not evidence of 30M production support.
 
@@ -1235,7 +1356,7 @@ That mapping field is the authoritative identity configuration. A definition-lev
 
 ### Earlier failure and retry
 
-An earlier local promotion, not run `f9e9fd4f-cc61-4d0f-8e71-e3333f09b431`, failed while loading the canonical tables. The UAM transaction rolled back. The identity allocations for that run remained. A later promotion could reuse those allocations, and a successful load then committed. A promotion that is already `PROMOTED` is returned without writing the batch again. `ON CONFLICT (id) DO NOTHING` leaves an existing primary key in place. Run 2 above is the clean completed demonstration. It is not that failed attempt.
+An earlier local promotion, not run `f9e9fd4f-cc61-4d0f-8e71-e3333f09b431`, failed while loading the canonical tables. The UAM transaction rolled back. The identity allocations for that run remained. A later promotion could reuse those allocations, and a successful load then committed. A promotion that is already `PROMOTED` is returned without writing the batch again. `ON CONFLICT (<targetKey>) DO NOTHING` leaves an existing key in place. The demonstration used `id`. Run 2 above is the clean completed demonstration. It is not that failed attempt. Schema-driven conversion, per-row defaults, and the probe-table types are covered by the tests in §29, not by this 515-record run.
 
 ### What this demonstration shows
 
@@ -1266,3 +1387,105 @@ New business entities should normally be configuration-driven. The demonstrated 
 - enrichment and deduplication
 
 Phase 10 and the historical flat measurement remain the performance records. They are unchanged by this 515-record demonstration. See [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md).
+
+---
+
+## 29. Schema-driven canonical PostgreSQL loading
+
+Canonical loading stays after staging. `PostgreSqlTargetConnector` COPY-loads JSON payloads into the staging table. `UamPostgreSqlTargetConnector.load` is a separate operation. Promotion calls it when `target.mode` is `UAM`. It does not replace the staging path.
+
+```text
+Source connector
+  → PostgreSQL staging (COPY)
+  → validation / transformation already applied before COPY
+  → reconciliation (staging; user-invoked)
+  → promotion preparation
+  → identity allocation
+  → UamCanonicalRows.planDetailed
+  → UamForeignKeySchema.verify when referencesColumn is set
+  → UamTargetColumns.load / bind
+  → one insert transaction
+```
+
+Validation and transformation run in the batch worker before staging. Reconciliation does not rewrite rows and does not verify the final UAM tables. Enrichment and deduplication are not implemented. Checksum comparison remains `comparisonPerformed=false`.
+
+### Planning and catalog conversion
+
+`UamCanonicalRows.planDetailed` builds insert groups from the staged entity payload:
+
+- The first column is the payload `targetKey`. UAM fixtures use `id`.
+- Attributes become the remaining columns.
+- `foreignKeys` in definition configuration, when present, win over foreign keys carried on the staged relationship.
+- `loadOrder`, when non-empty, is used as written. When it is omitted, `EntityLoadOrder.parentsFirst` orders parents before children. Independent entities are ordered by name. A cycle fails with `Entity relationship graph contains a cycle: ...`.
+- `loadTimestampColumns` fills a column only when the current value is null or a blank string. The fill value is one `OffsetDateTime` captured at the start of planning, in UTC. A non-blank source timestamp is kept. Other timestamp columns are not overwritten.
+- `columnTypes` is still applied here. The only accepted type strings are `numeric` (`BigDecimal`) and `timestamptz` (`OffsetDateTime`). Any other type string fails planning with `Canonical column type is invalid`. This step is the planning fallback used when there is no database connection, including `UamCanonicalRowsTest`. It has not been removed.
+
+`UamPostgreSqlTargetConnector.bind` then loads `information_schema.columns` once per schema and table for that `load()` call. The cache is not static. A later `load()` reads the catalog again. `UamTargetColumns.bind` converts each value from `udt_name` and may split one planned group into several insert groups when rows keep different columns.
+
+`information_schema` returns the type alias, not the SQL declaration name. Examples verified against PostgreSQL 17: `character varying` is `varchar`, `character` is `bpchar`, `integer` is `int4`, `bigint` is `int8`, `double precision` is `float8`, `boolean` is `bool`, `timestamp without time zone` is `timestamp`, `timestamp with time zone` is `timestamptz`.
+
+| `udt_name` | Java value written to JDBC |
+|---|---|
+| `numeric`, `decimal` | `BigDecimal` |
+| `int2`, `int4` | `Integer` |
+| `int8` | `Long` |
+| `float4`, `float8` | `Double` |
+| `bool` | `Boolean`. Accepted text is `true`/`t`/`1`/`yes` and `false`/`f`/`0`/`no`. |
+| `date` | `LocalDate` |
+| `timestamp` | `LocalDateTime` |
+| `timestamptz` | `OffsetDateTime`. An existing `OffsetDateTime` is kept. An `Instant` or a zoned ISO-8601 string keeps its instant. A `LocalDateTime` or a local datetime string is attached to UTC. |
+| `time` | `LocalTime` |
+| `timetz` | `OffsetTime` |
+| `uuid` | `UUID` |
+| `json`, `jsonb` | `org.postgresql.util.PGobject`. A `Map` or `List` is serialized with Jackson. A string is sent as its text. |
+| `varchar`, `text`, `bpchar`, `name`, `citext` | `String`, after trim. A blank or whitespace-only string becomes SQL `NULL` before this step, so an empty string is not stored. |
+
+An unrecognized `udt_name` is returned unchanged. That includes arrays, enums, domains, `bytea`, `money`, `interval`, `xml`, `inet`, and geometric types. The current UAM tables created by `UamCanonicalLoadIntegrationTest` use `varchar`, `text`, `timestamptz`, `numeric`, and `jsonb`, plus `varchar` foreign keys and column defaults. They do not use arrays, enums, domains, `bytea`, identity, or `serial`. A probe table in `catalogConvertsSchemaTypesAndAppliesDefaultsPerRow` exercises the extra converted types, both identity modes, `serial`, and a stored generated column. That probe table is not part of the UAM schema.
+
+PostgreSQL displays `timestamptz` in the session `TimeZone`. The integration assertion compares `created_at AT TIME ZONE 'UTC'`.
+
+### Null, blank, missing, defaults, and identity
+
+| Input | Treatment |
+|---|---|
+| Attribute absent from the payload | The column is not in the insert. PostgreSQL applies a default or identity when the column has one. A `NOT NULL` column with no default fails in the database. |
+| SQL `null`, `""`, or a whitespace-only string | Treated as blank. Character types are not stored as spaces. |
+| Blank, and the column is `GENERATED ALWAYS` | The column is omitted, including when a value was supplied. |
+| Blank, and the column is identity or has `column_default` (`serial` is a `nextval` default and `is_identity` is false) | The column is omitted on that row so PostgreSQL can assign it. |
+| Blank, required (`NOT NULL`, no default, not identity, not generated) | Fails before insert: `Column '<name>' on '<table>' is required`. |
+| Non-blank `GENERATED ALWAYS AS IDENTITY` | Fails before insert: the column is generated by the database and cannot accept a value. |
+| Non-blank `GENERATED BY DEFAULT AS IDENTITY` or `serial` | The supplied value is converted and inserted. |
+| Blank on a nullable column with no default | The column stays in the insert and is bound as SQL `NULL`. |
+
+Rows in one planned group can disagree. A blank defaulted `status` is omitted on that row while the next row keeps `ACTIVE`. Each distinct column list is a separate insert. An explicit `NULL` on a defaulted column is what happens only when the value is blank and the column is still included. Blank defaulted values are omitted instead, so the default is applied.
+
+If the planned first column would be omitted, the load fails before `ON CONFLICT` can target another column: `Column '<name>' on '<table>' is assigned by the database and cannot be omitted from the insert`.
+
+### Relationships
+
+Configured `foreignKeys` without `referencesColumn` write the parent target identity into the child column. `UamCanonicalLoadIntegrationTest.oneHundredAddressesPromoteIntoCanonicalTables` checks that shape on the current tables:
+
+- `geographic_address.location_id` → `location.id` (`LOC-`)
+- `geographic_address.geographic_location_id` → `geographic_location.id` (`GEO-`)
+- `geographic_location.location_id` → `location.id` (`GEO-LOC-`)
+- `location_geometry.location_id` → `geographic_location.id` (`GEO-`)
+
+`geographic_sub_address.address_id` and `geographic_sub_address.geographic_location_id` are configured the same way. `repeatedParentsPromoteTenGeographicSubAddresses` loads ten sub-addresses that share one address and one geographic location. `geographic_location_id` on `geographic_address` and on `geographic_sub_address` is nullable in the test schema. `address_id` on `geographic_sub_address` is `NOT NULL`.
+
+`targetForeignKey.column` is the child column. `targetForeignKey.referencesColumn` is the parent column whose value is copied. It is not assumed to be `id`. `UamCanonicalRowsTest.derivedOrderWritesTheReferencedParentColumnRatherThanTheParentPrimaryKey` covers that planning rule. When `referencesColumn` is present, `UamForeignKeySchema.verify` checks that both columns exist and, if PostgreSQL already declares that foreign key, that the referenced column matches. Configured foreign keys that omit `referencesColumn` skip that catalog check.
+
+`MANY_TO_MANY` is rejected. Supported cardinalities are `ONE_TO_ONE`, `ONE_TO_MANY`, and `MANY_TO_ONE`. There is no `external_identifier` table in the current schema or tests.
+
+### Transactions, errors, and retry
+
+`load()` verifies foreign keys and binds values before `setAutoCommit(false)`. A conversion or configuration failure therefore does not start the insert transaction. Inserts for every group in that call then run in one transaction. `SQLException` rolls the transaction back. The wrapper text is `Canonical target load failed and was rolled back: ` plus a sanitized summary from `TargetFailureDiagnostics`. A connection failure is `PostgreSQL target connection failed: ` plus the same summary. The summary contains the condition name, the SQLState and, for PostgreSQL server errors, the table, column, constraint and datatype, for example `check_violation (SQLState 23514), table uam.location, constraint ck_location`. It never includes the database message, detail or hint, because those can quote row values (`Failing row contains (…)`, `Key (id)=(…)`, `invalid input syntax for type numeric: "north"`). A connection refusal reports only its SQLState, not the host. Codes are `TARGET_DATABASE_CONFIGURATION_ERROR`, `TARGET_COPY_FAILED`, and `TARGET_DATABASE_CONNECTION_ERROR`.
+
+That rollback is the target datasource transaction. It does not delete staging rows, and it does not undo `migration_identity_allocation`, which is committed before the target insert. Run status is staging status. Promotion status is a separate row. A failed canonical batch can leave the promotion `PROMOTION_FAILED` or `PARTIALLY_PROMOTED` while the run stays `COMPLETED`.
+
+`failedBatchRollsBackAndRetryInsertsOnce` inserts into a table whose check constraint rejects one id, asserts the table stays empty, drops the constraint, loads again, loads a second time, and asserts two rows. `retryDoesNotDuplicateCanonicalRows` loads the same canonical records twice and asserts the first counts remain. `stagingLoadDoesNotWriteCanonicalTables` COPY-loads one staging row and asserts the UAM tables stay empty.
+
+`geographic_sub_address.private_street_name` and `private_street_number` are nullable `varchar` columns with no default. The integration fixture sets both with transformation `DEFAULT` and `defaultValue` `""`. That blank is bound as SQL `NULL` and inserted. These columns are defined in `local/uam-target.sql`, which also drops `NOT NULL` for a database created by an older copy of that script. They are not in Flyway.
+
+`catalogConvertsSchemaTypesAndAppliesDefaultsPerRow` is the PostgreSQL 17 evidence for catalog conversion: source timestamp `2020-01-02T03:04:05Z` stored on `location.created_at`, a blank `created_at` filled by `loadTimestampColumns` and not equal to that source instant, blank `status`/`version` becoming `PLANNED` and `1.0` beside an explicit `ACTIVE`/`2.0`, `location_geometry.x`/`y` converted from text without `columnTypes`, `z` blank stored as null, JSON object text `Point`, and the parent ids above. An invalid numeric reports column `x`. The same method then loads the probe table.
+
+JDBC batches inside the transaction are 100 rows (`BATCH_SIZE`). That is not the migration `batchSize`.

@@ -149,8 +149,8 @@ class UamCanonicalLoadIntegrationTest {
 				  id varchar(64) PRIMARY KEY,
 				  address_id varchar(64) NOT NULL REFERENCES uam.geographic_address (id),
 				  geographic_location_id varchar(64) REFERENCES uam.geographic_location (id),
-				  private_street_name varchar(128) NOT NULL,
-				  private_street_number varchar(32) NOT NULL,
+				  private_street_name varchar(128),
+				  private_street_number varchar(32),
 				  sub_unit_type varchar(64),
 				  sub_unit_number varchar(32),
 				  sub_unit_name varchar(128),
@@ -443,6 +443,10 @@ class UamCanonicalLoadIntegrationTest {
 				"SELECT sub_unit_type, sub_unit_number, sub_unit_name, level_type, level_number, building_name "
 						+ "FROM uam.geographic_sub_address WHERE id = '" + allocated.get("GeographicSubAddress:SUB001") + "'"))
 				.containsExactly("Apartment", "1", "Unit 1", "Level", "1", "Tower");
+		assertThat(row(
+				"SELECT private_street_name, private_street_number "
+						+ "FROM uam.geographic_sub_address WHERE id = '" + allocated.get("GeographicSubAddress:SUB001") + "'"))
+				.containsExactly(null, null);
 		assertThat(text(
 				"SELECT COUNT(*) FROM migration_staging.uam_entity_stage WHERE migration_run_id = ?",
 				runId)).isEqualTo("515");
@@ -570,13 +574,195 @@ class UamCanonicalLoadIntegrationTest {
 				canonical("AddressLocation", "LOC-000000001", Map.of("at_type", "geographicAddress"), List.of()),
 				canonical("AddressLocation", "LOC-000000002", Map.of("at_type", "geographicAddress"), List.of()));
 		assertThatThrownBy(() -> canonicalConnector.load(context("uam_fail"), records))
-				.isInstanceOf(TargetInfrastructureException.class);
+				.isInstanceOf(TargetInfrastructureException.class)
+				.hasMessageContaining("check_violation (SQLState 23514)")
+				.hasMessageContaining("table uam_fail.location")
+				.hasMessageContaining("constraint ck_uam_fail_location")
+				.hasMessageNotContaining("LOC-000000002")
+				.hasMessageNotContaining("Failing row");
 		assertThat(count("uam_fail.location")).isZero();
 
 		execute("ALTER TABLE uam_fail.location DROP CONSTRAINT ck_uam_fail_location");
 		canonicalConnector.load(context("uam_fail"), records);
 		canonicalConnector.load(context("uam_fail"), records);
 		assertThat(count("uam_fail.location")).isEqualTo(2);
+	}
+
+	@Test
+	void catalogConvertsSchemaTypesAndAppliesDefaultsPerRow() throws Exception {
+		try (Connection connection = targetDataSource.getConnection()) {
+			Map<String, UamTargetColumns.Column> location = UamTargetColumns.load(connection, "uam", "location");
+			assertThat(location.get("id").udtName()).isEqualTo("varchar");
+			assertThat(location.get("description").udtName()).isEqualTo("text");
+			assertThat(location.get("created_at").udtName()).isEqualTo("timestamptz");
+			assertThat(location.get("created_at").nullable()).isFalse();
+			assertThat(location.get("status").defaultExpression()).contains("PLANNED");
+			assertThat(location.get("version").defaultExpression()).contains("1.0");
+
+			Map<String, UamTargetColumns.Column> geometry = UamTargetColumns.load(connection, "uam", "location_geometry");
+			assertThat(geometry.get("x").udtName()).isEqualTo("numeric");
+			assertThat(geometry.get("raw_geojson").udtName()).isEqualTo("jsonb");
+			assertThat(UamTargetColumns.load(connection, "uam", "geographic_address").get("location_id").udtName())
+					.isEqualTo("varchar");
+		}
+
+		Map<String, Object> geojson = new LinkedHashMap<>();
+		geojson.put("type", "Point");
+		List<LoadableTargetRecord> records = List.of(
+				canonical("AddressLocation", "LOC-1", Map.of(
+						"at_type", "geographicAddress",
+						"name", "Main",
+						"status", "   ",
+						"version", " ",
+						"created_at", "2020-01-02T03:04:05Z"), List.of()),
+				canonical("AddressLocation", "LOC-2", Map.of(
+						"at_type", "geographicAddress",
+						"name", "Other",
+						"status", "ACTIVE",
+						"version", "2.0",
+						"created_at", " "), List.of()),
+				canonical("GeographicPointLocation", "GEO-LOC-1", Map.of(
+						"at_type", "geographicLocation",
+						"created_at", " "), List.of()),
+				canonical("GeographicLocation", "GEO-1", Map.of(
+						"geo_json_type", "Point"), List.of(
+						link("GeographicPointLocation", "GEO-LOC-1"))),
+				canonical("LocationGeometry", "GEOM-1", attributes(
+						"geometry_type", "Point",
+						"x", "144.910000",
+						"y", "-37.790000",
+						"z", " ",
+						"raw_geojson", geojson), List.of(
+						link("GeographicLocation", "GEO-1"))));
+		canonicalConnector.load(contextWithoutColumnTypes(), records);
+
+		assertThat(row("""
+				SELECT status, version, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), name
+				FROM uam.location WHERE id = 'LOC-1'
+				""")).containsExactly("PLANNED", "1.0", "2020-01-02 03:04:05", "Main");
+		List<String> filled = row("""
+				SELECT status, version, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
+				FROM uam.location WHERE id = 'LOC-2'
+				""");
+		assertThat(filled.get(0)).isEqualTo("ACTIVE");
+		assertThat(filled.get(1)).isEqualTo("2.0");
+		assertThat(filled.get(2)).doesNotContain("2020-01-02");
+		assertThat(text("SELECT location_id FROM uam.geographic_location WHERE id = 'GEO-1'")).isEqualTo("GEO-LOC-1");
+		assertThat(row("""
+				SELECT location_id, x::text, y::text, z::text, raw_geojson->>'type'
+				FROM uam.location_geometry WHERE id = 'GEOM-1'
+				""")).containsExactly("GEO-1", "144.910000", "-37.790000", null, "Point");
+
+		assertThatThrownBy(() -> canonicalConnector.load(contextWithoutColumnTypes(), List.of(
+				canonical("AddressLocation", "LOC-3", Map.of(
+						"at_type", "geographicAddress",
+						"created_at", " "), List.of()),
+				canonical("GeographicPointLocation", "GEO-LOC-2", Map.of(
+						"at_type", "geographicLocation",
+						"created_at", " "), List.of()),
+				canonical("GeographicLocation", "GEO-2", Map.of("geo_json_type", "Point"), List.of(
+						link("GeographicPointLocation", "GEO-LOC-2"))),
+				canonical("LocationGeometry", "GEOM-2", Map.of(
+						"geometry_type", "Point",
+						"x", "north"), List.of(
+						link("GeographicLocation", "GEO-2"))))))
+				.isInstanceOf(TargetInfrastructureException.class)
+				.hasMessageContaining("column 'x'")
+				.hasMessageContaining("numeric");
+		assertThat(count("uam.location_geometry")).isEqualTo(1);
+
+		execute("""
+				CREATE TABLE uam.type_probe (
+				  id varchar(64) PRIMARY KEY,
+				  code char(3),
+				  quantity integer,
+				  whole bigint,
+				  ratio double precision,
+				  active boolean,
+				  external_id uuid,
+				  observed_on date,
+				  updated_at timestamp,
+				  payload json,
+				  note text,
+				  status varchar(32) DEFAULT 'PLANNED',
+				  seq_id integer GENERATED BY DEFAULT AS IDENTITY,
+				  legacy_seq serial,
+				  search_text text GENERATED ALWAYS AS (note) STORED
+				)
+				""");
+		execute("""
+				CREATE TABLE uam.type_probe_always (
+				  id varchar(64) PRIMARY KEY,
+				  note text,
+				  always_id integer GENERATED ALWAYS AS IDENTITY
+				)
+				""");
+		try (Connection connection = targetDataSource.getConnection()) {
+			Map<String, UamTargetColumns.Column> probe = UamTargetColumns.load(connection, "uam", "type_probe");
+			assertThat(probe.get("code").udtName()).isEqualTo("bpchar");
+			assertThat(probe.get("quantity").udtName()).isEqualTo("int4");
+			assertThat(probe.get("whole").udtName()).isEqualTo("int8");
+			assertThat(probe.get("ratio").udtName()).isEqualTo("float8");
+			assertThat(probe.get("active").udtName()).isEqualTo("bool");
+			assertThat(probe.get("external_id").udtName()).isEqualTo("uuid");
+			assertThat(probe.get("observed_on").udtName()).isEqualTo("date");
+			assertThat(probe.get("updated_at").udtName()).isEqualTo("timestamp");
+			assertThat(probe.get("payload").udtName()).isEqualTo("json");
+			assertThat(probe.get("seq_id").identity()).isTrue();
+			assertThat(probe.get("seq_id").identityGeneration()).isEqualTo("BY DEFAULT");
+			assertThat(probe.get("legacy_seq").identity()).isFalse();
+			assertThat(probe.get("legacy_seq").defaultExpression()).contains("nextval");
+			assertThat(probe.get("search_text").generatedAlways()).isTrue();
+			assertThat(UamTargetColumns.load(connection, "uam", "type_probe_always").get("always_id").identityAlways())
+					.isTrue();
+		}
+
+		Map<String, Object> payload = new LinkedHashMap<>();
+		payload.put("kind", "Point");
+		canonicalConnector.load(probeContext(), List.of(canonical("TypeProbe", "PROBE-1", attributes(
+				"code", "AUS",
+				"quantity", "7",
+				"whole", "9000000000",
+				"ratio", "1.5",
+				"active", "yes",
+				"external_id", "11111111-1111-1111-1111-111111111111",
+				"observed_on", "2020-01-02",
+				"updated_at", "2020-01-02T03:04:05",
+				"payload", payload,
+				"note", "Main",
+				"status", "   ",
+				"seq_id", " ",
+				"legacy_seq", "",
+				"search_text", "ignored"), List.of())));
+		assertThat(row("""
+				SELECT trim(code), quantity::text, whole::text, ratio::text, active::text,
+				       external_id::text, observed_on::text, to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS'),
+				       payload->>'kind', status, seq_id::text, legacy_seq::text, search_text
+				FROM uam.type_probe WHERE id = 'PROBE-1'
+				""")).containsExactly(
+				"AUS", "7", "9000000000", "1.5", "true",
+				"11111111-1111-1111-1111-111111111111", "2020-01-02", "2020-01-02 03:04:05", "Point",
+				"PLANNED", "1", "1", "Main");
+
+		canonicalConnector.load(probeContext(), List.of(canonical("TypeProbe", "PROBE-2", Map.of(
+				"note", "Second",
+				"seq_id", "40",
+				"legacy_seq", "8"), List.of())));
+		assertThat(row("""
+				SELECT seq_id::text, legacy_seq::text
+				FROM uam.type_probe WHERE id = 'PROBE-2'
+				""")).containsExactly("40", "8");
+
+		assertThatThrownBy(() -> canonicalConnector.load(probeContext(), List.of(canonical(
+				"TypeProbeAlways",
+				"PROBE-3",
+				Map.of("note", "Rejected", "always_id", "5"),
+				List.of()))))
+				.isInstanceOf(TargetInfrastructureException.class)
+				.hasMessageContaining("always_id")
+				.hasMessageContaining("generated by the database");
+		assertThat(count("uam.type_probe")).isEqualTo(2);
+		assertThat(count("uam.type_probe_always")).isZero();
 	}
 
 	@Test
@@ -922,6 +1108,61 @@ class UamCanonicalLoadIntegrationTest {
 				  ]
 				}
 				""".formatted(schema);
+	}
+
+	private MigrationTargetContext contextWithoutColumnTypes() {
+		Map<String, Object> configuration = new LinkedHashMap<>();
+		configuration.put("target", Map.of("mode", "UAM", "schema", "uam"));
+		configuration.put("tables", Map.of(
+				"AddressLocation", "location",
+				"GeographicPointLocation", "location",
+				"GeographicLocation", "geographic_location",
+				"GeographicAddress", "geographic_address",
+				"LocationGeometry", "location_geometry"));
+		configuration.put("loadOrder", List.of(
+				"AddressLocation",
+				"GeographicPointLocation",
+				"GeographicLocation",
+				"GeographicAddress",
+				"LocationGeometry"));
+		configuration.put("foreignKeys", List.of(
+				Map.of("entity", "GeographicLocation", "parent", "GeographicPointLocation", "column", "location_id"),
+				Map.of("entity", "LocationGeometry", "parent", "GeographicLocation", "column", "location_id")));
+		configuration.put("loadTimestampColumns", List.of(
+				Map.of("table", "location", "column", "created_at")));
+		return new MigrationTargetContext(
+				UUID.randomUUID(),
+				1L,
+				1,
+				UamPostgreSqlTargetConnector.TARGET_TYPE,
+				"location",
+				LoadMode.BULK,
+				configuration);
+	}
+
+	private MigrationTargetContext probeContext() {
+		Map<String, Object> configuration = new LinkedHashMap<>();
+		configuration.put("target", Map.of("mode", "UAM", "schema", "uam"));
+		configuration.put("tables", Map.of(
+				"TypeProbe", "type_probe",
+				"TypeProbeAlways", "type_probe_always"));
+		configuration.put("loadOrder", List.of("TypeProbe", "TypeProbeAlways"));
+		return new MigrationTargetContext(
+				UUID.randomUUID(),
+				1L,
+				1,
+				UamPostgreSqlTargetConnector.TARGET_TYPE,
+				"type_probe",
+				LoadMode.BULK,
+				configuration);
+	}
+
+	private static Map<String, Object> attributes(Object... pairs) {
+		Map<String, Object> values = new LinkedHashMap<>();
+		for (int index = 0; index < pairs.length; index += 2) {
+			values.put(String.valueOf(pairs[index]), pairs[index + 1]);
+		}
+		return values;
 	}
 
 	private MigrationTargetContext context(String schema) {

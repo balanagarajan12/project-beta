@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Parses {@code migration_mapping.configuration} when it declares an entity relationship model.
@@ -16,6 +17,7 @@ public final class EntityRelationshipConfiguration {
 
 	public static final String MODEL_TYPE = "ENTITY_RELATIONSHIP";
 	private static final String MODEL_TYPE_FIELD = "modelType";
+	private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
 
 	private EntityRelationshipConfiguration() {
 	}
@@ -106,11 +108,11 @@ public final class EntityRelationshipConfiguration {
 				throw new InvalidEntityRelationshipConfigurationException("Entity configuration must be an object");
 			}
 			Map<String, Object> entity = asMap(raw);
-			String name = requiredText(entity.get("name"), "Entity name is required");
+			String name = entityName(entity);
 			entities.add(new EntityDefinition(
 					name,
 					requiredText(entity.get("targetEntity"), "Entity '" + name + "' requires targetEntity"),
-					requiredText(entity.get("sourceKey"), "Entity '" + name + "' requires sourceKey"),
+					sourceKey(entity.get("sourceKey"), name),
 					requiredText(entity.get("targetKey"), "Entity '" + name + "' requires targetKey"),
 					targetIdentity(entity.get("targetIdentity"), name)));
 		}
@@ -164,13 +166,14 @@ public final class EntityRelationshipConfiguration {
 					"Relationship from '" + parent + "' to '" + child + "' is a self-reference, which is not supported");
 		}
 		RelationshipCardinality cardinality = cardinality(raw.get("cardinality"), parent, child);
-		List<RelationshipKey> keys = keys(raw.get("keys"), parent, child);
+		TargetForeignKey targetForeignKey = targetForeignKey(raw.get("targetForeignKey"), parent, child);
+		List<RelationshipKey> keys = keys(raw.get("keys"), parent, child, targetForeignKey != null);
 		String identity = parent + "\u0000" + child;
 		if (!seen.add(identity)) {
 			throw new InvalidEntityRelationshipConfigurationException(
 					"Duplicate relationship from '" + parent + "' to '" + child + "'");
 		}
-		return new RelationshipDefinition(parent, child, cardinality, keys);
+		return new RelationshipDefinition(parent, child, cardinality, keys, targetForeignKey);
 	}
 
 	private static RelationshipCardinality cardinality(Object value, String parent, String child) {
@@ -188,8 +191,18 @@ public final class EntityRelationshipConfiguration {
 		}
 	}
 
-	private static List<RelationshipKey> keys(Object value, String parent, String child) {
+	private static List<RelationshipKey> keys(Object value, String parent, String child, boolean foreignKeyPresent) {
+		if (value == null) {
+			if (foreignKeyPresent) {
+				return List.of();
+			}
+			throw new InvalidEntityRelationshipConfigurationException(
+					"Relationship from '" + parent + "' to '" + child + "' requires at least one key");
+		}
 		if (!(value instanceof List<?> list) || list.isEmpty()) {
+			if (foreignKeyPresent && value instanceof List<?>) {
+				return List.of();
+			}
 			throw new InvalidEntityRelationshipConfigurationException(
 					"Relationship from '" + parent + "' to '" + child + "' requires at least one key");
 		}
@@ -221,7 +234,9 @@ public final class EntityRelationshipConfiguration {
 		Map<String, Object> map = new LinkedHashMap<>();
 		map.put("name", entity.name());
 		map.put("targetEntity", entity.targetEntity());
-		map.put("sourceKey", entity.sourceKey());
+		if (entity.sourceKey() != null) {
+			map.put("sourceKey", entity.sourceKey());
+		}
 		map.put("targetKey", entity.targetKey());
 		if (entity.targetIdentity() != null) {
 			map.put("targetIdentity", targetIdentityMap(entity.targetIdentity()));
@@ -301,7 +316,80 @@ public final class EntityRelationshipConfiguration {
 			keyMap.put("childField", key.childField());
 			return keyMap;
 		}).toList());
+		if (relationship.targetForeignKey() != null) {
+			Map<String, Object> foreignKey = new LinkedHashMap<>();
+			foreignKey.put("column", relationship.targetForeignKey().column());
+			foreignKey.put("referencesColumn", relationship.targetForeignKey().referencesColumn());
+			map.put("targetForeignKey", foreignKey);
+		}
 		return map;
+	}
+
+	private static String entityName(Map<String, Object> entity) {
+		String fromEntity = optionalText(entity.get("entity"));
+		String fromName = optionalText(entity.get("name"));
+		if (fromEntity != null && fromName != null && !fromEntity.equals(fromName)) {
+			throw new InvalidEntityRelationshipConfigurationException(
+					"Entity name '" + fromName + "' contradicts entity '" + fromEntity + "'");
+		}
+		String name = fromEntity != null ? fromEntity : fromName;
+		if (name == null) {
+			throw new InvalidEntityRelationshipConfigurationException("Entity name is required");
+		}
+		return name;
+	}
+
+	/**
+	 * A missing source key stays null. The literal text {@code null} is not a field name.
+	 */
+	private static String sourceKey(Object value, String entityName) {
+		if (value == null) {
+			return null;
+		}
+		if (!(value instanceof String text)) {
+			throw new InvalidEntityRelationshipConfigurationException(
+					"Entity '" + entityName + "' sourceKey must be a string");
+		}
+		String trimmed = text.trim();
+		if (trimmed.isEmpty() || "null".equalsIgnoreCase(trimmed)) {
+			return null;
+		}
+		return trimmed;
+	}
+
+	private static TargetForeignKey targetForeignKey(Object value, String parent, String child) {
+		if (value == null) {
+			return null;
+		}
+		if (!(value instanceof Map<?, ?> raw)) {
+			throw new InvalidEntityRelationshipConfigurationException(
+					"Relationship from '" + parent + "' to '" + child + "' targetForeignKey must be an object");
+		}
+		Map<String, Object> foreignKey = asMap(raw);
+		String column = requiredText(
+				foreignKey.get("column"),
+				"Relationship from '" + parent + "' to '" + child + "' requires targetForeignKey.column");
+		String referencesColumn = requiredText(
+				foreignKey.get("referencesColumn"),
+				"Relationship from '" + parent + "' to '" + child + "' requires targetForeignKey.referencesColumn");
+		requireIdentifier(column, "Relationship from '" + parent + "' to '" + child
+				+ "' targetForeignKey.column is invalid");
+		requireIdentifier(referencesColumn, "Relationship from '" + parent + "' to '" + child
+				+ "' targetForeignKey.referencesColumn is invalid");
+		return new TargetForeignKey(column, referencesColumn);
+	}
+
+	private static void requireIdentifier(String value, String message) {
+		if (!IDENTIFIER.matcher(value).matches()) {
+			throw new InvalidEntityRelationshipConfigurationException(message);
+		}
+	}
+
+	private static String optionalText(Object value) {
+		if (!(value instanceof String text) || text.isBlank() || "null".equalsIgnoreCase(text.trim())) {
+			return null;
+		}
+		return text.trim();
 	}
 
 	private static String requiredText(Object value, String message) {

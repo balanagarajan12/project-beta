@@ -68,4 +68,4 @@ Example future consumer: **UAM** → dedicated database (e.g. `etp_uam`) → own
 
 - [ETP_POSTGRESQL_CAPABILITY_READINESS.md](../../ETP_POSTGRESQL_CAPABILITY_READINESS.md) — analysis
 - [ETP IAM capability](../etp-iam/) — reference onboarding pattern (`etp.iam` ACTIVE)
-- [Capability Registry](../../etp-platform-service/docs/CAPABILITY_REGISTRY.md)
+- [ETP APIs](../../ETP_APIS.md)

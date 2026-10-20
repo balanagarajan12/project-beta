@@ -3,6 +3,7 @@ package com.etp.migration.connector.target.uam;
 import com.etp.migration.connector.target.LoadableTargetRecord;
 import com.etp.migration.connector.target.MigrationTargetConnector;
 import com.etp.migration.connector.target.MigrationTargetContext;
+import com.etp.migration.connector.target.TargetFailureDiagnostics;
 import com.etp.migration.connector.target.TargetInfrastructureException;
 import com.etp.migration.connector.target.TargetLoadModeNotSupportedException;
 import com.etp.migration.connector.target.TargetLoadResult;
@@ -12,7 +13,10 @@ import com.etp.migration.processing.MigrationErrorCodes;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 import javax.sql.DataSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -66,8 +70,10 @@ public class UamPostgreSqlTargetConnector implements MigrationTargetConnector {
 					MigrationErrorCodes.TARGET_DATABASE_CONFIGURATION_ERROR,
 					"PostgreSQL target datasource is not configured");
 		}
-		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(context.configuration(), records);
+		UamCanonicalRows.PlannedLoad planned = UamCanonicalRows.planDetailed(context.configuration(), records);
 		try (Connection connection = dataSource.getConnection()) {
+			UamForeignKeySchema.verify(connection, planned.foreignKeys());
+			List<UamCanonicalRows.InsertGroup> groups = bind(connection, planned.groups());
 			boolean previousAutoCommit = connection.getAutoCommit();
 			connection.setAutoCommit(false);
 			try {
@@ -82,7 +88,7 @@ public class UamPostgreSqlTargetConnector implements MigrationTargetConnector {
 				}
 				throw new TargetInfrastructureException(
 						MigrationErrorCodes.TARGET_COPY_FAILED,
-						"Canonical target load failed and was rolled back",
+						"Canonical target load failed and was rolled back: " + TargetFailureDiagnostics.describe(ex),
 						ex);
 			} finally {
 				connection.setAutoCommit(previousAutoCommit);
@@ -92,10 +98,27 @@ public class UamPostgreSqlTargetConnector implements MigrationTargetConnector {
 		} catch (SQLException ex) {
 			throw new TargetInfrastructureException(
 					MigrationErrorCodes.TARGET_DATABASE_CONNECTION_ERROR,
-					"PostgreSQL target connection failed",
+					"PostgreSQL target connection failed: " + TargetFailureDiagnostics.describe(ex),
 					ex);
 		}
 		return new TargetLoadResult(submitted, submitted, 0, List.of(), List.of());
+	}
+
+	private static List<UamCanonicalRows.InsertGroup> bind(
+			Connection connection,
+			List<UamCanonicalRows.InsertGroup> groups) throws SQLException {
+		Map<String, Map<String, UamTargetColumns.Column>> catalogs = new HashMap<>();
+		List<UamCanonicalRows.InsertGroup> bound = new ArrayList<>();
+		for (UamCanonicalRows.InsertGroup group : groups) {
+			String key = group.schema() + "\u0000" + group.table();
+			Map<String, UamTargetColumns.Column> catalog = catalogs.get(key);
+			if (catalog == null) {
+				catalog = UamTargetColumns.load(connection, group.schema(), group.table());
+				catalogs.put(key, catalog);
+			}
+			bound.addAll(UamTargetColumns.bind(group, catalog));
+		}
+		return bound;
 	}
 
 	private static void insert(Connection connection, UamCanonicalRows.InsertGroup group) throws SQLException {

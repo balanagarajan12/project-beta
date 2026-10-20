@@ -1,6 +1,6 @@
 # ETP Migration — AI / Claude context
 
-Compact handoff for assistants. Inspect code before changing it. Details: [ARCHITECTURE.md](ARCHITECTURE.md), [API_GUIDE.md](API_GUIDE.md), [DATABASE_MODEL.md](DATABASE_MODEL.md), [USER_GUIDE.md](USER_GUIDE.md), [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md).
+Compact handoff for assistants. Inspect code before changing it. Details: [ARCHITECTURE.md](ARCHITECTURE.md), [API_GUIDE.md](API_GUIDE.md), [DATABASE_MODEL.md](DATABASE_MODEL.md), [USER_GUIDE.md](USER_GUIDE.md), [migration-e2e-test-guide.md](migration-e2e-test-guide.md), [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md).
 
 ---
 
@@ -51,11 +51,11 @@ Definition, mapping, mapping rule, source, run, batch, artifact metadata, error,
 
 ## 7. Implementation status
 
-**Implemented:** Phases 0–10. Composite DRAFT config, activate, execute, prepare/process-next-batch, cancel/retry, flat and entity-aware reconciliation, promotion, filesystem CSV including entity/relationship layouts, PostgreSQL BULK COPY, entity staging idempotency (`entity-v1:` key), in-memory scope and relationship parent indexes retained after Phase 10 measurement, per-entity `targetIdentity` format (`PREFIX_SEQUENCE`, `PREFIX_SOURCE_VALUE`) with PostgreSQL range allocation (`target_identity_allocator`) and retry reuse (`migration_identity_allocation`), canonical `UAM_POSTGRESQL` load, UAM REST **placeholder** SINGLE, JWT, `dev` permitAll, opt-in benchmark tests, Testcontainers isolation. Default suite: **542** tests. Flyway **V5**.
+**Implemented:** Phases 0–10. Composite DRAFT config (`entityMappings`/`fieldMappings` and legacy `mapping`/`rules`), activate, execute, prepare/process-next-batch, cancel/retry, flat and entity-aware reconciliation, promotion, filesystem CSV and SFTP CSV, entity/relationship layouts, PostgreSQL BULK COPY, entity staging idempotency (`entity-v1:` key), in-memory scope and relationship parent indexes retained after Phase 10 measurement, per-entity `targetIdentity` format (`PREFIX_SEQUENCE`, `PREFIX_SOURCE_VALUE`) with PostgreSQL range allocation (`target_identity_allocator`) and retry reuse (`migration_identity_allocation`), canonical `UAM_POSTGRESQL` load with `information_schema` conversion, UAM REST **placeholder** SINGLE, JWT, `dev` permitAll, opt-in benchmark tests, Testcontainers isolation. The earlier full-suite count of 542 tests is not restated. Catalog-load results are in [migration-e2e-test-guide.md](migration-e2e-test-guide.md). Flyway **V5**.
 
 **Demonstrated locally:** CSV → staging → reconciliation → promotion → schema `uam`, 110 physical rows expanded to 515 logical records, six entities, eight relationships including ONE_TO_MANY, promotion-time identity allocation, rollback/retry on an earlier attempt, and a clean PROMOTED run. See [ARCHITECTURE.md](ARCHITECTURE.md) §28. That demonstration is not 30M support and not a production UAM deployment.
 
-**Not implemented:** XLSX (roadmap Phases 11 and 12), enrichment, dedup, Kafka, scheduler, `@Async`, GUI, object-storage/SFTP/S3, LOOKUP/CUSTOM at runtime, `migration_record` success lineage, a distributed id service, 10M/30M/50M proof. The UAM REST connector remains a SINGLE HTTP placeholder. Canonical load uses the documented local column set.
+**Not implemented:** XLSX (roadmap Phases 11 and 12), enrichment, dedup, Kafka, scheduler, `@Async`, GUI, S3 and other object stores, multi-file SFTP, LOOKUP/CUSTOM at runtime, `migration_record` success lineage, a distributed id service, 10M/30M/50M proof, complete PostgreSQL type conversion (arrays, enums, domains, `bytea`, and other unrecognized `udt_name` values pass through). SFTP for one remote CSV is implemented. The UAM REST connector remains a SINGLE HTTP placeholder. The verified UAM tables are `varchar`, `text`, `timestamptz`, `numeric`, and `jsonb`. See [ARCHITECTURE.md](ARCHITECTURE.md) §29.
 
 ---
 
@@ -84,6 +84,7 @@ See [API_GUIDE.md](API_GUIDE.md). Product path:
 - `GET /api/v1/migrations/{migrationId}`
 - `POST /api/v1/migrations/{migrationId}/activate`
 - `POST /api/v1/migrations/{migrationId}/execute`
+- `GET /api/v1/migration-runs` (optional `migrationDefinitionId`; keeps recency order. Nested `GET /migrations/{id}/runs` stays `createdAt` order)
 - `GET /api/v1/migration-runs/{runId}`
 - `POST /api/v1/migration-runs/{runId}/reconcile` (+ `verificationScope`)
 - `GET /api/v1/migration-runs/{runId}/reconciliation`
@@ -103,20 +104,20 @@ Flyway **V5** (V1–V5). V4 `migration_identity_allocation` stores `(run, entity
 
 ## 11. Configuration model
 
-JSONB on definition: `target.mode`, `target.schema`, `stagingSchema`, `stagingTable`; canonical `tables`, `loadOrder`, `foreignKeys`, `loadTimestampColumns`, `columnTypes`, and `promotion.enabled`. Flat promotion still uses `promotion.schema/table/strategy/columns/conflictKeys`. Identity format is `mapping.entities[].targetIdentity` (`PREFIX_SEQUENCE` / prefix / `sequenceLength`). `definition.configuration.identity` is not read. Source JSON: `provider=FILE_SYSTEM`, `fileFormat=CSV`, `objectKey`, `hasHeader`. Local control-plane JDBC is **localhost:55433**. The demonstrated target JDBC is **localhost:55432**.
+JSONB on definition: `target.mode`, `target.schema`, `stagingSchema`, `stagingTable`; canonical `tables`, `loadOrder`, `foreignKeys`, `loadTimestampColumns`, `columnTypes`, and `promotion.enabled`. Flat promotion still uses `promotion.schema/table/strategy/columns/conflictKeys`. Identity format is `mapping.entities[].targetIdentity` (`PREFIX_SEQUENCE` / prefix / `sequenceLength`). `definition.configuration.identity` is not read. Filesystem source JSON: `provider=FILE_SYSTEM`, `fileFormat=CSV`, `objectKey`, `hasHeader`. SFTP source JSON: `provider=SFTP`, `fileFormat=CSV`, `host`, `port`, `credentialRef`, `remotePath`, `hasHeader`, `delimiter`. The SFTP password is application configuration keyed by `credentialRef`, not a field on the migration definition. Local control-plane JDBC is **localhost:55433**. The demonstrated target JDBC is **localhost:55432**.
 
 ---
 
 ## 12. Source connectors
 
-Only `CsvSourceConnector` is a source-connector bean. Registry uses `supports()` → `CsvFileSourceConfiguration.from`. `sourceType` must be non-blank; `FILE` vs `FILE_SYSTEM` **labels** both work if JSON is valid FILE_SYSTEM+CSV. `MultiFileEntitySource` opens configured per-entity CSVs through that connector. See [ARCHITECTURE.md](ARCHITECTURE.md) §8.
+`CsvSourceConnector` (`FILE_SYSTEM` + CSV) and `SftpCsvSourceConnector` (`SFTP` + CSV) are the source-connector beans. Both stream records through `CsvRecordReader`. Registry uses the first `supports()` match. `sourceType` must be non-blank; `FILE` vs `FILE_SYSTEM` labels both work if the JSON is valid. `MultiFileEntitySource` opens configured per-entity filesystem CSVs through `CsvSourceConnector`. SFTP is a single remote CSV and does not use the multi-file layout. See [ARCHITECTURE.md](ARCHITECTURE.md) §8.
 
 ---
 
 ## 13. Target connectors
 
 - `PostgreSqlTargetConnector` (`POSTGRESQL`): BULK COPY into staging. It does not load canonical UAM tables. Definition `targetType` stays `POSTGRESQL` for the canonical demonstration.
-- `UamPostgreSqlTargetConnector`: canonical PostgreSQL UAM load used by promotion when `target.mode=UAM`. Local schema `uam` on port 55432. Not a production UAM deployment.
+- `UamPostgreSqlTargetConnector`: canonical PostgreSQL UAM load used by promotion when `target.mode=UAM`. `UamCanonicalRows` plans rows. `UamTargetColumns` reads `information_schema` and converts. `columnTypes` remains a planning fallback for `numeric` and `timestamptz` only. Local schema `uam` on port 55432. Not a production UAM deployment. See [ARCHITECTURE.md](ARCHITECTURE.md) §29.
 - `UamTargetConnector` (`UAM`): REST SINGLE HTTP POST. Retained. Promotion does not use it.
 - Older flat stand-in: `uam_migration_test.address`.
 
@@ -136,7 +137,7 @@ User-invoked. Default **STAGING**. Checksum **not** compared to staging (`compar
 
 ## 16. Promotion
 
-Prepare READY from staging counts (no business writes). Canonical promote allocates identities, then inserts configured UAM tables in one transaction per eligible batch. Failure rolls that UAM transaction back and keeps `migration_identity_allocation` for retry. `ON CONFLICT (id) DO NOTHING` skips an existing primary key. Flat promote remains INSERT/UPSERT; a failed flat batch does not roll back earlier batches (`PARTIALLY_PROMOTED`). Already `PROMOTED` returns the stored result. Missing promotion on GET = 404; missing promotion on POST promote = 409 `PROMOTION_NOT_READY`.
+Prepare READY from staging counts (no business writes). Canonical promote allocates identities, then inserts configured UAM tables in one transaction per eligible batch. Failure rolls that UAM transaction back and keeps `migration_identity_allocation` for retry. Staging rows stay. `ON CONFLICT (<targetKey>) DO NOTHING` skips an existing key. UAM fixtures use `id`. Omitting that first column fails before the statement is built. Flat promote remains INSERT/UPSERT; a failed flat batch does not roll back earlier batches (`PARTIALLY_PROMOTED`). Already `PROMOTED` returns the stored result. Missing promotion on GET = 404; missing promotion on POST promote = 409 `PROMOTION_NOT_READY`.
 
 ---
 
@@ -148,7 +149,7 @@ DRAFT → ACTIVE → execute → inspect → plan → SKIP LOCKED claim → tran
 
 ## 18–19. Demonstrations
 
-**Current local end-to-end demonstration** is [ARCHITECTURE.md](ARCHITECTURE.md) §28. Definition `59fc4cc1-85cf-44bd-870b-dd56ae3ca1ae` version 1.2. Run `f9e9fd4f-cc61-4d0f-8e71-e3333f09b431` (run 2): 110 physical CSV rows, 515 logical records, staging reconciliation `PASSED_WITH_WARNINGS`, promotion `2994bce6-6033-4b9a-94ba-f5b2c3e1a561` `PROMOTED` 515. Local `uam` counts: location 202, geographic_address 101, geographic_location 101, location_geometry 101, geographic_sub_address 10.
+**Historical local end-to-end demonstration** is [ARCHITECTURE.md](ARCHITECTURE.md) §28. Definition `59fc4cc1-85cf-44bd-870b-dd56ae3ca1ae` version 1.2. Run `f9e9fd4f-cc61-4d0f-8e71-e3333f09b431` (run 2): 110 physical CSV rows, 515 logical records, staging reconciliation `PASSED_WITH_WARNINGS`, promotion `2994bce6-6033-4b9a-94ba-f5b2c3e1a561` `PROMOTED` 515. Local `uam` counts: location 202, geographic_address 101, geographic_location 101, location_geometry 101, geographic_sub_address 10. `private_street_name` and `private_street_number` are nullable in `local/uam-target.sql`. See [migration-e2e-test-guide.md](migration-e2e-test-guide.md).
 
 **Historical flat illustration:** git `demo/data/addresses.csv`, **8** rows; DEMO-004 empty `address_line_1` → **7** valid, **1** validation failure, `batchSize` 3, **3** batches, execute **`COMPLETED_WITH_ERRORS`**. Staging `migration_staging.address_load`. Stand-in **`uam_migration_test.address`**. That illustration is not the current demonstration.
 

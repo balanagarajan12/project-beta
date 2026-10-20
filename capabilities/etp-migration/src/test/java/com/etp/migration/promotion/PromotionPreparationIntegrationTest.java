@@ -1,6 +1,7 @@
 package com.etp.migration.promotion;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -15,7 +16,15 @@ import com.etp.migration.entity.PromotionStatus;
 import com.etp.migration.processing.MigrationErrorCodes;
 import com.etp.migration.repository.MigrationDefinitionRepository;
 import com.etp.migration.repository.MigrationPromotionRepository;
+import com.etp.migration.repository.MigrationRunRepository;
 import java.time.Instant;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -57,6 +66,8 @@ class PromotionPreparationIntegrationTest {
 	private MigrationDefinitionRepository migrationDefinitionRepository;
 	@Autowired
 	private MigrationPromotionRepository promotionRepository;
+	@Autowired
+	private MigrationRunRepository migrationRunRepository;
 	@Autowired
 	private TransactionTemplate transactionTemplate;
 	@Autowired
@@ -161,6 +172,139 @@ class PromotionPreparationIntegrationTest {
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.promotionId").value(promotionId))
 				.andExpect(jsonPath("$.status").value("READY"));
+	}
+
+	@Test
+	void auditActorComesFromTheTokenSubjectAndRequestedByCannotImpersonate() throws Exception {
+		String runId = processCsv("""
+				addr1,city
+				123 Main St,Salem
+				""", true);
+		reconcile(runId);
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
+				.andExpect(jsonPath("$.requestedBy").value("user"));
+
+		MvcResult prepared = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId)
+						.with(jwt().jwt(token -> token.subject("alice-subject").claim("preferred_username", "alice")))
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{\"requestedBy\":\"mallory\"}"))
+				.andExpect(status().isOk())
+				.andReturn();
+
+		String promotionId = com.jayway.jsonpath.JsonPath.read(prepared.getResponse().getContentAsString(), "$.promotionId");
+		String requestedBy = transactionTemplate.execute(tx ->
+				promotionRepository.findById(UUID.fromString(promotionId)).orElseThrow().getRequestedBy());
+		assertThat(requestedBy).isEqualTo("alice-subject");
+	}
+
+	@Test
+	void unidentifiableTokenIsForbiddenAndCreatesNoPromotion() throws Exception {
+		String runId = processCsv("""
+				addr1,city
+				123 Main St,Salem
+				""", true);
+		reconcile(runId);
+
+		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId)
+						.with(jwt().jwt(token -> token.claims(claims -> claims.remove("sub")).claim("scope", "openid"))))
+				.andExpect(status().isForbidden())
+				.andExpect(jsonPath("$.code").value(MigrationErrorCodes.AUDIT_IDENTITY_INVALID));
+
+		assertThat(promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(UUID.fromString(runId))).isEmpty();
+	}
+
+	@Test
+	void retryIsRejectedOncePromotionIsPromotingOrPromoted() throws Exception {
+		String runId = runWithErrorsReconciled();
+		String promotionId = preparePromotion(runId);
+
+		for (PromotionStatus blocking : List.of(PromotionStatus.PROMOTING, PromotionStatus.PROMOTED)) {
+			setPromotionStatus(promotionId, blocking);
+			mockMvc.perform(post("/api/v1/migration-runs/{runId}/retry", runId).with(jwt()))
+					.andExpect(status().isConflict())
+					.andExpect(jsonPath("$.code").value(MigrationErrorCodes.RETRY_BLOCKED_BY_PROMOTION));
+			mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
+					.andExpect(jsonPath("$.status").value("COMPLETED_WITH_ERRORS"));
+		}
+	}
+
+	@Test
+	void retryIsAllowedWhilePromotionIsOnlyPrepared() throws Exception {
+		String runId = runWithErrorsReconciled();
+		preparePromotion(runId);
+
+		mockMvc.perform(post("/api/v1/migration-runs/{runId}/retry", runId).with(jwt()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("QUEUED"));
+	}
+
+	@Test
+	void retryWaitsForAConcurrentPromotionStartAndThenRejects() throws Exception {
+		String runId = runWithErrorsReconciled();
+		String promotionId = preparePromotion(runId);
+		CountDownLatch locked = new CountDownLatch(1);
+		CountDownLatch release = new CountDownLatch(1);
+		ExecutorService threads = Executors.newFixedThreadPool(2);
+		try {
+			Future<?> promotionStart = threads.submit(() -> transactionTemplate.executeWithoutResult(tx -> {
+				migrationRunRepository.findByIdForUpdate(UUID.fromString(runId)).orElseThrow();
+				promotionRepository.findById(UUID.fromString(promotionId)).orElseThrow()
+						.setStatus(PromotionStatus.PROMOTING);
+				promotionRepository.flush();
+				locked.countDown();
+				await(release);
+			}));
+			assertThat(locked.await(10, TimeUnit.SECONDS)).isTrue();
+
+			Future<MvcResult> retry = threads.submit(() -> mockMvc
+					.perform(post("/api/v1/migration-runs/{runId}/retry", runId).with(jwt()))
+					.andReturn());
+			assertThatThrownBy(() -> retry.get(1500, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
+
+			release.countDown();
+			promotionStart.get(10, TimeUnit.SECONDS);
+			MvcResult result = retry.get(10, TimeUnit.SECONDS);
+			assertThat(result.getResponse().getStatus()).isEqualTo(409);
+			assertThat(result.getResponse().getContentAsString()).contains(MigrationErrorCodes.RETRY_BLOCKED_BY_PROMOTION);
+		} finally {
+			release.countDown();
+			threads.shutdownNow();
+		}
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
+				.andExpect(jsonPath("$.status").value("COMPLETED_WITH_ERRORS"));
+	}
+
+	private String runWithErrorsReconciled() throws Exception {
+		String runId = processCsv("""
+				addr1,city
+				123 Main St,Salem
+				,
+				""", true);
+		reconcile(runId);
+		return runId;
+	}
+
+	private String preparePromotion(String runId) throws Exception {
+		MvcResult prepared = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId).with(jwt()))
+				.andExpect(status().isOk())
+				.andReturn();
+		return com.jayway.jsonpath.JsonPath.read(prepared.getResponse().getContentAsString(), "$.promotionId");
+	}
+
+	private void setPromotionStatus(String promotionId, PromotionStatus status) {
+		transactionTemplate.executeWithoutResult(tx ->
+				promotionRepository.findById(UUID.fromString(promotionId)).orElseThrow().setStatus(status));
+	}
+
+	private static void await(CountDownLatch latch) {
+		try {
+			if (!latch.await(30, TimeUnit.SECONDS)) {
+				throw new IllegalStateException("Timed out waiting for the test to release the run lock");
+			}
+		} catch (InterruptedException ex) {
+			Thread.currentThread().interrupt();
+			throw new IllegalStateException(ex);
+		}
 	}
 
 	@Test

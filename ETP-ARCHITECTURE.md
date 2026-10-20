@@ -2,7 +2,97 @@
 ## Canonical Architecture & Engineering Context
 
 **Status:** Living architecture document  
-**Purpose:** Single source of truth for ETP architecture, engineering decisions, and AI-assisted development context.
+**Purpose:** Architecture and engineering context for ETP. Start with [ETP_CONCEPTUAL.md](ETP_CONCEPTUAL.md) for what ETP is. Companion documents at the repository root cover the data model, APIs, deployment, capability definition, and local configuration. `CLAUDE.md` is the handoff for coding agents.
+
+These files live only at `etp-foundation/` (the repository root). Do not copy them back into `etp-platform-service/` or a capability folder. Module READMEs and capability runbooks stay next to the code they describe.
+
+| Document | Role |
+|----------|------|
+| [ETP_CONCEPTUAL.md](ETP_CONCEPTUAL.md) | What ETP is, who it is for, and why capabilities exist |
+| [ETP-ARCHITECTURE.md](ETP-ARCHITECTURE.md) | Target architecture and what the repository implements today |
+| [ETP_ENGINEERING_MODEL.md](ETP_ENGINEERING_MODEL.md) | Technology stack, mental models, logical components, repository layout, guardrails |
+| [ETP_CURRENT_DATA_MODEL.md](ETP_CURRENT_DATA_MODEL.md) | Databases and tables that exist in code |
+| [ETP_APIS.md](ETP_APIS.md) | HTTP APIs implemented in this repository |
+| [ETP_DEPLOYMENT.md](ETP_DEPLOYMENT.md) | Deployment models and supporting infrastructure |
+| [ETP_CAPABILITY_DEFINITION.md](ETP_CAPABILITY_DEFINITION.md) | Capability contract, lifecycle, and definition of done |
+| [ETP_HOW_TO.md](ETP_HOW_TO.md) | Step-by-step local configuration |
+| [CLAUDE.md](CLAUDE.md) | Instructions for Claude and other coding agents |
+
+---
+
+## Current implementation in this repository
+
+The sections after this one describe the **target** operating model. This section records what the code actually contains. When they differ, the code and this section win for “what runs today.”
+
+### Repository layout
+
+```text
+etp-foundation/
+├── etp-platform-service/     Spring Boot platform metadata and Capability Registry
+├── etp-core-ui/              Internal platform console (React)
+└── capabilities/
+    ├── etp-iam/              Authentication and authorization service + Keycloak
+    ├── etp-migration/        CSV/SFTP → staging → reconciliation → promotion
+    ├── etp-exports/          JSON API → CSV/XLSX download
+    ├── postgresql/           PostgreSQL 17 capability contract and compose guidance
+    ├── kafka/                Kafka 3.8.1 (KRaft) local broker
+    └── redis/                Redis 7.4 local cache
+```
+
+### What is running code
+
+| Area | State |
+|------|--------|
+| Platform service (Java 21, Spring Boot 4.1), Flyway V1–V14, database `etp_platform` | Implemented |
+| Capability Registry REST API, lifecycle, inline JSON contracts, audit writes | Implemented |
+| Core UI shell, login, read-only capability list and details | Implemented. Write actions are on screen and disabled. Other shell routes are placeholders |
+| ETP IAM (`etp.iam`): login, client-credentials token, authorization check, Keycloak | Implemented |
+| Migration control plane, filesystem and single-file SFTP CSV, staging, reconciliation, promotion | Implemented |
+| Export service `POST /api/v1/exports` | Implemented |
+| PostgreSQL, Kafka, and Redis local infrastructure (Compose) | Implemented as infrastructure, not as request-path services |
+| Application Registry APIs, composition, generated applications | Not implemented |
+| Operating-model and entitlement tables | Schema only (Flyway V14). No Java API |
+| API Gateway, API Catalog, API-to-DB service | Target capabilities. No service in this repository |
+| Platform API JWT enforcement | Not enforced. `SecurityConfig` permits the registry and does not install a JWT resource server. Core UI still sends the IAM Bearer token |
+| Customer UI and business-application authentication | Not implemented |
+
+UAM in this repository is a **local canonical schema** used by the migration capability to demonstrate promotion. It is not a production UAM product.
+
+### Authentication that exists today
+
+Phase 1 uses one login screen on ETP Core UI. Core UI does not call Keycloak and does not hold the Keycloak client secret.
+
+```text
+ETP Core UI
+    → POST /api/v1/auth/login
+ETP IAM
+    → Keycloak password grant (confidential client, server-side)
+    → JWT
+ETP IAM → Core UI session → /dashboard
+```
+
+`POST /api/v1/auth/token` is service-to-service `client_credentials` only. It is not the human login API. OIDC Authorization Code + PKCE, token refresh, and `/auth/me` are not implemented.
+
+After login, Core UI keeps `{ user, accessToken, expiresAt, rememberMe }` in `localStorage` when Remember Me is checked, and in `sessionStorage` otherwise. The password is not stored. Logout clears that browser session only. A development mock (`VITE_MOCK_AUTH_ENABLED`) can skip IAM entirely.
+
+### What Core UI actually operates
+
+The console is React 19 on Vite. Authenticated routes sit inside the core shell.
+
+| Route | Backed by |
+|-------|-----------|
+| `/login` | IAM `POST /api/v1/auth/login`, or the mock when enabled |
+| `/capabilities` | `GET /api/v1/capabilities`. Search, category, status, and paging run in the browser |
+| `/capabilities/:capabilityId` | `GET /api/v1/capabilities/{id}`. Version selector plus Overview, Contract, and Dependencies |
+| `/dashboard`, `/customers`, `/applications`, `/platform/configuration`, `/platform/version`, `/audit` | Placeholder copy. No platform API |
+
+The details view does not render implementation metadata. A dependency is shown as a shortened version id, not as a capability code. The structured contract view omits the document’s `dependencies` section; Raw JSON shows the full document.
+
+Create, edit, clone, lifecycle, and delete controls are rendered and disabled. The UI never calls POST, PUT, or PATCH. Application, customer, audit, and entitlement tables have entities or SQL only. Core UI does not read them.
+
+### Ownership rule already in force
+
+`etp_platform` stores platform metadata. `etp_iam` stores identity and authorization data. Migration stores its control plane in `etp_migration`. Business tables (including a local `uam` schema) are owned by the consuming application or by the operator-created target, not by the platform catalog.
 
 ---
 
@@ -1454,9 +1544,11 @@ This document is a living artifact.
 
 When an architectural decision is changed:
 
-1. update this document;
-2. update relevant detailed design documentation;
-3. update `CLAUDE.md`/AI project instructions if agent behavior is affected;
+1. update this document at the repository root;
+2. update the matching root document (`ETP_CURRENT_DATA_MODEL.md`, `ETP_APIS.md`, `ETP_DEPLOYMENT.md`, `ETP_CAPABILITY_DEFINITION.md`, or `ETP_HOW_TO.md`);
+3. update `CLAUDE.md` if agent behavior is affected;
 4. communicate the change through the team's normal review process.
+
+Do not add a second copy under `etp-platform-service/`.
 
 The objective is that a new developer—or a new AI coding agent—can clone the repository and understand the intended architecture without depending on private conversation history.

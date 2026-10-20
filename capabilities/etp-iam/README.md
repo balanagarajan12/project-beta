@@ -327,5 +327,5 @@ Service listens on `http://localhost:8081` by default.
 
 - [ETP IAM Capability Readiness](ETP_IAM_CAPABILITY_READINESS.md) — onboarding record; `etp.iam` v1.0.0 **ACTIVE**
 - [ETP IAM Capability Deployment](ETP_IAM_CAPABILITY_DEPLOYMENT.md) — service deployment and registry reference
-- [ETP Architecture](../../etp-platform-service/ARCHITECTURE.md)
-- [Capability Registry](../../etp-platform-service/docs/CAPABILITY_REGISTRY.md)
+- [ETP Architecture](../../ETP-ARCHITECTURE.md)
+- [ETP APIs](../../ETP_APIS.md)

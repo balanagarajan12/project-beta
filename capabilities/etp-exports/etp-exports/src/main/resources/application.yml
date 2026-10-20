@@ -1,0 +1,27 @@
+server:
+  port: 8095
+
+spring:
+  application:
+    name: etp-exports
+  mvc:
+    async:
+      request-timeout: 10m   # large files are streamed asynchronously
+
+etp:
+  export:
+    connect-timeout: 10s
+    read-timeout: 120s
+    # default-base-url: http://localhost:8080
+    # Restrict which hosts this service may call (recommended outside local dev).
+    # Empty list = any host allowed.
+    allowed-hosts: []
+    #  - localhost
+    #  - "*.adroittstelecom.com"
+    max-rows: 1000000
+    default-sheet-name: Data
+    csv-utf8-bom: true
+
+logging:
+  level:
+    com.etp.export: INFO

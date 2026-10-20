@@ -1,0 +1,2 @@
+source_address_id,source_parent_address_id,source_sub_address_id,premise_type,market_segment,street_number,street_name,street_type,building_name,unit_number,private_street_number,private_street_name,city,state_or_province,postcode,country,latitude,longitude,address_type,validation_status,created_at
+SRC-SFU-000001,,,SFU,RESIDENTIAL,38,Maple,St,,,,,Austin,TX,78701,US,25.7919,-123.6429,RESIDENTIAL,VALIDATED,2024-01-01T00:00:37Z

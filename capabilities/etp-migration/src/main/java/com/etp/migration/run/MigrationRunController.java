@@ -9,6 +9,7 @@ import com.etp.migration.processing.SourceInspectionService;
 import com.etp.migration.reconciliation.ReconciliationService;
 import com.etp.migration.reconciliation.dto.MigrationReconciliationResponse;
 import com.etp.migration.run.dto.CreateMigrationRunRequest;
+import com.etp.migration.run.dto.MigrationErrorResponse;
 import com.etp.migration.run.dto.MigrationRunResponse;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -67,6 +68,17 @@ public class MigrationRunController {
 		return ResponseEntity
 				.created(URI.create("/api/v1/migration-runs/" + created.id()))
 				.body(created);
+	}
+
+	@Operation(
+			summary = "List all migration runs",
+			description = "Paginated runs across every definition, most recently started or created first. Optional migrationDefinitionId limits the page to one definition and returns 404 when that definition does not exist. page defaults to 0 and size defaults to 20. A size above 100 is capped.")
+	@GetMapping(value = "/migration-runs", produces = MediaType.APPLICATION_JSON_VALUE)
+	public PagedResponse<MigrationRunResponse> listAll(
+			@RequestParam(name = "page", defaultValue = "0") int page,
+			@RequestParam(name = "size", defaultValue = "20") int size,
+			@RequestParam(name = "migrationDefinitionId", required = false) UUID migrationDefinitionId) {
+		return migrationRunService.listAll(page, size, migrationDefinitionId);
 	}
 
 	@Operation(summary = "List migration runs", description = "Paginated runs for a definition, newest first.")
@@ -154,6 +166,19 @@ public class MigrationRunController {
 	@GetMapping(value = "/migration-runs/{runId}/reconciliation", produces = MediaType.APPLICATION_JSON_VALUE)
 	public MigrationReconciliationResponse getReconciliation(@PathVariable("runId") UUID runId) {
 		return reconciliationService.get(runId);
+	}
+
+	@Operation(summary = "List migration errors", description = "Paginated migration_error rows for a run, including structured errorDetails. Does not change run status.")
+	@ApiResponses({
+			@ApiResponse(responseCode = "200", description = "Error page"),
+			@ApiResponse(responseCode = "404", description = "Run not found")
+	})
+	@GetMapping(value = "/migration-runs/{runId}/errors", produces = MediaType.APPLICATION_JSON_VALUE)
+	public PagedResponse<MigrationErrorResponse> listErrors(
+			@PathVariable("runId") UUID runId,
+			@RequestParam(name = "page", defaultValue = "0") int page,
+			@RequestParam(name = "size", defaultValue = "20") int size) {
+		return migrationRunService.listErrors(runId, page, size);
 	}
 
 	@Operation(summary = "List migration batches", description = "Paginated batch control-plane rows for a run.")

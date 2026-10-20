@@ -1,5 +1,6 @@
 package com.etp.migration.promotion;
 
+import com.etp.migration.config.AuditActor;
 import com.etp.migration.entity.MigrationBatch;
 import com.etp.migration.entity.MigrationBatchStatus;
 import com.etp.migration.entity.MigrationDefinition;
@@ -9,7 +10,6 @@ import com.etp.migration.entity.MigrationRun;
 import com.etp.migration.entity.MigrationRunStatus;
 import com.etp.migration.entity.PromotionBatchStatus;
 import com.etp.migration.entity.PromotionStatus;
-import com.etp.migration.migration.ControlPlaneSupport;
 import com.etp.migration.processing.MigrationErrorCodes;
 import com.etp.migration.promotion.dto.PreparePromotionRequest;
 import com.etp.migration.promotion.dto.PreparePromotionResponse;
@@ -114,7 +114,7 @@ public class PromotionPreparationService {
 		MigrationPromotion promotion = new MigrationPromotion();
 		promotion.setMigrationRun(run);
 		promotion.setStatus(PromotionStatus.READY);
-		promotion.setRequestedBy(requestedBy(request));
+		promotion.setRequestedBy(AuditActor.current());
 		promotion.setRequestedAt(now);
 		promotion.setPromotedBatches(0);
 		promotion.setFailedBatches(0);
@@ -178,13 +178,6 @@ public class PromotionPreparationService {
 		promotion.setTotalRecords(eligibleRecords + skippedRecords);
 		promotion.setSkippedRecords(skippedRecords);
 		return toResponse(promotion, details, eligibleRecords);
-	}
-
-	private static String requestedBy(PreparePromotionRequest request) {
-		if (request == null || request.requestedBy() == null || request.requestedBy().isBlank()) {
-			return ControlPlaneSupport.SYSTEM_ACTOR;
-		}
-		return request.requestedBy().trim();
 	}
 
 	private static void requirePostgresqlTarget(String targetType) {

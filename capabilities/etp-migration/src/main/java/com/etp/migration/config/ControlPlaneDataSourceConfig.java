@@ -1,11 +1,13 @@
 package com.etp.migration.config;
 
 import com.zaxxer.hikari.HikariDataSource;
-import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
+import org.springframework.core.env.Environment;
 
 /**
  * The target connector also publishes a {@link javax.sql.DataSource}. Spring Boot
@@ -15,10 +17,14 @@ import org.springframework.context.annotation.Primary;
 @Configuration
 public class ControlPlaneDataSourceConfig {
 
+	static final String HIKARI_PREFIX = "spring.datasource.hikari";
+
 	@Bean(destroyMethod = "close")
 	@Primary
-	@ConfigurationProperties(prefix = "spring.datasource.hikari")
-	public HikariDataSource dataSource(DataSourceProperties properties) {
-		return properties.initializeDataSourceBuilder().type(HikariDataSource.class).build();
+	public HikariDataSource dataSource(DataSourceProperties properties, Environment environment) {
+		HikariDataSource dataSource = properties.initializeDataSourceBuilder().type(HikariDataSource.class).build();
+		Binder.get(environment).bind(HIKARI_PREFIX, Bindable.ofInstance(dataSource));
+		HikariPoolSettings.validate(HIKARI_PREFIX, dataSource);
+		return dataSource;
 	}
 }

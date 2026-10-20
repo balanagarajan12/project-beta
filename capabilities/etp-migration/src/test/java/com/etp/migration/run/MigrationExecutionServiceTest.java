@@ -11,6 +11,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.etp.migration.config.ShutdownSignal;
 import com.etp.migration.entity.MigrationConfigStatus;
 import com.etp.migration.entity.MigrationRunStatus;
 import com.etp.migration.migration.MigrationDefinitionNotFoundException;
@@ -44,12 +45,21 @@ class MigrationExecutionServiceTest {
 	private SourceInspectionService sourceInspectionService;
 	@Mock
 	private MigrationBatchWorker migrationBatchWorker;
+	@Mock
+	private RunExecutionLifecycle runExecutionLifecycle;
+
+	private final ShutdownSignal shutdownSignal = new ShutdownSignal();
 
 	private MigrationExecutionService service;
 
 	@BeforeEach
 	void setUp() {
-		service = new MigrationExecutionService(migrationRunService, sourceInspectionService, migrationBatchWorker);
+		service = new MigrationExecutionService(
+				migrationRunService,
+				sourceInspectionService,
+				migrationBatchWorker,
+				runExecutionLifecycle,
+				shutdownSignal);
 	}
 
 	@AfterEach
@@ -68,16 +78,18 @@ class MigrationExecutionServiceTest {
 	}
 
 	@Test
-	void zeroBatchesStopsImmediatelyAndReturnsQueuedRun() {
+	void zeroBatchesStartsExecutionAndReturnsTheFinalizedRun() {
 		when(migrationRunService.create(eq(DEFINITION_ID), any())).thenReturn(run(MigrationRunStatus.QUEUED));
 		when(sourceInspectionService.prepare(RUN_ID)).thenReturn(prepare(0));
 		when(migrationBatchWorker.processNextBatch(RUN_ID)).thenReturn(Optional.empty());
-		when(migrationRunService.getById(RUN_ID)).thenReturn(run(MigrationRunStatus.QUEUED, 0, 0, 0));
+		when(migrationRunService.getById(RUN_ID)).thenReturn(run(MigrationRunStatus.COMPLETED, 0, 0, 0));
 
 		MigrationRunResponse response = service.execute(DEFINITION_ID, null);
 
-		assertThat(response.status()).isEqualTo(MigrationRunStatus.QUEUED);
+		assertThat(response.status()).isEqualTo(MigrationRunStatus.COMPLETED);
 		assertThat(response.totalBatches()).isZero();
+		verify(runExecutionLifecycle).beginExecution(RUN_ID);
+		verify(runExecutionLifecycle).finalizeIfIdle(RUN_ID);
 		verifyOrder(0);
 	}
 
@@ -163,17 +175,50 @@ class MigrationExecutionServiceTest {
 				.isInstanceOf(InvalidStateTransitionException.class);
 		verify(migrationBatchWorker, never()).processNextBatch(any());
 		verify(migrationRunService, never()).getById(any());
+		verify(runExecutionLifecycle, never()).beginExecution(any());
+		verify(runExecutionLifecycle, never()).finalizeIfIdle(any());
 	}
 
 	@Test
-	void processNextBatchFailureDoesNotCallGetById() {
+	void processNextBatchFailureFinalizesWithoutReturningTheRun() {
 		stubCreatePrepare();
 		when(migrationBatchWorker.processNextBatch(RUN_ID)).thenThrow(new RuntimeException("batch boom"));
 
 		assertThatThrownBy(() -> service.execute(DEFINITION_ID, null))
 				.isInstanceOf(RuntimeException.class)
 				.hasMessage("batch boom");
+		verify(runExecutionLifecycle).beginExecution(RUN_ID);
+		verify(runExecutionLifecycle).finalizeIfIdle(RUN_ID);
 		verify(migrationRunService, never()).getById(any());
+	}
+
+	@Test
+	void shutdownStopsClaimingAfterTheCurrentBatchAndReturnsTheResumableRun() {
+		stubCreatePrepare();
+		when(migrationBatchWorker.processNextBatch(RUN_ID)).thenAnswer(invocation -> {
+			shutdownSignal.onContextClosed(null);
+			return Optional.of(batch("COMPLETED"));
+		});
+		when(migrationRunService.getById(RUN_ID)).thenReturn(run(MigrationRunStatus.RUNNING, 2, 1, 0));
+
+		MigrationRunResponse response = service.execute(DEFINITION_ID, null);
+
+		assertThat(response.status()).isEqualTo(MigrationRunStatus.RUNNING);
+		assertThat(response.completedBatches()).isEqualTo(1);
+		verify(migrationBatchWorker, times(1)).processNextBatch(RUN_ID);
+		verify(migrationRunService).getById(RUN_ID);
+	}
+
+	@Test
+	void shutdownBeforeTheFirstClaimProcessesNoBatch() {
+		stubCreatePrepare();
+		shutdownSignal.onContextClosed(null);
+		when(migrationRunService.getById(RUN_ID)).thenReturn(run(MigrationRunStatus.RUNNING, 2, 0, 0));
+
+		assertThat(service.execute(DEFINITION_ID, null).status()).isEqualTo(MigrationRunStatus.RUNNING);
+		verify(runExecutionLifecycle).beginExecution(RUN_ID);
+		verify(runExecutionLifecycle).finalizeIfIdle(RUN_ID);
+		verify(migrationBatchWorker, never()).processNextBatch(any());
 	}
 
 	private void stubCreatePrepare() {
@@ -182,10 +227,13 @@ class MigrationExecutionServiceTest {
 	}
 
 	private void verifyOrder(int successfulBatches) {
-		InOrder order = inOrder(migrationRunService, sourceInspectionService, migrationBatchWorker);
+		InOrder order = inOrder(
+				migrationRunService, sourceInspectionService, runExecutionLifecycle, migrationBatchWorker);
 		order.verify(migrationRunService).create(eq(DEFINITION_ID), any());
 		order.verify(sourceInspectionService).prepare(RUN_ID);
+		order.verify(runExecutionLifecycle).beginExecution(RUN_ID);
 		order.verify(migrationBatchWorker, times(successfulBatches + 1)).processNextBatch(RUN_ID);
+		order.verify(runExecutionLifecycle).finalizeIfIdle(RUN_ID);
 		order.verify(migrationRunService).getById(RUN_ID);
 	}
 

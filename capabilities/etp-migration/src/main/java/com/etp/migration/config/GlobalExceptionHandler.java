@@ -4,7 +4,9 @@ import com.etp.migration.batch.MigrationBatchNotFoundException;
 import com.etp.migration.connector.source.InvalidSourceConfigurationException;
 import com.etp.migration.connector.target.InvalidPromotionConfigurationException;
 import com.etp.migration.mapping.InvalidEntityRelationshipConfigurationException;
+import com.etp.migration.connector.target.TargetFailureDiagnostics;
 import com.etp.migration.connector.target.TargetInfrastructureException;
+import com.etp.migration.connector.source.SftpSourceException;
 import com.etp.migration.connector.source.SourceInspectionException;
 import com.etp.migration.connector.source.UnsupportedFileFormatException;
 import com.etp.migration.connector.source.UnsupportedSourceTypeException;
@@ -34,6 +36,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
+import java.util.UUID;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -41,9 +44,15 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.ErrorResponse;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+	private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
 	@ExceptionHandler(MethodArgumentNotValidException.class)
 	public ResponseEntity<ApiErrorResponse> handleValidation(
@@ -129,6 +138,13 @@ public class GlobalExceptionHandler {
 		return error(HttpStatus.BAD_REQUEST, ex.getMessage(), request);
 	}
 
+	@ExceptionHandler(SftpSourceException.class)
+	public ResponseEntity<ApiErrorResponse> handleSftpSource(
+			SftpSourceException ex,
+			HttpServletRequest request) {
+		return error(HttpStatus.BAD_REQUEST, ex.getMessage(), request, ex.errorCode());
+	}
+
 	@ExceptionHandler(SourceInspectionException.class)
 	public ResponseEntity<ApiErrorResponse> handleInspectionFailure(
 			SourceInspectionException ex,
@@ -140,7 +156,19 @@ public class GlobalExceptionHandler {
 	public ResponseEntity<ApiErrorResponse> handleTargetInfrastructure(
 			TargetInfrastructureException ex,
 			HttpServletRequest request) {
-		return error(HttpStatus.INTERNAL_SERVER_ERROR, ex.getMessage(), request, ex.errorCode());
+		String reference = UUID.randomUUID().toString();
+		log.error("Target infrastructure failure reference={} code={} method={} path={} message={} cause={}",
+				reference, ex.errorCode(), request.getMethod(), request.getRequestURI(), ex.getMessage(),
+				TargetFailureDiagnostics.describe(ex));
+		return error(HttpStatus.INTERNAL_SERVER_ERROR,
+				"Target system operation failed (reference " + reference + ")", request, ex.errorCode());
+	}
+
+	@ExceptionHandler(AuditIdentityException.class)
+	public ResponseEntity<ApiErrorResponse> handleAuditIdentity(
+			AuditIdentityException ex,
+			HttpServletRequest request) {
+		return error(HttpStatus.FORBIDDEN, ex.getMessage(), request, ex.errorCode());
 	}
 
 	@ExceptionHandler(PromotionException.class)
@@ -174,8 +202,25 @@ public class GlobalExceptionHandler {
 		return error(HttpStatus.CONFLICT, "The request conflicts with an existing resource", request);
 	}
 
+	@ExceptionHandler(MethodArgumentTypeMismatchException.class)
+	public ResponseEntity<ApiErrorResponse> handleTypeMismatch(
+			MethodArgumentTypeMismatchException ex,
+			HttpServletRequest request) {
+		return error(HttpStatus.BAD_REQUEST, "Invalid value for parameter '" + ex.getName() + "'", request);
+	}
+
 	@ExceptionHandler(Exception.class)
 	public ResponseEntity<ApiErrorResponse> handleUnexpected(Exception ex, HttpServletRequest request) {
+		if (ex instanceof ErrorResponse framework) {
+			HttpStatus status = HttpStatus.resolve(framework.getStatusCode().value());
+			if (status != null && status.is4xxClientError()) {
+				String detail = framework.getBody().getDetail();
+				ApiErrorResponse body = error(
+						status, detail == null || detail.isBlank() ? status.getReasonPhrase() : detail, request).getBody();
+				return ResponseEntity.status(status).headers(framework.getHeaders()).body(body);
+			}
+		}
+		log.error("Unhandled request failure method={} path={}", request.getMethod(), request.getRequestURI(), ex);
 		return error(HttpStatus.INTERNAL_SERVER_ERROR, "An unexpected error occurred", request);
 	}
 

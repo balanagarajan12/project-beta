@@ -10,6 +10,7 @@ import com.etp.migration.run.InvalidStateTransitionException;
 import com.etp.migration.run.MigrationRunTransitions;
 import com.etp.migration.run.RunCompletionEvaluator;
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.LockModeType;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
@@ -139,8 +140,36 @@ public class MigrationBatchQueueService {
 	}
 
 	@Transactional
+	public MigrationBatch renewLease(BatchClaim claim) {
+		MigrationBatch batch = lockBatch(claim.batchId());
+		requireOwner(batch, claim);
+		Instant now = Instant.now();
+		batch.setLeaseUntil(now.plus(workerIdentity.leaseDuration()));
+		batch.setUpdatedAt(now);
+		return batch;
+	}
+
+	@Transactional
+	public MigrationBatch beginProcessing(BatchClaim claim) {
+		requireOwner(lockBatch(claim.batchId()), claim);
+		return beginProcessing(claim.batchId());
+	}
+
+	@Transactional
+	public MigrationBatch completeBatch(BatchClaim claim, BatchCompletionCounters counters, boolean withErrors) {
+		requireOwner(lockBatch(claim.batchId()), claim);
+		return completeBatch(claim.batchId(), counters, withErrors);
+	}
+
+	@Transactional
+	public MigrationBatch failBatch(BatchClaim claim, String errorMessage) {
+		requireOwner(lockBatch(claim.batchId()), claim);
+		return failBatch(claim.batchId(), errorMessage);
+	}
+
+	@Transactional
 	public MigrationBatch beginProcessing(Long batchId) {
-		MigrationBatch batch = requireBatch(batchId);
+		MigrationBatch batch = lockBatch(batchId);
 		MigrationBatchTransitions.require(batch.getStatus(), MigrationBatchStatus.PROCESSING);
 		Instant now = Instant.now();
 		batch.setStatus(MigrationBatchStatus.PROCESSING);
@@ -154,7 +183,8 @@ public class MigrationBatchQueueService {
 
 	@Transactional
 	public MigrationBatch completeBatch(Long batchId, BatchCompletionCounters counters, boolean withErrors) {
-		MigrationBatch batch = requireBatch(batchId);
+		MigrationBatch batch = lockBatch(batchId);
+		lockRun(batch.getMigrationRun());
 		MigrationBatchStatus target = withErrors
 				? MigrationBatchStatus.COMPLETED_WITH_ERRORS
 				: MigrationBatchStatus.COMPLETED;
@@ -177,7 +207,8 @@ public class MigrationBatchQueueService {
 
 	@Transactional
 	public MigrationBatch failBatch(Long batchId, String errorMessage) {
-		MigrationBatch batch = requireBatch(batchId);
+		MigrationBatch batch = lockBatch(batchId);
+		lockRun(batch.getMigrationRun());
 		if (batch.getStatus() == MigrationBatchStatus.CLAIMED) {
 			MigrationBatchTransitions.require(MigrationBatchStatus.CLAIMED, MigrationBatchStatus.PROCESSING);
 			batch.setStatus(MigrationBatchStatus.PROCESSING);
@@ -246,6 +277,31 @@ public class MigrationBatchQueueService {
 	private MigrationBatch requireBatch(Long batchId) {
 		return migrationBatchRepository.findById(batchId)
 				.orElseThrow(() -> new MigrationBatchNotFoundException(batchId));
+	}
+
+	/**
+	 * Locks the batch row before the run row. Claims take the same order, which avoids lock-order deadlocks.
+	 */
+	private MigrationBatch lockBatch(Long batchId) {
+		MigrationBatch batch = requireBatch(batchId);
+		entityManager.flush();
+		entityManager.refresh(batch, LockModeType.PESSIMISTIC_WRITE);
+		return batch;
+	}
+
+	private void lockRun(MigrationRun run) {
+		entityManager.flush();
+		entityManager.refresh(run, LockModeType.PESSIMISTIC_WRITE);
+	}
+
+	private static void requireOwner(MigrationBatch batch, BatchClaim claim) {
+		boolean active = batch.getStatus() == MigrationBatchStatus.CLAIMED
+				|| batch.getStatus() == MigrationBatchStatus.PROCESSING;
+		boolean owner = claim.workerId().equals(batch.getWorkerId())
+				&& claim.attempt() == nvl(batch.getAttemptCount());
+		if (!active || !owner) {
+			throw new BatchClaimLostException(claim.batchId());
+		}
 	}
 
 	private void applyCounters(MigrationBatch batch, BatchCompletionCounters counters) {

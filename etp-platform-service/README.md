@@ -1,6 +1,6 @@
 # ETP Platform Service
 
-Backend foundation for the Enterprise Technology Platform (ETP). This service is the primary developer entry point for the ETP platform backend.
+Backend foundation for the Enterprise Technology Platform (ETP). This file is the runbook for this module. The conceptual overview and the other platform documents live only at the repository root: [ETP_CONCEPTUAL.md](../ETP_CONCEPTUAL.md), [ETP-ARCHITECTURE.md](../ETP-ARCHITECTURE.md), [ETP_APIS.md](../ETP_APIS.md), [ETP_HOW_TO.md](../ETP_HOW_TO.md).
 
 ## ETP Purpose
 
@@ -57,16 +57,16 @@ Implemented in this repository today:
 - **Docker Compose** — local PostgreSQL
 - **Common API/error model** — `ApiResponse`, `ErrorResponse`, `GlobalExceptionHandler`
 - **Platform metadata persistence** — customer, application, capability, and audit entity model
-- **Spring Security** baseline with OAuth2 Resource Server dependency (platform JWT enforcement deferred; ETP IAM integrates with Keycloak separately in `capabilities/etp-iam/`)
+- **Spring Security** baseline. The OAuth2 resource-server dependency is on the classpath. `SecurityConfig` does not enable JWT validation; health, platform info, OpenAPI, and `/api/v1/capabilities/**` are `permitAll`
 - **OpenAPI/Swagger** via SpringDoc
 
 **Not implemented yet** (planned capabilities and services): Capability Registry **write** UI (create, edit, lifecycle), Application Registry APIs, Application Initializer, Application Composer, platform-service JWT enforcement, workflow, Kafka, RabbitMQ, SFTP, AI, generated applications, operating model / entitlement **services** (V14 tables exist as schema foundation only).
 
-**Partially implemented in `etp-core-ui`:** ETP Core Shell, read-only Capability Registry list and details (GET APIs only). See [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md) § ETP Core UI.
+**Partially implemented in `etp-core-ui`:** ETP Core Shell, read-only Capability Registry list and details (GET APIs only). See [ETP_APIS.md](../ETP_APIS.md).
 
 **Implemented elsewhere:** ETP IAM capability (`capabilities/etp-iam/`) with Keycloak for Core UI Phase 1 login. Customer UI and business application authentication are **not** implemented.
 
-**Implemented in platform-service:** Capability Registry **REST APIs** and lifecycle (see [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md)).
+**Implemented in platform-service:** Capability Registry **REST APIs** and lifecycle (see [ETP_APIS.md](../ETP_APIS.md) and [ETP_CAPABILITY_DEFINITION.md](../ETP_CAPABILITY_DEFINITION.md)).
 
 ## Technology Stack
 
@@ -184,11 +184,11 @@ Platform metadata tables must not become a store for business-domain data.
 13. Secrets must never be embedded in generated artifacts.
 14. Validation is required before future application composition/publication.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for engineering detail and [docs/API_CONVENTIONS.md](docs/API_CONVENTIONS.md) for API conventions.
+See [ETP-ARCHITECTURE.md](../ETP-ARCHITECTURE.md) and [ETP_APIS.md](../ETP_APIS.md).
 
 ## Phase Boundary
 
-**Implemented:** Capability Registry REST APIs and lifecycle (see [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md)).
+**Implemented:** Capability Registry REST APIs and lifecycle (see [ETP_APIS.md](../ETP_APIS.md)).
 
 Intentionally **not** implemented:
 
@@ -268,7 +268,7 @@ Lifecycle summary:
 - **Capability:** `DRAFT` → `ACTIVE` → `DEPRECATED` → `RETIRED`
 - **Version:** `DRAFT` → `VALIDATED` → `ACTIVE` → `DEPRECATED` → `RETIRED`; `DRAFT`/`VALIDATED` → `CANCELLED` (terminal; only if never ACTIVE)
 
-See [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md) for full lifecycle rules and examples.
+See [ETP_CAPABILITY_DEFINITION.md](../ETP_CAPABILITY_DEFINITION.md) for lifecycle rules.
 
 ### Example responses
 
@@ -309,8 +309,9 @@ PostgreSQL integration tests use Testcontainers when Docker is available. `Capab
 
 ## Further Reading
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — platform architecture, IAM as capability, repository structure, authentication phases
-- [docs/ETP_CORE_UI_DESIGN_GUIDELINES.md](docs/ETP_CORE_UI_DESIGN_GUIDELINES.md) — ETP Core UI design system, three UI layers, authentication phases (Step 1A–1C)
-- [docs/CAPABILITY_REGISTRY.md](docs/CAPABILITY_REGISTRY.md) — Capability Registry V1 APIs and lifecycle
-- [CAPABILITY_DEFINITION_OF_DONE.md](CAPABILITY_DEFINITION_OF_DONE.md) — capability delivery standard
-- [docs/API_CONVENTIONS.md](docs/API_CONVENTIONS.md) — REST API conventions
+- [ETP-ARCHITECTURE.md](../ETP-ARCHITECTURE.md) — architecture and current implementation
+- [ETP_ENGINEERING_MODEL.md](../ETP_ENGINEERING_MODEL.md) — stack, mental models, components, guardrails
+- [ETP_APIS.md](../ETP_APIS.md) — HTTP APIs
+- [ETP_CAPABILITY_DEFINITION.md](../ETP_CAPABILITY_DEFINITION.md) — capability model and definition of done
+- [ETP_HOW_TO.md](../ETP_HOW_TO.md) — local configuration
+- [docs/ETP_CORE_UI_DESIGN_GUIDELINES.md](docs/ETP_CORE_UI_DESIGN_GUIDELINES.md) — ETP Core UI design system

@@ -1,9 +1,14 @@
 package com.etp.migration.processing;
 
+import com.etp.migration.batch.BatchClaim;
+import com.etp.migration.batch.BatchClaimLostException;
 import com.etp.migration.batch.BatchCompletionCounters;
+import com.etp.migration.batch.MigrationBatchNotFoundException;
 import com.etp.migration.batch.MigrationBatchQueueService;
 import com.etp.migration.config.WorkerIdentity;
 import com.etp.migration.connector.source.MigrationSourceConnector;
+import com.etp.migration.connector.source.SftpSourceException;
+import com.etp.migration.connector.source.sftp.SftpCsvSourceConfiguration;
 import com.etp.migration.connector.source.MigrationSourceConnectorRegistry;
 import com.etp.migration.connector.source.SourceBatch;
 import com.etp.migration.connector.source.csv.CsvFileSourceConfiguration;
@@ -12,6 +17,7 @@ import com.etp.migration.connector.target.LoadableTargetRecord;
 import com.etp.migration.connector.target.MigrationTargetConnector;
 import com.etp.migration.connector.target.MigrationTargetConnectorRegistry;
 import com.etp.migration.connector.target.MigrationTargetContext;
+import com.etp.migration.connector.target.TargetFailureDiagnostics;
 import com.etp.migration.connector.target.TargetInfrastructureException;
 import com.etp.migration.connector.target.TargetLoadModeNotSupportedException;
 import com.etp.migration.connector.target.TargetLoadResult;
@@ -113,11 +119,13 @@ public class MigrationBatchWorker {
 		if (claimed == null || claimed.isEmpty()) {
 			return Optional.empty();
 		}
-		return Optional.of(processClaimedBatch(claimed.get().getId()));
+		return Optional.of(processClaimedBatch(BatchClaim.of(claimed.get()), runIdOf(claimed.get())));
 	}
 
 	public ProcessBatchResponse processBatch(Long batchId) {
-		return processClaimedBatch(batchId);
+		MigrationBatch batch = migrationBatchRepository.findById(batchId)
+				.orElseThrow(() -> new MigrationBatchNotFoundException(batchId));
+		return processClaimedBatch(BatchClaim.of(batch), runIdOf(batch));
 	}
 
 	public ProcessBatchResponse processNextBatchOrConflict(UUID runId) {
@@ -125,29 +133,59 @@ public class MigrationBatchWorker {
 				"No eligible batch is available for migration run " + runId));
 	}
 
-	private ProcessBatchResponse processClaimedBatch(Long batchId) {
-		transactionTemplate.executeWithoutResult(status -> migrationBatchQueueService.beginProcessing(batchId));
+	private ProcessBatchResponse processClaimedBatch(BatchClaim claim, UUID runId) {
+		Long batchId = claim.batchId();
+		try (MigrationLogContext ignored = MigrationLogContext.forBatch(runId, batchId)) {
+			try {
+				transactionTemplate.executeWithoutResult(status -> migrationBatchQueueService.beginProcessing(claim));
+				log.info("Batch processing started runId={} batchId={} attempt={} workerId={}",
+						runId, batchId, claim.attempt(), claim.workerId());
+				ProcessBatchResponse response = processOwnedBatch(claim, runId);
+				log.info("Batch processing finished runId={} batchId={} status={} processedCount={} successCount={} failedCount={}",
+						runId, batchId, response.status(), response.totalRecords(), response.successRecords(),
+						response.failedRecords());
+				return response;
+			} catch (BatchClaimLostException ex) {
+				log.warn("Batch claim lost runId={} batchId={} attempt={} workerId={}; the batch belongs to a newer "
+						+ "claim and this attempt's result was discarded", runId, batchId, claim.attempt(), claim.workerId());
+				throw ex;
+			}
+		}
+	}
+
+	private ProcessBatchResponse processOwnedBatch(BatchClaim claim, UUID runId) {
+		Long batchId = claim.batchId();
 		try {
 			BatchWork work = transactionTemplate.execute(status -> loadWork(batchId));
 			verifyChecksum(work);
+			transactionTemplate.executeWithoutResult(status -> migrationBatchQueueService.renewLease(claim));
 			BatchCompletionCounters counters = processRecords(work);
 			boolean withErrors = counters.validationFailureCount() > 0
 					|| counters.rejectedCount() > 0
 					|| counters.loadFailureCount() > 0
 					|| counters.enrichmentFailureCount() > 0;
 			return transactionTemplate.execute(status -> toResponse(
-					migrationBatchQueueService.completeBatch(batchId, counters, withErrors),
+					migrationBatchQueueService.completeBatch(claim, counters, withErrors),
 					counters));
+		} catch (BatchClaimLostException ex) {
+			throw ex;
 		} catch (RuntimeException ex) {
 			String code = errorCode(ex);
+			// Exception messages can quote source values, so only the code and type are logged; the message is
+			// stored on the batch and in migration_error.
+			log.warn("Batch processing failed runId={} batchId={} attempt={} errorCode={} exceptionType={} cause={}",
+					runId, batchId, claim.attempt(), code, ex.getClass().getName(), TargetFailureDiagnostics.describe(ex));
 			String message = truncate(ex.getMessage() == null ? "Batch processing failed" : ex.getMessage());
 			return transactionTemplate.execute(status -> {
-				persistBatchError(batchId, code, message);
-				return toResponse(
-						migrationBatchQueueService.failBatch(batchId, message),
-						new BatchCompletionCounters(0, 0, 0, 0, 0, 0, 0));
+				MigrationBatch failed = migrationBatchQueueService.failBatch(claim, message);
+				persistBatchError(batchId, code, message, ex);
+				return toResponse(failed, new BatchCompletionCounters(0, 0, 0, 0, 0, 0, 0));
 			});
 		}
+	}
+
+	private static UUID runIdOf(MigrationBatch batch) {
+		return batch.getMigrationRun() == null ? null : batch.getMigrationRun().getId();
 	}
 
 	private BatchWork loadWork(Long batchId) {
@@ -203,6 +241,17 @@ public class MigrationBatchWorker {
 		if (work.expectedChecksum() == null || work.expectedChecksum().isBlank()) {
 			return;
 		}
+		if (SftpCsvSourceConfiguration.declaresSftp(work.source().getConfiguration())) {
+			String actual = connectorRegistry.require(work.source())
+					.inspect(work.source(), work.run())
+					.checksum();
+			if (!work.expectedChecksum().equalsIgnoreCase(actual)) {
+				throw new BatchProcessingException(
+						MigrationErrorCodes.SOURCE_CHANGED,
+						"Source artifact checksum does not match the run snapshot");
+			}
+			return;
+		}
 		CsvFileSourceConfiguration config = CsvFileSourceConfiguration.from(work.source().getConfiguration());
 		String actual = checksumCalculator.sha256(config.provider(), config.objectKey());
 		if (!work.expectedChecksum().equalsIgnoreCase(actual)) {
@@ -252,6 +301,8 @@ public class MigrationBatchWorker {
 			}
 		} catch (BatchProcessingException ex) {
 			throw ex;
+		} catch (SftpSourceException ex) {
+			throw new BatchProcessingException(ex.errorCode(), ex.getMessage(), ex);
 		} catch (RuntimeException ex) {
 			throw new BatchProcessingException(MigrationErrorCodes.SOURCE_READ_ERROR, "Unable to read source batch", ex);
 		}
@@ -380,16 +431,24 @@ public class MigrationBatchWorker {
 		return pending;
 	}
 
-	private void persistBatchError(Long batchId, String code, String message) {
+	private void persistBatchError(Long batchId, String code, String message, RuntimeException failure) {
 		MigrationBatch batch = migrationBatchRepository.findById(batchId).orElseThrow();
+		MigrationRun run = batch.getMigrationRun();
+		String targetEntity = run.getMigrationDefinition() == null
+				? null
+				: run.getMigrationDefinition().getTargetEntity();
+		MigrationStage stage = code != null && code.startsWith("MIGRATION_TARGET")
+				? MigrationStage.LOAD
+				: MigrationStage.EXTRACT;
 		MigrationError entity = new MigrationError();
-		entity.setMigrationRun(batch.getMigrationRun());
+		entity.setMigrationRun(run);
 		entity.setMigrationBatch(batch);
-		entity.setStage(code != null && code.startsWith("MIGRATION_TARGET") ? MigrationStage.LOAD : MigrationStage.EXTRACT);
+		entity.setStage(stage);
 		entity.setErrorCode(code);
 		entity.setErrorType("BATCH_FAILED");
 		entity.setErrorMessage(truncate(message));
-		entity.setErrorDetails(new HashMap<>());
+		entity.setErrorDetails(MigrationErrorDetails.collect(
+				failure, code, stage.name(), run.getId(), batchId, targetEntity, true));
 		entity.setRetryable(true);
 		migrationErrorRepository.save(entity);
 	}
@@ -397,6 +456,9 @@ public class MigrationBatchWorker {
 	private static String errorCode(RuntimeException ex) {
 		if (ex instanceof BatchProcessingException processing) {
 			return processing.errorCode();
+		}
+		if (ex instanceof SftpSourceException sftp) {
+			return sftp.errorCode();
 		}
 		if (ex instanceof TargetInfrastructureException target) {
 			return target.errorCode();

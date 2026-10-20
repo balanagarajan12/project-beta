@@ -113,4 +113,4 @@ Future UAM flows (application-owned logic):
 - [ETP Redis capability](../redis/) — cache infrastructure (`etp.redis`)
 - [ETP PostgreSQL capability](../postgresql/) — datastore (`etp.postgresql`)
 - [ETP IAM capability](../etp-iam/) — reference onboarding (`etp.iam` ACTIVE)
-- [Capability Registry](../../etp-platform-service/docs/CAPABILITY_REGISTRY.md)
+- [ETP APIs](../../ETP_APIS.md)

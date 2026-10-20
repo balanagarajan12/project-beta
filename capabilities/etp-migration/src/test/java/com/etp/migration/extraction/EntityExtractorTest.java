@@ -41,6 +41,30 @@ class EntityExtractorTest {
 	}
 
 	@Test
+	void nullSourceKeyUsesTheSourceRecordAndDoesNotReadANullField() {
+		EntityDefinition parent = new EntityDefinition("GeographicAddress", "geographic_address", "address_id", "location_id");
+		EntityDefinition child = new EntityDefinition("GeographicSubAddress", "geographic_sub_address", null, "id");
+		MigrationMappingRule childRule = rule(1, "sub_unit_number", "sub_unit_number");
+		childRule.setEntityName("GeographicSubAddress");
+		MigrationMappingRule parentRule = rule(2, "address_id", "location_id");
+		parentRule.setEntityName("GeographicAddress");
+		EntityRelationshipMapping mapping = new EntityRelationshipMapping(
+				"GeographicAddress",
+				List.of(parent, child),
+				List.of());
+		SourceRecord row = row(7, Map.of("address_id", "A-1", "sub_unit_number", "12", "null", "ignored"));
+
+		EntityExtraction extraction = extractor.extract(row, mapping, List.of(parentRule, childRule));
+
+		assertThat(extraction.failures()).isEmpty();
+		assertThat(identity(extraction, "GeographicAddress")).isEqualTo("A-1");
+		assertThat(identity(extraction, "GeographicSubAddress")).isEqualTo("7");
+		assertThat(record(extraction, "GeographicSubAddress").fields())
+				.containsEntry("sub_unit_number", "12")
+				.doesNotContainKey("null");
+	}
+
+	@Test
 	void extractsOneConfiguredEntity() {
 		Model model = single("Invoice", "invoice_id", "invoice_number");
 		SourceRecord row = row(4, Map.of("invoice_id", "I-9", "invoice_number", " 100 "));

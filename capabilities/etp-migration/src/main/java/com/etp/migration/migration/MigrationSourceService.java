@@ -1,6 +1,8 @@
 package com.etp.migration.migration;
 
+import com.etp.migration.config.AuditActor;
 import com.etp.migration.connector.source.csv.SourceLayoutConfiguration;
+import com.etp.migration.connector.source.sftp.SftpCsvSourceConfiguration;
 import com.etp.migration.entity.MigrationDefinition;
 import com.etp.migration.entity.MigrationSource;
 import com.etp.migration.migration.dto.CreateMigrationSourceRequest;
@@ -32,9 +34,13 @@ public class MigrationSourceService {
 	public MigrationSourceResponse create(UUID migrationId, CreateMigrationSourceRequest request) {
 		MigrationDefinition definition = migrationDefinitionRepository.findById(migrationId)
 				.orElseThrow(() -> new MigrationDefinitionNotFoundException(migrationId));
-		SourceLayoutConfiguration.validateDeclared(
-				request.configuration(),
-				definition.getMapping() == null ? null : definition.getMapping().getConfiguration());
+		if (SftpCsvSourceConfiguration.declaresSftp(request.configuration())) {
+			SftpCsvSourceConfiguration.from(request.configuration());
+		} else {
+			SourceLayoutConfiguration.validateDeclared(
+					request.configuration(),
+					definition.getMapping() == null ? null : definition.getMapping().getConfiguration());
+		}
 
 		Instant now = Instant.now();
 		MigrationSource source = new MigrationSource();
@@ -46,8 +52,9 @@ public class MigrationSourceService {
 		source.setEnabled(request.enabled() == null || request.enabled());
 		source.setCreatedAt(now);
 		source.setUpdatedAt(now);
-		source.setCreatedBy(ControlPlaneSupport.SYSTEM_ACTOR);
-		source.setUpdatedBy(ControlPlaneSupport.SYSTEM_ACTOR);
+		String actor = AuditActor.current();
+		source.setCreatedBy(actor);
+		source.setUpdatedBy(actor);
 		return toResponse(migrationSourceRepository.save(source));
 	}
 

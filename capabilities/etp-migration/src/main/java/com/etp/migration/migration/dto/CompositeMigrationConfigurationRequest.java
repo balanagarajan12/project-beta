@@ -2,6 +2,8 @@ package com.etp.migration.migration.dto;
 
 import com.etp.migration.transformation.dto.CreateMappingRuleRequest;
 import com.etp.migration.transformation.dto.CreateMigrationMappingRequest;
+import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
@@ -12,11 +14,15 @@ public record CompositeMigrationConfigurationRequest(
 		@Valid
 		CompositeDefinitionRequest definition,
 
-		@NotNull(message = "mapping is required")
+		@JsonProperty("mapping")
+		@JsonAlias("entityMappings")
+		@NotNull(message = "entityMappings is required")
 		@Valid
 		CreateMigrationMappingRequest mapping,
 
-		@NotEmpty(message = "rules are required")
+		@JsonProperty("rules")
+		@JsonAlias("fieldMappings")
+		@NotEmpty(message = "fieldMappings are required")
 		List<@Valid CreateMappingRuleRequest> rules,
 
 		@NotNull(message = "source is required")

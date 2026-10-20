@@ -5,10 +5,8 @@ import com.etp.migration.extraction.EntityExtractionFailure;
 import com.etp.migration.extraction.EntityExtractor;
 import com.etp.migration.extraction.EntityRecord;
 import com.etp.migration.identity.EntityIdentity;
-import com.etp.migration.connector.source.csv.CsvSourceConnector;
 import com.etp.migration.connector.source.csv.MultiFileEntitySource;
 import com.etp.migration.connector.source.csv.SourceLayout;
-import com.etp.migration.connector.source.csv.CsvFileSourceConfiguration;
 import com.etp.migration.entity.MigrationMappingRule;
 import com.etp.migration.mapping.EntityRelationshipMapping;
 import com.etp.migration.processing.SourceRecord;
@@ -21,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Stream;
+import java.util.function.Supplier;
 
 /**
  * Opens configured CSV files as entity records. Each call reads the files again.
@@ -28,25 +27,22 @@ import java.util.stream.Stream;
  */
 public final class EntityCsvRecords {
 
-	private final CsvSourceConnector csvSourceConnector;
 	private final EntityExtractor entityExtractor;
 	private final MultiFileEntitySource multiFileEntitySource;
 	private final SourceLayout layout;
-	private final CsvFileSourceConfiguration singleFile;
+	private final Supplier<Stream<SourceRecord>> singleFile;
 	private final EntityRelationshipMapping mapping;
 	private final List<MigrationMappingRule> rules;
 	private final List<EntityExtractionFailure> extractionFailures = new ArrayList<>();
 	private final Set<String> seenFailures = new HashSet<>();
 
 	EntityCsvRecords(
-			CsvSourceConnector csvSourceConnector,
 			EntityExtractor entityExtractor,
 			MultiFileEntitySource multiFileEntitySource,
 			SourceLayout layout,
-			CsvFileSourceConfiguration singleFile,
+			Supplier<Stream<SourceRecord>> singleFile,
 			EntityRelationshipMapping mapping,
 			List<MigrationMappingRule> rules) {
-		this.csvSourceConnector = csvSourceConnector;
 		this.entityExtractor = entityExtractor;
 		this.multiFileEntitySource = multiFileEntitySource;
 		this.layout = layout;
@@ -99,7 +95,7 @@ public final class EntityCsvRecords {
 
 	private Stream<SourceRecord> readSingleFile() {
 		com.etp.migration.processing.PipelineTiming.increment("sourceFileOpens");
-		return csvSourceConnector.readAll(singleFile);
+		return singleFile.get();
 	}
 
 	private Stream<EntityRecord> extractAll(SourceRecord source) {

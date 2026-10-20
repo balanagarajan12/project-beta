@@ -150,6 +150,7 @@ class MigrationActivationIntegrationTest {
 								  "version": "1.0.0",
 								  "sourceType": "FILE_SYSTEM",
 								  "targetType": "POSTGRESQL",
+								  "targetEntity": "address",
 								  "mappingId": "%s",
 								  "configuration": {
 								    "target": {
@@ -230,6 +231,7 @@ class MigrationActivationIntegrationTest {
 								  "version": "1.0.0",
 								  "sourceType": "FILE",
 								  "targetType": "POSTGRESQL",
+								  "targetEntity": "address",
 								  "mappingId": "%s",
 								  "configuration": {
 								    "target": {

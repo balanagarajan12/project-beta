@@ -15,6 +15,26 @@ public interface MigrationRunRepository extends JpaRepository<MigrationRun, UUID
 
 	Page<MigrationRun> findByMigrationDefinition_Id(UUID migrationDefinitionId, Pageable pageable);
 
+	@Query(
+			value = """
+					select r from MigrationRun r
+					order by coalesce(r.startedAt, r.createdAt) desc, r.id desc
+					""",
+			countQuery = "select count(r) from MigrationRun r")
+	Page<MigrationRun> findAllByRecency(Pageable pageable);
+
+	@Query(
+			value = """
+					select r from MigrationRun r
+					where r.migrationDefinition.id = :definitionId
+					order by coalesce(r.startedAt, r.createdAt) desc, r.id desc
+					""",
+			countQuery = """
+					select count(r) from MigrationRun r
+					where r.migrationDefinition.id = :definitionId
+					""")
+	Page<MigrationRun> findByDefinitionRecency(@Param("definitionId") UUID definitionId, Pageable pageable);
+
 	Optional<MigrationRun> findByMigrationDefinition_IdAndIdempotencyKey(
 			UUID migrationDefinitionId,
 			String idempotencyKey);

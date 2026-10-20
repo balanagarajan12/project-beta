@@ -131,15 +131,33 @@ class EntityRelationshipConfigurationTest {
 	}
 
 	@Test
-	void rejectsMissingSourceKey() {
+	void acceptsNullSourceKeyWithoutTreatingItAsAFieldName() {
+		Map<String, Object> entity = new LinkedHashMap<>();
+		entity.put("entity", "Product");
+		entity.put("targetEntity", "product");
+		entity.put("sourceKey", null);
+		entity.put("targetKey", "sku");
+
+		EntityRelationshipMapping mapping = EntityRelationshipConfiguration.parse(
+				model("Product", List.of(entity), List.of()));
+
+		assertThat(mapping.entities()).singleElement()
+				.extracting(EntityDefinition::name, EntityDefinition::sourceKey, EntityDefinition::targetKey)
+				.containsExactly("Product", null, "sku");
+	}
+
+	@Test
+	void literalNullSourceKeyIsNotAFieldName() {
 		Map<String, Object> entity = new LinkedHashMap<>();
 		entity.put("name", "Product");
 		entity.put("targetEntity", "product");
+		entity.put("sourceKey", "null");
 		entity.put("targetKey", "id");
 
-		assertInvalid(
-				model("Product", List.of(entity), List.of()),
-				"Entity 'Product' requires sourceKey");
+		EntityRelationshipMapping mapping = EntityRelationshipConfiguration.parse(
+				model("Product", List.of(entity), List.of()));
+
+		assertThat(mapping.entities().get(0).sourceKey()).isNull();
 	}
 
 	@Test
@@ -186,6 +204,45 @@ class EntityRelationshipConfigurationTest {
 						List.of(entity("Customer", "customer", "customer_id", "id")),
 						List.of(relationship("Customer", "Customer", "ONE_TO_MANY", "customer_id", "customer_id"))),
 				"Relationship from 'Customer' to 'Customer' is a self-reference, which is not supported");
+	}
+
+	@Test
+	void acceptsTargetForeignKeyWithoutSourceKeys() {
+		Map<String, Object> relationship = new LinkedHashMap<>();
+		relationship.put("parent", "GeographicAddress");
+		relationship.put("child", "GeographicSubAddress");
+		relationship.put("cardinality", "ONE_TO_MANY");
+		relationship.put("targetForeignKey", Map.of("column", "address_id", "referencesColumn", "location_id"));
+
+		EntityRelationshipMapping mapping = EntityRelationshipConfiguration.parse(model(
+				"GeographicAddress",
+				List.of(
+						entity("GeographicAddress", "geographic_address", "address_id", "location_id"),
+						entity("GeographicSubAddress", "geographic_sub_address", null, "id")),
+				List.of(relationship)));
+
+		RelationshipDefinition parsed = mapping.relationships().get(0);
+		assertThat(parsed.keys()).isEmpty();
+		assertThat(parsed.targetForeignKey()).isEqualTo(new TargetForeignKey("address_id", "location_id"));
+		assertThat(mapping.entities().get(1).sourceKey()).isNull();
+	}
+
+	@Test
+	void rejectsTargetForeignKeyThatDoesNotMatchTheDatabaseShape() {
+		Map<String, Object> relationship = new LinkedHashMap<>();
+		relationship.put("parent", "GeographicAddress");
+		relationship.put("child", "GeographicSubAddress");
+		relationship.put("cardinality", "ONE_TO_MANY");
+		relationship.put("targetForeignKey", Map.of("column", "address id", "referencesColumn", "location_id"));
+
+		assertInvalid(
+				model(
+						"GeographicAddress",
+						List.of(
+								entity("GeographicAddress", "geographic_address", "address_id", "location_id"),
+								entity("GeographicSubAddress", "geographic_sub_address", "sub_id", "id")),
+						List.of(relationship)),
+				"Relationship from 'GeographicAddress' to 'GeographicSubAddress' targetForeignKey.column is invalid");
 	}
 
 	@Test

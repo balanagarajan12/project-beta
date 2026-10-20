@@ -9,6 +9,7 @@ import com.etp.migration.mapping.EntityRelationshipMapping;
 import com.etp.migration.mapping.RelationshipCardinality;
 import com.etp.migration.mapping.RelationshipDefinition;
 import com.etp.migration.mapping.RelationshipKey;
+import com.etp.migration.mapping.TargetForeignKey;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -301,6 +302,33 @@ class RelationshipResolverTest {
 		assertThat(resolution.indexedParentCount()).isEqualTo(1);
 		assertThat(resolution.relationships()).hasSize(200);
 		assertThat(resolution.failures()).isEmpty();
+	}
+
+	@Test
+	void sameSourceRecordLinksEntitiesWhenOnlyTheTargetForeignKeyIsConfigured() {
+		RelationshipDefinition relationship = new RelationshipDefinition(
+				"GeographicAddress",
+				"GeographicSubAddress",
+				RelationshipCardinality.ONE_TO_MANY,
+				List.of(),
+				new TargetForeignKey("address_id", "location_id"));
+		EntityRelationshipMapping mapping = mapping(
+				"GeographicAddress",
+				List.of(
+						entity("GeographicAddress", "address_id"),
+						new EntityDefinition("GeographicSubAddress", "geographic_sub_address", null, "id")),
+				List.of(relationship));
+
+		RelationshipResolution resolution = resolver.resolve(
+				mapping,
+				records(Map.of(
+						"GeographicAddress", List.of(row("GeographicAddress", 4, "A-1", "address_id", "A-1")),
+						"GeographicSubAddress", List.of(row("GeographicSubAddress", 4, "4", "sub_unit_number", "12")))));
+
+		assertThat(resolution.failures()).isEmpty();
+		assertThat(resolution.relationships())
+				.extracting(ResolvedRelationship::parentIdentity, ResolvedRelationship::childIdentity)
+				.containsExactly(tuple("A-1", "4"));
 	}
 
 	private static EntityRelationshipMapping chain(

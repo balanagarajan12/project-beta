@@ -4,6 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.etp.migration.connector.source.csv.CsvSourceConnector;
+import com.etp.migration.connector.source.sftp.SftpConnectionRequest;
+import com.etp.migration.connector.source.sftp.SftpCsvSourceConnector;
+import com.etp.migration.connector.source.sftp.SftpRemoteClient;
+import com.etp.migration.connector.source.sftp.SftpRemoteFile;
 import com.etp.migration.connector.storage.DefaultArtifactStorage;
 import com.etp.migration.connector.storage.FileSystemArtifactStorage;
 import com.etp.migration.connector.storage.UnsupportedStorageProviderException;
@@ -29,7 +33,10 @@ class MigrationSourceConnectorRegistryTest {
 		FileSystemArtifactStorage fileSystem = new FileSystemArtifactStorage(tempDir);
 		fileSystem.initializeRoot();
 		csvConnector = new CsvSourceConnector(new DefaultArtifactStorage(fileSystem));
-		registry = new MigrationSourceConnectorRegistry(List.of(csvConnector));
+		SftpCsvSourceConnector sftpConnector = new SftpCsvSourceConnector(new UnusedSftpClient(), ref -> {
+			throw new IllegalStateException("unused");
+		});
+		registry = new MigrationSourceConnectorRegistry(List.of(csvConnector, sftpConnector));
 	}
 
 	@Test
@@ -61,6 +68,25 @@ class MigrationSourceConnectorRegistryTest {
 	}
 
 	@Test
+	void sftpCsvConfigurationResolvesSftpConnector() {
+		SftpCsvSourceConnector sftpConnector = new SftpCsvSourceConnector(new UnusedSftpClient(), ref -> {
+			throw new IllegalStateException("unused");
+		});
+		MigrationSourceConnectorRegistry sftpRegistry = new MigrationSourceConnectorRegistry(List.of(csvConnector, sftpConnector));
+		MigrationSource source = source("FILE", Map.of(
+				"provider", "SFTP",
+				"fileFormat", "CSV",
+				"host", "sftp.example",
+				"port", 22,
+				"credentialRef", "local-sftp",
+				"remotePath", "/inbound/rows.csv",
+				"hasHeader", true,
+				"delimiter", ","));
+
+		assertThat(sftpRegistry.require(source)).isSameAs(sftpConnector);
+	}
+
+	@Test
 	void unsupportedProviderIsRejected() {
 		assertThatThrownBy(() -> registry.require(source("FILE_SYSTEM", Map.of(
 				"provider", "S3",
@@ -83,5 +109,12 @@ class MigrationSourceConnectorRegistryTest {
 		configuration.put("fileFormat", "CSV");
 		configuration.put("hasHeader", true);
 		return configuration;
+	}
+
+	private static final class UnusedSftpClient implements SftpRemoteClient {
+		@Override
+		public SftpRemoteFile open(SftpConnectionRequest request) {
+			throw new IllegalStateException("unused");
+		}
 	}
 }

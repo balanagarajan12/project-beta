@@ -1,5 +1,7 @@
 package com.etp.migration.promotion;
 
+import com.etp.migration.connector.target.TargetFailureDiagnostics;
+import com.etp.migration.connector.target.TargetInfrastructureException;
 import com.etp.migration.connector.target.postgresql.PostgreSqlPromotionWriter;
 import com.etp.migration.connector.target.postgresql.PromotionTargetConfiguration;
 import com.etp.migration.connector.target.uam.UamStagingPromotion;
@@ -28,6 +30,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -36,6 +40,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 @Service
 public class PromotionExecutionService {
 
+	private static final Logger log = LoggerFactory.getLogger(PromotionExecutionService.class);
 	private static final String POSTGRESQL_TARGET = "POSTGRESQL";
 	private static final EnumSet<MigrationRunStatus> EXECUTION_COMPLETE = EnumSet.of(
 			MigrationRunStatus.COMPLETED,
@@ -197,7 +202,16 @@ public class PromotionExecutionService {
 		batch.setFailedRecordCount(eligible.eligibleRecordCount());
 		batch.setCompletedAt(now);
 		batch.setErrorCode(MigrationErrorCodes.PROMOTION_BATCH_FAILED);
-		batch.setErrorMessage(truncate(ex.getMessage() == null ? "Promotion batch failed" : ex.getMessage()));
+		batch.setErrorMessage(truncate(failureMessage(ex)));
+		log.warn("Promotion batch failed promotionBatchId={} migrationBatchId={} cause={}",
+				eligible.promotionBatchId(), eligible.migrationBatchId(), TargetFailureDiagnostics.describe(ex));
+	}
+
+	private static String failureMessage(RuntimeException ex) {
+		if (!(ex instanceof TargetInfrastructureException) && TargetFailureDiagnostics.involvesDatabase(ex)) {
+			return "Promotion batch failed: " + TargetFailureDiagnostics.describe(ex);
+		}
+		return ex.getMessage() == null ? "Promotion batch failed" : ex.getMessage();
 	}
 
 	private ExecutePromotionResponse complete(UUID promotionId) {

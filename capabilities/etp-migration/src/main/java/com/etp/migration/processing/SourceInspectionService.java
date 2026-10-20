@@ -58,6 +58,7 @@ public class SourceInspectionService {
 	private final MigrationMappingRuleRepository mappingRuleRepository;
 	private final EntityRelationshipPlanSource entityPlanSource;
 	private final EntityFailureRecorder entityFailureRecorder;
+	private final PreparationFailureRecorder preparationFailureRecorder;
 
 	@PersistenceContext
 	private EntityManager entityManager;
@@ -72,7 +73,8 @@ public class SourceInspectionService {
 			BatchPlanner batchPlanner,
 			MigrationMappingRuleRepository mappingRuleRepository,
 			EntityRelationshipPlanSource entityPlanSource,
-			EntityFailureRecorder entityFailureRecorder) {
+			EntityFailureRecorder entityFailureRecorder,
+			PreparationFailureRecorder preparationFailureRecorder) {
 		this.transactionTemplate = new TransactionTemplate(transactionManager);
 		this.migrationRunRepository = migrationRunRepository;
 		this.migrationSourceRepository = migrationSourceRepository;
@@ -83,9 +85,19 @@ public class SourceInspectionService {
 		this.mappingRuleRepository = mappingRuleRepository;
 		this.entityPlanSource = entityPlanSource;
 		this.entityFailureRecorder = entityFailureRecorder;
+		this.preparationFailureRecorder = preparationFailureRecorder;
 	}
 
 	public PrepareMigrationRunResponse prepare(UUID runId) {
+		try {
+			return inspectAndPlan(runId);
+		} catch (RuntimeException ex) {
+			preparationFailureRecorder.record(runId, ex);
+			throw ex;
+		}
+	}
+
+	private PrepareMigrationRunResponse inspectAndPlan(UUID runId) {
 		InspectionWork work = transactionTemplate.execute(status -> beginPreparation(runId));
 		if (work.alreadyPrepared()) {
 			return work.existing();

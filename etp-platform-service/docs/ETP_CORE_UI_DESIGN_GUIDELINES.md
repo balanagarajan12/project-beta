@@ -6,7 +6,7 @@
 |---|---|
 | **Status** | V1 — documentation only (no React implementation in this deliverable) |
 | **Scope** | ETP Core UI design system, shell, and interaction patterns |
-| **Related docs** | [CAPABILITY_REGISTRY.md](CAPABILITY_REGISTRY.md), [ARCHITECTURE.md](../ARCHITECTURE.md), [API_CONVENTIONS.md](API_CONVENTIONS.md) |
+| **Related docs** | [ETP_APIS.md](../../ETP_APIS.md), [ETP-ARCHITECTURE.md](../../ETP-ARCHITECTURE.md), [ETP_CAPABILITY_DEFINITION.md](../../ETP_CAPABILITY_DEFINITION.md) |
 
 ---
 
@@ -148,7 +148,7 @@ The Capability Registry UI treats **Overview, Versions, Contract, Implementation
 
 **Do not** create separate top-level navigation for Versions, Contracts, Implementations, or Dependencies.
 
-Align terminology and lifecycle behavior with [CAPABILITY_REGISTRY.md](CAPABILITY_REGISTRY.md).
+Align terminology and lifecycle behavior with [ETP_CAPABILITY_DEFINITION.md](../../ETP_CAPABILITY_DEFINITION.md).
 
 ### Capabilities are not business applications
 
@@ -215,7 +215,7 @@ ETP Core UI → POST /api/v1/auth/login → ETP IAM → Keycloak → AuthSession
 
 **Phase 2+ (not implemented):** SSO, OIDC Authorization Code + PKCE, cross-application SSO, Customer UI authentication, business application authentication, MFA, external IdPs, federation, passwordless auth, token refresh, advanced production session management.
 
-See [ARCHITECTURE.md](../ARCHITECTURE.md) §8 and [capabilities/etp-iam/README.md](../../capabilities/etp-iam/README.md).
+See [ETP-ARCHITECTURE.md](../../ETP-ARCHITECTURE.md) (Current implementation) and [capabilities/etp-iam/README.md](../../capabilities/etp-iam/README.md).
 
 ### Capability reusability
 
@@ -710,7 +710,7 @@ Example for `INVALID_LIFECYCLE_TRANSITION`:
 
 > **Cannot activate this version.** Only validated versions can be activated, and the version must be higher than the current active version. Review version status or create a newer version.
 
-Map API codes from [CAPABILITY_REGISTRY.md](CAPABILITY_REGISTRY.md) to user-facing copy in a central dictionary.
+Map API codes from [ETP_APIS.md](../../ETP_APIS.md) to user-facing copy in a central dictionary.
 
 ---
 
@@ -825,7 +825,7 @@ The shell reference shows expanded items (Version Management, Contracts, etc.) �
 
 ## 24. Capability Registry UI
 
-First major Core UI feature after shell. Backend: [CAPABILITY_REGISTRY.md](CAPABILITY_REGISTRY.md).
+First major Core UI feature after shell. Backend: [ETP_APIS.md](../../ETP_APIS.md).
 
 ### Capability list
 
@@ -1010,11 +1010,11 @@ Cross-cutting foundations referenced by components:
 
 ## Document maintenance
 
-When backend lifecycle or API behavior changes, update **§25** and [CAPABILITY_REGISTRY.md](CAPABILITY_REGISTRY.md) together.
+When backend lifecycle or API behavior changes, update **§25** and [ETP_APIS.md](../../ETP_APIS.md) together.
 
 When navigation scope changes, update **§23** and **§4** together.
 
-When ETP Core UI authentication scope or IAM integration approach changes, update **§3** (Authentication implementation phases) and [ARCHITECTURE.md](../ARCHITECTURE.md) §8 together.
+When ETP Core UI authentication scope or IAM integration approach changes, update **§3** (Authentication implementation phases) and [ETP-ARCHITECTURE.md](../../ETP-ARCHITECTURE.md) together.
 
 **Version:** 1.1  
 **Last updated:** 2026-08-18

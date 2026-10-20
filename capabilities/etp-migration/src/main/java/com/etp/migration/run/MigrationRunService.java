@@ -3,27 +3,42 @@ package com.etp.migration.run;
 import com.etp.migration.batch.BatchPlanner;
 import com.etp.migration.batch.MigrationBatchQueueService;
 import com.etp.migration.batch.MigrationBatchTransitions;
+import com.etp.migration.config.AuditActor;
 import com.etp.migration.entity.MigrationBatch;
 import com.etp.migration.entity.MigrationBatchStatus;
 import com.etp.migration.entity.MigrationConfigStatus;
 import com.etp.migration.entity.MigrationDefinition;
 import com.etp.migration.entity.MigrationRun;
 import com.etp.migration.entity.MigrationRunStatus;
+import com.etp.migration.entity.PromotionStatus;
 import com.etp.migration.migration.ControlPlaneSupport;
 import com.etp.migration.migration.MigrationDefinitionNotFoundException;
 import com.etp.migration.migration.dto.PagedResponse;
+import com.etp.migration.processing.MigrationErrorCodes;
+import com.etp.migration.processing.MigrationLogContext;
+import com.etp.migration.promotion.PromotionException;
 import com.etp.migration.batch.dto.MigrationBatchResponse;
+import com.etp.migration.entity.MigrationError;
 import com.etp.migration.repository.MigrationBatchRepository;
 import com.etp.migration.repository.MigrationDefinitionRepository;
+import com.etp.migration.repository.MigrationErrorRepository;
+import com.etp.migration.repository.MigrationPromotionRepository;
 import com.etp.migration.repository.MigrationRunRepository;
+import com.etp.migration.run.dto.MigrationErrorResponse;
 import com.etp.migration.run.dto.CreateMigrationRunRequest;
 import com.etp.migration.run.dto.MigrationRunResponse;
 import java.time.Instant;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,19 +46,29 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class MigrationRunService {
 
+	private static final Logger log = LoggerFactory.getLogger(MigrationRunService.class);
+	private static final Set<PromotionStatus> PROMOTION_BLOCKS_RETRY =
+			EnumSet.of(PromotionStatus.PROMOTING, PromotionStatus.PROMOTED);
+
 	private final MigrationDefinitionRepository migrationDefinitionRepository;
 	private final MigrationRunRepository migrationRunRepository;
 	private final MigrationBatchRepository migrationBatchRepository;
+	private final MigrationPromotionRepository promotionRepository;
+	private final MigrationErrorRepository migrationErrorRepository;
 	private final BatchPlanner batchPlanner;
 
 	public MigrationRunService(
 			MigrationDefinitionRepository migrationDefinitionRepository,
 			MigrationRunRepository migrationRunRepository,
 			MigrationBatchRepository migrationBatchRepository,
+			MigrationPromotionRepository promotionRepository,
+			MigrationErrorRepository migrationErrorRepository,
 			BatchPlanner batchPlanner) {
 		this.migrationDefinitionRepository = migrationDefinitionRepository;
 		this.migrationRunRepository = migrationRunRepository;
 		this.migrationBatchRepository = migrationBatchRepository;
+		this.promotionRepository = promotionRepository;
+		this.migrationErrorRepository = migrationErrorRepository;
 		this.batchPlanner = batchPlanner;
 	}
 
@@ -72,7 +97,7 @@ public class MigrationRunService {
 		run.setRunNumber(nextNumber);
 		run.setIdempotencyKey(idempotencyKey);
 		run.setStatus(MigrationRunStatus.CREATED);
-		run.setRequestedBy(ControlPlaneSupport.SYSTEM_ACTOR);
+		run.setRequestedBy(AuditActor.current());
 		run.setSourceSnapshot(ControlPlaneSupport.copyConfiguration(
 				request == null ? null : request.sourceSnapshot()));
 		run.setConfigurationSnapshot(ControlPlaneSupport.copyConfiguration(
@@ -97,6 +122,21 @@ public class MigrationRunService {
 	}
 
 	@Transactional(readOnly = true)
+	public PagedResponse<MigrationRunResponse> listAll(int page, int size, UUID migrationDefinitionId) {
+		Pageable pageable = ControlPlaneSupport.pageRequest(page, size, Sort.unsorted());
+		Page<MigrationRun> result;
+		if (migrationDefinitionId == null) {
+			result = migrationRunRepository.findAllByRecency(pageable);
+		} else {
+			if (!migrationDefinitionRepository.existsById(migrationDefinitionId)) {
+				throw new MigrationDefinitionNotFoundException(migrationDefinitionId);
+			}
+			result = migrationRunRepository.findByDefinitionRecency(migrationDefinitionId, pageable);
+		}
+		return toRunPage(result);
+	}
+
+	@Transactional(readOnly = true)
 	public PagedResponse<MigrationRunResponse> list(UUID migrationId, int page, int size) {
 		if (!migrationDefinitionRepository.existsById(migrationId)) {
 			throw new MigrationDefinitionNotFoundException(migrationId);
@@ -104,12 +144,7 @@ public class MigrationRunService {
 		Page<MigrationRun> result = migrationRunRepository.findByMigrationDefinition_Id(
 				migrationId,
 				ControlPlaneSupport.pageRequest(page, size, Sort.by(Sort.Direction.DESC, "createdAt")));
-		return new PagedResponse<>(
-				result.getContent().stream().map(this::toRunResponse).toList(),
-				result.getNumber(),
-				result.getSize(),
-				result.getTotalElements(),
-				result.getTotalPages());
+		return toRunPage(result);
 	}
 
 	@Transactional(readOnly = true)
@@ -119,7 +154,7 @@ public class MigrationRunService {
 
 	@Transactional
 	public MigrationRunResponse cancel(UUID runId) {
-		MigrationRun run = requireRun(runId);
+		MigrationRun run = requireRunForUpdate(runId);
 		MigrationRunTransitions.require(run.getStatus(), MigrationRunStatus.CANCEL_REQUESTED);
 		Instant now = Instant.now();
 		run.setStatus(MigrationRunStatus.CANCEL_REQUESTED);
@@ -145,11 +180,18 @@ public class MigrationRunService {
 
 	@Transactional
 	public MigrationRunResponse retry(UUID runId) {
-		MigrationRun run = requireRun(runId);
+		MigrationRun run = requireRunForUpdate(runId);
 		if (run.getStatus() != MigrationRunStatus.FAILED
 				&& run.getStatus() != MigrationRunStatus.COMPLETED_WITH_ERRORS) {
 			throw new InvalidStateTransitionException(
 					"Cannot retry migration run in status " + run.getStatus());
+		}
+		// Promotion prepare and begin lock the same run row, so this check cannot interleave with a promotion start.
+		if (promotionRepository.existsByMigrationRun_IdAndStatusIn(runId, PROMOTION_BLOCKS_RETRY)) {
+			throw new PromotionException(
+					409,
+					MigrationErrorCodes.RETRY_BLOCKED_BY_PROMOTION,
+					"Cannot retry migration run " + runId + " because its promotion is in progress or completed");
 		}
 		List<MigrationBatch> retryable = migrationBatchRepository.findByMigrationRun_IdAndStatusIn(
 				runId,
@@ -159,6 +201,10 @@ public class MigrationRunService {
 		}
 		Instant now = Instant.now();
 		for (MigrationBatch batch : retryable) {
+			try (MigrationLogContext ignored = MigrationLogContext.forBatch(runId, batch.getId())) {
+				log.info("Batch marked for retry runId={} batchId={} previousStatus={} attempt={}",
+						runId, batch.getId(), batch.getStatus(), batch.getAttemptCount());
+			}
 			MigrationBatchQueueService.reverseRunContribution(run, batch, now);
 			MigrationBatchTransitions.require(batch.getStatus(), MigrationBatchStatus.RETRY_PENDING);
 			batch.setStatus(MigrationBatchStatus.RETRY_PENDING);
@@ -178,6 +224,10 @@ public class MigrationRunService {
 		}
 		run.setCompletedAt(null);
 		MigrationRunTransitions.require(run.getStatus(), MigrationRunStatus.QUEUED);
+		try (MigrationLogContext ignored = MigrationLogContext.forRun(runId)) {
+			log.info("Migration run marked for retry runId={} previousStatus={} retryBatchCount={}",
+					runId, run.getStatus(), retryable.size());
+		}
 		run.setStatus(MigrationRunStatus.QUEUED);
 		run.setUpdatedAt(now);
 		return toRunResponse(run);
@@ -221,6 +271,20 @@ public class MigrationRunService {
 	}
 
 	@Transactional(readOnly = true)
+	public PagedResponse<MigrationErrorResponse> listErrors(UUID runId, int page, int size) {
+		requireRun(runId);
+		Page<MigrationError> result = migrationErrorRepository.findByMigrationRun_Id(
+				runId,
+				ControlPlaneSupport.pageRequest(page, size, Sort.by(Sort.Direction.ASC, "createdAt", "id")));
+		return new PagedResponse<>(
+				result.getContent().stream().map(this::toErrorResponse).toList(),
+				result.getNumber(),
+				result.getSize(),
+				result.getTotalElements(),
+				result.getTotalPages());
+	}
+
+	@Transactional(readOnly = true)
 	public PagedResponse<MigrationBatchResponse> listBatches(UUID runId, int page, int size) {
 		requireRun(runId);
 		Page<MigrationBatch> result = migrationBatchRepository.findByMigrationRun_Id(
@@ -239,11 +303,25 @@ public class MigrationRunService {
 				.orElseThrow(() -> new MigrationRunNotFoundException(runId));
 	}
 
+	private MigrationRun requireRunForUpdate(UUID runId) {
+		return migrationRunRepository.findByIdForUpdate(runId)
+				.orElseThrow(() -> new MigrationRunNotFoundException(runId));
+	}
+
 	private String normalizeIdempotencyKey(String idempotencyKey) {
 		if (idempotencyKey == null || idempotencyKey.isBlank()) {
 			return null;
 		}
 		return idempotencyKey.trim();
+	}
+
+	private PagedResponse<MigrationRunResponse> toRunPage(Page<MigrationRun> result) {
+		return new PagedResponse<>(
+				result.getContent().stream().map(this::toRunResponse).toList(),
+				result.getNumber(),
+				result.getSize(),
+				result.getTotalElements(),
+				result.getTotalPages());
 	}
 
 	private MigrationRunResponse toRunResponse(MigrationRun run) {
@@ -269,6 +347,25 @@ public class MigrationRunService {
 				run.getRequestedBy(),
 				run.getCreatedAt(),
 				run.getUpdatedAt());
+	}
+
+	private MigrationErrorResponse toErrorResponse(MigrationError error) {
+		Map<String, Object> details = error.getErrorDetails() == null
+				? Map.of()
+				: new HashMap<>(error.getErrorDetails());
+		return new MigrationErrorResponse(
+				error.getId(),
+				error.getMigrationRun().getId(),
+				error.getMigrationBatch() == null ? null : error.getMigrationBatch().getId(),
+				error.getStage() == null ? null : error.getStage().name(),
+				error.getErrorCode(),
+				error.getErrorType(),
+				error.getSourceRecordKey(),
+				error.getFieldName(),
+				error.getErrorMessage(),
+				details,
+				error.isRetryable(),
+				error.getCreatedAt());
 	}
 
 	private MigrationBatchResponse toBatchResponse(MigrationBatch batch) {

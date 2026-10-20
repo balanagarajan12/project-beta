@@ -47,7 +47,7 @@ ETP IAM → Core UI (AuthSession) → /dashboard
 
 **Not implemented (Phase 2+):** SSO, OIDC Authorization Code + PKCE, cross-application SSO, Customer UI auth, business application auth, MFA, federation, token refresh, Keycloak end-session logout.
 
-Detail: [ETP Architecture §8](../etp-platform-service/ARCHITECTURE.md), [ETP IAM README](../capabilities/etp-iam/README.md).
+Detail: [ETP Architecture](../ETP-ARCHITECTURE.md), [ETP IAM README](../capabilities/etp-iam/README.md).
 
 ## Project structure
 
@@ -122,7 +122,7 @@ Routes (authenticated, inside Core Shell unless noted):
 | `/capabilities/:capabilityId` | Protected | Capability details (read-only) |
 | `/customers`, `/applications`, `/platform/*`, `/audit` | Protected | Shell placeholders |
 
-For end-to-end login and Capability Registry data, ETP IAM, Keycloak, and `etp-platform-service` must be running. See [capabilities/etp-iam/README.md](../capabilities/etp-iam/README.md) and [Capability Registry](../etp-platform-service/docs/CAPABILITY_REGISTRY.md).
+For end-to-end login and Capability Registry data, ETP IAM, Keycloak, and `etp-platform-service` must be running. See [capabilities/etp-iam/README.md](../capabilities/etp-iam/README.md) and [ETP APIs](../ETP_APIS.md).
 
 ## Build
 
@@ -153,14 +153,14 @@ npm run lint
   - List (`/capabilities`) — client-side search, category/status filters, pagination, row selection, refresh, navigation to details
   - Details (`/capabilities/:capabilityId`) — version selector; Overview, Contract, and Dependencies tabs driven by selected version; loading, not-found, and error states
 
-**API usage today:** `GET /api/v1/capabilities` and `GET /api/v1/capabilities/{id}` only. POST and PATCH are **not** called from Core UI.
+**API usage today:** `GET /api/v1/capabilities` and `GET /api/v1/capabilities/{id}` only. POST, PUT, and PATCH are **not** called. Create, edit, lifecycle, and delete controls are rendered and disabled. The API client sends the IAM Bearer token; `etp-platform-service` does not validate it.
 
-**Not included yet:** Capability create/edit/lifecycle UI, Customer UI, business application UIs, SSO, OIDC/PKCE, server-side list pagination/filtering in UI, bulk/export workflows, implementation metadata display on details.
+**Not included yet:** Live create/edit/lifecycle workflows, implementation metadata on the details page, Customer UI, business application UIs, SSO, OIDC/PKCE, server-side list pagination, bulk/export workflows. Dashboard, customers, applications, configuration, version, and audit are shell placeholders.
 
 ## Related documentation
 
 - [ETP Core UI Design Guidelines](../etp-platform-service/docs/ETP_CORE_UI_DESIGN_GUIDELINES.md) — design system, authentication phases
-- [ETP Architecture](../etp-platform-service/ARCHITECTURE.md) — IAM as capability, Phase 1 auth, deployment principle
+- [ETP Architecture](../ETP-ARCHITECTURE.md) — IAM as capability, Phase 1 auth, deployment principle
 - [ETP IAM README](../capabilities/etp-iam/README.md) — IAM APIs, identity model, Keycloak setup
-- [Capability Registry API](../etp-platform-service/docs/CAPABILITY_REGISTRY.md)
-- [API Conventions](../etp-platform-service/docs/API_CONVENTIONS.md)
+- [ETP APIs](../ETP_APIS.md)
+- [How to configure locally](../ETP_HOW_TO.md)

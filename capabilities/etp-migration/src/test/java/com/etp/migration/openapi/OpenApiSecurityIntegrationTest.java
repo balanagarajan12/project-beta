@@ -59,6 +59,7 @@ class OpenApiSecurityIntegrationTest {
 		assertOperationRequiresBearerJwt(openApiJson, "/api/v1/migrations", "post");
 		assertOperationRequiresBearerJwt(openApiJson, "/api/v1/migration-configurations", "post");
 		assertOperationRequiresBearerJwt(openApiJson, "/api/v1/migration-runs/{runId}/promotion", "get");
+		assertOperationRequiresBearerJwt(openApiJson, "/api/v1/migration-runs/{runId}/errors", "get");
 	}
 
 	private static void assertOperationRequiresBearerJwt(String openApiJson, String path, String method) {

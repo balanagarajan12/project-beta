@@ -363,6 +363,40 @@ class MigrationDefinitionServiceTest {
 	}
 
 	@Test
+	void activateAcceptsFlatDefinitionWithoutTargetEntity() {
+		UUID id = UUID.randomUUID();
+		MigrationDefinition definition = readyDraft(id);
+		definition.setTargetEntity(null);
+		when(migrationDefinitionRepository.findByIdForUpdate(id)).thenReturn(Optional.of(definition));
+		stubReadyGraph(definition);
+
+		assertThat(service.activate(id).status()).isEqualTo(MigrationConfigStatus.ACTIVE);
+	}
+
+	@Test
+	void activateRejectsEntityRelationshipTargetEntityThatNamesAnotherEntity() {
+		UUID id = UUID.randomUUID();
+		MigrationDefinition definition = readyDraft(id);
+		Map<String, Object> configuration = new LinkedHashMap<>(singleEntityModel("Invoice"));
+		Map<String, Object> line = new LinkedHashMap<>();
+		line.put("name", "Line");
+		line.put("targetEntity", "invoice_line");
+		line.put("sourceKey", "line_id");
+		line.put("targetKey", "id");
+		List<Object> entities = new java.util.ArrayList<>((List<?>) configuration.get("entities"));
+		entities.add(line);
+		configuration.put("entities", entities);
+		definition.getMapping().setConfiguration(configuration);
+		definition.setTargetEntity("Line");
+		when(migrationDefinitionRepository.findByIdForUpdate(id)).thenReturn(Optional.of(definition));
+
+		assertThatThrownBy(() -> service.activate(id))
+				.isInstanceOf(IllegalArgumentException.class)
+				.hasMessage("definition.targetEntity 'Line' contradicts root entity 'Invoice'");
+		assertThat(definition.getStatus()).isEqualTo(MigrationConfigStatus.DRAFT);
+	}
+
+	@Test
 	void activateRejectsRuleEntityThatIsNotConfigured() {
 		UUID id = UUID.randomUUID();
 		MigrationDefinition definition = readyDraft(id);

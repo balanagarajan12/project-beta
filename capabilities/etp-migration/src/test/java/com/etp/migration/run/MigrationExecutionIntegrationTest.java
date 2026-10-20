@@ -20,6 +20,7 @@ import java.sql.Connection;
 import java.sql.Statement;
 import java.util.UUID;
 import javax.sql.DataSource;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -58,6 +59,8 @@ class MigrationExecutionIntegrationTest {
 	private MigrationPromotionRepository promotionRepository;
 	@Autowired
 	private TransactionTemplate transactionTemplate;
+	@Autowired
+	private JdbcTemplate jdbcTemplate;
 	@Autowired
 	@Qualifier(PostgreSqlTargetClientConfig.DATASOURCE_BEAN)
 	private DataSource targetDataSource;
@@ -156,7 +159,7 @@ class MigrationExecutionIntegrationTest {
 	}
 
 	@Test
-	void executeZeroRecordsLeavesRunQueued() throws Exception {
+	void executeZeroRecordsCompletesTheRun() throws Exception {
 		String definitionId = activeDefinition(10_000, "BULK", true);
 		createSource(definitionId, "addr1,city\n");
 
@@ -165,8 +168,82 @@ class MigrationExecutionIntegrationTest {
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{}"))
 				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.status").value("COMPLETED"))
+				.andExpect(jsonPath("$.totalBatches").value(0))
+				.andExpect(jsonPath("$.failedBatches").value(0));
+	}
+
+	@Test
+	void executeWithoutASourceFailsTheRunAndRecordsPreparationDetails() throws Exception {
+		String definitionId = activeDefinition(10_000, "BULK", true);
+
+		mockMvc.perform(post("/api/v1/migrations/{id}/execute", definitionId)
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{}"))
+				.andExpect(status().isNotFound());
+
+		MvcResult listed = mockMvc.perform(get("/api/v1/migrations/{id}/runs", definitionId).with(jwt()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.content[0].status").value("FAILED"))
+				.andReturn();
+		String runId = read(listed, "$.content[0].id");
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}/errors", runId).with(jwt()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.content[0].errorCode").value("MIGRATION_PREPARATION_FAILED"))
+				.andExpect(jsonPath("$.content[0].errorDetails.phase").value("PREPARE"))
+				.andExpect(jsonPath("$.content[0].errorDetails.exceptionType").exists())
+				.andExpect(jsonPath("$.content[0].errorDetails.sqlState").doesNotExist())
+				.andExpect(jsonPath("$.content[0].retryable").value(false));
+	}
+
+	@Test
+	void missingStagingTablePersistsCopyDiagnosticsAndLeavesAnUnstartedRunQueued() throws Exception {
+		String definitionId = activeDefinition(10_000, "BULK", true, "missing_load");
+		MvcResult created = mockMvc.perform(post("/api/v1/migrations/{id}/runs", definitionId)
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{}"))
+				.andExpect(status().isCreated())
 				.andExpect(jsonPath("$.status").value("QUEUED"))
-				.andExpect(jsonPath("$.totalBatches").value(0));
+				.andReturn();
+		String queuedRunId = read(created, "$.id");
+		createSource(definitionId, """
+				addr1,city
+				123 Main St,Salem
+				""");
+
+		MvcResult executed = mockMvc.perform(post("/api/v1/migrations/{id}/execute", definitionId)
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{}"))
+				.andExpect(status().isCreated())
+				.andExpect(jsonPath("$.status").value("FAILED"))
+				.andExpect(jsonPath("$.failedBatches").value(1))
+				.andReturn();
+		String failedRunId = read(executed, "$.id");
+		assertThat(failedRunId).isNotEqualTo(queuedRunId);
+
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", queuedRunId).with(jwt()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("QUEUED"));
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}/errors", failedRunId).with(jwt()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.content[0].errorCode").value("MIGRATION_TARGET_COPY_FAILED"))
+				.andExpect(jsonPath("$.content[0].errorMessage").value("Target load failed"))
+				.andExpect(jsonPath("$.content[0].errorDetails.sqlState").value("42P01"))
+				.andExpect(jsonPath("$.content[0].errorDetails.relation").value("migration_staging.missing_load"))
+				.andExpect(jsonPath("$.content[0].errorDetails.phase").value("LOAD"))
+				.andExpect(jsonPath("$.content[0].errorDetails.runId").value(failedRunId))
+				.andExpect(jsonPath("$.content[0].errorDetails.targetEntity").value("address"))
+				.andExpect(jsonPath("$.content[0].errorDetails.retryable").value(true))
+				.andExpect(jsonPath("$.content[0].retryable").value(true));
+
+		String stored = transactionTemplate.execute(status -> jdbcTemplate.queryForObject(
+				"select error_details::text from migration_error where migration_run_id = cast(? as uuid)",
+				String.class,
+				failedRunId));
+		assertThat(stored).contains("42P01", "migration_staging.missing_load").doesNotContain("{}");
 	}
 
 	@Test
@@ -222,8 +299,12 @@ class MigrationExecutionIntegrationTest {
 	}
 
 	private String activeDefinition(int batchSize, String loadMode, boolean activate) throws Exception {
+		return activeDefinition(batchSize, loadMode, activate, "address_load");
+	}
+
+	private String activeDefinition(int batchSize, String loadMode, boolean activate, String stagingTable) throws Exception {
 		String mappingId = createMapping();
-		return createDefinition(mappingId, batchSize, loadMode, activate);
+		return createDefinition(mappingId, batchSize, loadMode, activate, stagingTable);
 	}
 
 	private String createMapping() throws Exception {
@@ -259,6 +340,11 @@ class MigrationExecutionIntegrationTest {
 	}
 
 	private String createDefinition(String mappingId, int batchSize, String loadMode, boolean activate) throws Exception {
+		return createDefinition(mappingId, batchSize, loadMode, activate, "address_load");
+	}
+
+	private String createDefinition(
+			String mappingId, int batchSize, String loadMode, boolean activate, String stagingTable) throws Exception {
 		MvcResult created = mockMvc.perform(post("/api/v1/migrations")
 						.with(jwt())
 						.contentType(MediaType.APPLICATION_JSON)
@@ -275,12 +361,12 @@ class MigrationExecutionIntegrationTest {
 								  "configuration": {
 								    "target": {
 								      "schema": "migration_staging",
-								      "stagingTable": "address_load",
+								      "stagingTable": "%s",
 								      "mergeStrategy": "NONE"
 								    }
 								  }
 								}
-								""".formatted(System.nanoTime(), loadMode, batchSize, mappingId)))
+								""".formatted(System.nanoTime(), loadMode, batchSize, mappingId, stagingTable)))
 				.andExpect(status().isCreated())
 				.andReturn();
 		String id = read(created, "$.id");

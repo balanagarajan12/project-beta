@@ -1,5 +1,6 @@
 package com.etp.migration.migration;
 
+import com.etp.migration.config.AuditActor;
 import com.etp.migration.connector.source.InvalidSourceConfigurationException;
 import com.etp.migration.connector.source.MigrationSourceConnectorRegistry;
 import com.etp.migration.connector.source.csv.SourceLayout;
@@ -7,6 +8,7 @@ import com.etp.migration.connector.source.csv.SourceLayoutConfiguration;
 import com.etp.migration.connector.source.csv.SourceLayoutType;
 import com.etp.migration.connector.target.postgresql.PromotionTargetConfiguration;
 import com.etp.migration.connector.target.uam.UamStagingPromotion;
+import com.etp.migration.execution.ExecutionMode;
 import com.etp.migration.mapping.EntityRelationshipConfiguration;
 import com.etp.migration.entity.LoadMode;
 import com.etp.migration.entity.MigrationConfigStatus;
@@ -43,8 +45,6 @@ public class MigrationDefinitionService {
 	static final int DEFAULT_PAGE = 0;
 	static final int DEFAULT_PAGE_SIZE = 20;
 	static final int MAX_PAGE_SIZE = 100;
-	static final String SYSTEM_ACTOR = "system";
-
 	private final MigrationDefinitionRepository migrationDefinitionRepository;
 	private final MigrationMappingRepository migrationMappingRepository;
 	private final MigrationMappingRuleRepository migrationMappingRuleRepository;
@@ -94,8 +94,9 @@ public class MigrationDefinitionService {
 				"configuration");
 		definition.setCreatedAt(now);
 		definition.setUpdatedAt(now);
-		definition.setCreatedBy(SYSTEM_ACTOR);
-		definition.setUpdatedBy(SYSTEM_ACTOR);
+		String actor = AuditActor.current();
+		definition.setCreatedBy(actor);
+		definition.setUpdatedBy(actor);
 
 		try {
 			return toResponse(migrationDefinitionRepository.save(definition));
@@ -133,7 +134,7 @@ public class MigrationDefinitionService {
 		Instant now = Instant.now();
 		definition.setStatus(MigrationConfigStatus.ACTIVE);
 		definition.setUpdatedAt(now);
-		definition.setUpdatedBy(SYSTEM_ACTOR);
+		definition.setUpdatedBy(AuditActor.current());
 		return toResponse(definition);
 	}
 
@@ -176,6 +177,9 @@ public class MigrationDefinitionService {
 		if (mapping == null) {
 			throw new IllegalArgumentException("Migration mapping is not configured");
 		}
+		if (ExecutionMode.entityRelationship(mapping.getConfiguration())) {
+			MigrationModelRules.validate(definition.getTargetEntity(), mapping.getConfiguration());
+		}
 		EntityRelationshipConfiguration.validate(mapping.getConfiguration());
 		if (migrationMappingRuleRepository
 				.findByMapping_IdAndEnabledTrueOrderBySequenceNoAsc(mapping.getId())
@@ -214,7 +218,7 @@ public class MigrationDefinitionService {
 		for (MigrationDefinition other : others) {
 			other.setStatus(MigrationConfigStatus.INACTIVE);
 			other.setUpdatedAt(now);
-			other.setUpdatedBy(SYSTEM_ACTOR);
+			other.setUpdatedBy(AuditActor.current());
 		}
 	}
 

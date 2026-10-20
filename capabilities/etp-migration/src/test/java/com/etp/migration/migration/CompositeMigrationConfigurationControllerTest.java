@@ -1,5 +1,6 @@
 package com.etp.migration.migration;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
@@ -18,10 +19,12 @@ import com.etp.migration.migration.dto.MigrationDefinitionResponse;
 import com.etp.migration.migration.dto.MigrationSourceResponse;
 import com.etp.migration.transformation.dto.MigrationMappingResponse;
 import com.etp.migration.transformation.dto.MigrationMappingRuleResponse;
+import com.etp.migration.migration.dto.CompositeMigrationConfigurationRequest;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.mockito.ArgumentCaptor;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -65,6 +68,80 @@ class CompositeMigrationConfigurationControllerTest {
 				.andExpect(jsonPath("$.mapping.id").value(MAPPING_ID.toString()))
 				.andExpect(jsonPath("$.rules[0].sequenceNo").value(1))
 				.andExpect(jsonPath("$.sources[0].id").value(SOURCE_ID.toString()));
+	}
+
+	@Test
+	void acceptsEntityMappingsAndFieldMappingsWithoutConfigurationObjects() throws Exception {
+		ArgumentCaptor<CompositeMigrationConfigurationRequest> captor =
+				ArgumentCaptor.forClass(CompositeMigrationConfigurationRequest.class);
+		when(compositeMigrationConfigurationService.create(captor.capture())).thenReturn(sampleResponse());
+
+		mockMvc.perform(post("/api/v1/migration-configurations")
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("""
+								{
+								  "definition": {
+								    "name": "addr-import",
+								    "version": "1.0.0",
+								    "sourceType": "FILE",
+								    "targetType": "POSTGRESQL",
+								    "batchSize": 100,
+								    "loadMode": "BULK",
+								    "configuration": {
+								      "target": {
+								        "stagingSchema": "migration_staging",
+								        "stagingTable": "stage_table"
+								      }
+								    }
+								  },
+								  "entityMappings": {
+								    "name": "addr-map",
+								    "version": "1.0.0",
+								    "sourceType": "FILE",
+								    "targetType": "POSTGRESQL",
+								    "description": "addresses",
+								    "configuration": {
+								      "modelType": "ENTITY_RELATIONSHIP",
+								      "rootEntity": "GeographicAddress"
+								    }
+								  },
+								  "fieldMappings": [
+								    {
+								      "sequenceNo": 2,
+								      "entity": "GeographicSubAddress",
+								      "sourceField": "unit",
+								      "targetField": "sub_unit_number",
+								      "transformationType": "DIRECT",
+								      "mandatory": false,
+								      "enabled": true
+								    },
+								    {
+								      "sequenceNo": 1,
+								      "entity": "GeographicAddress",
+								      "sourceField": "street",
+								      "targetField": "street_name",
+								      "transformationType": "TRIM",
+								      "mandatory": true,
+								      "enabled": true
+								    }
+								  ],
+								  "source": {
+								    "name": "csv",
+								    "sourceType": "FILE",
+								    "configuration": {"provider": "FILE_SYSTEM"}
+								  }
+								}
+								"""))
+				.andExpect(status().isCreated());
+
+		CompositeMigrationConfigurationRequest request = captor.getValue();
+		assertThat(request.definition().targetEntity()).isNull();
+		assertThat(request.mapping().name()).isEqualTo("addr-map");
+		assertThat(request.mapping().description()).isEqualTo("addresses");
+		assertThat(request.rules()).extracting(rule -> rule.sequenceNo()).containsExactly(2, 1);
+		assertThat(request.rules()).allSatisfy(rule -> assertThat(rule.configuration()).isNull());
+		assertThat(request.rules().get(1).entity()).isEqualTo("GeographicAddress");
 	}
 
 	@Test

@@ -31,6 +31,9 @@ public class CompositeMigrationConfigurationService {
 
 	@Transactional
 	public CompositeMigrationConfigurationResponse create(CompositeMigrationConfigurationRequest request) {
+		MigrationModelRules.validate(
+				request.definition().targetEntity(),
+				request.mapping().configuration());
 		MigrationMappingResponse mapping = migrationMappingService.create(request.mapping());
 		List<MigrationMappingRuleResponse> rules = new ArrayList<>();
 		for (CreateMappingRuleRequest rule : request.rules()) {

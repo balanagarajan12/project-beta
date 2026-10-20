@@ -2,7 +2,9 @@
 
 Repository snapshot of **actual** database schemas, JPA entities, and persistence usage in `etp-foundation`. This document does not describe target/future ETP architecture except where explicitly contrasted in §10.
 
-**Last derived from:** Flyway migrations V1–V14 (`etp-platform-service`), JPA entities and repositories in `etp-platform-service`, `schema_updated.sql` and IAM entities in `capabilities/etp-iam`.
+**Canonical data-model document** for this repository. It lives only at the repository root.
+
+**Last derived from:** Flyway V1–V14 in `etp-platform-service`, Flyway V1–V2 in `capabilities/etp-iam`, Flyway V1–V5 in `capabilities/etp-migration`, and the export service (no database).
 
 ---
 
@@ -29,8 +31,24 @@ Repository snapshot of **actual** database schemas, JPA entities, and persistenc
 | **Database technology** | PostgreSQL 17 |
 | **Database name** | `etp_iam` (see `capabilities/etp-iam/docker-compose.yml`, `application.properties`) |
 | **Schema name(s)** | Default `public` |
-| **Migration framework** | **None** — schema applied manually from `capabilities/etp-iam/schema_updated.sql` |
-| **JPA** | Hibernate `ddl-auto=validate` against manually applied schema |
+| **Migration framework** | Flyway, `classpath:db/migration` (`spring.flyway.enabled=true` in `application.properties`) |
+| **Migration files** | `V1__iam_schema.sql` (tables), `V2__platform_dev_seed.sql` (seed). `schema_updated.sql` in the IAM module is not what Spring applies on startup |
+| **JPA** | Hibernate `ddl-auto=validate` — schema is owned by Flyway |
+
+## ETP Migration (`capabilities/etp-migration`)
+
+| Aspect | Current state |
+|--------|----------------|
+| **Database technology** | PostgreSQL 17 |
+| **Database name** | `etp_migration` |
+| **Migration framework** | Flyway V1–V5, `classpath:db/migration` |
+| **What Flyway owns** | Control-plane tables only (definitions, sources, mappings, runs, batches, reconciliation, promotion, identity allocation) |
+| **What Flyway does not own** | Staging tables and business-target tables. Those names come from definition JSON. Default staging schema is `migration_staging`. A local `uam` schema is operator-created |
+| **JPA** | Hibernate `ddl-auto=validate` on the control-plane datasource |
+
+## ETP Exports (`capabilities/etp-exports`)
+
+No database. The service calls an external HTTP API and streams CSV or XLSX. It does not persist export jobs.
 
 ## Keycloak (external)
 
@@ -585,7 +603,7 @@ Application tables are **schema + JPA-mapped entities only** for Hibernate valid
 | Capability registry authorization | **Not in IAM DB** for platform APIs — platform `SecurityConfig` permits `/api/v1/capabilities/**` without JWT validation |
 | Platform customer/capability metadata | **`etp_platform`** — separate database |
 
-## IAM tables (`etp_iam` — `schema_updated.sql`)
+## IAM tables (`etp_iam` — Flyway `V1__iam_schema.sql`)
 
 | Table | Purpose |
 |-------|---------|
@@ -690,9 +708,17 @@ IAM `tenants.environment` is the only `environment` column found in repository s
 - Capability Registry CRUD-ish APIs (GET, POST, GET by id, PATCH) with lifecycle and audit for capabilities/versions
 - Hibernate entity mapping for customer/application stack (validation only)
 
-**In `etp_iam` schema:**
+**In `etp_iam` schema (Flyway V1, seed V2):**
 
 - Full RBAC model: companies, tenants, IAM applications, resources, permissions, principals, groups, roles, scopes, mappings, tenant assignments
+
+**In `etp_migration` (Flyway V1–V5, control plane only):**
+
+- `migration_definition`, `migration_source`, `migration_mapping`, `migration_mapping_rule`
+- `migration_run`, `migration_batch`, `migration_artifact`, `migration_error`, `migration_record`
+- `migration_reconciliation`
+- `migration_promotion`, `migration_promotion_batch`
+- `migration_identity_allocation`, `target_identity_allocator`
 
 **External:**
 
@@ -752,9 +778,45 @@ Other gaps:
 
 12. **contract_version on capability_version** — Nullable and not updated in all code paths visible in `CapabilityService` after initial create (Not determinable from current source whether PATCH updates it).
 
+13. **IAM schema is Flyway-owned** — `application.properties` enables Flyway. `schema_updated.sql` is not the startup path.
+
+14. **Migration staging is not a Flyway table** — Control-plane rows live in `etp_migration`. Staged payloads and promoted business rows live in schemas named by the definition (`migration_staging`, and for the local demonstration `uam`).
+
+15. **Core UI does not read `etp_platform` directly** — `etp-core-ui` calls `GET /api/v1/capabilities` and `GET /api/v1/capabilities/{id}` only. `customer`, `application`, `application_definition`, `application_capability`, `audit_event`, `platform_version`, and the V14 entitlement tables have no UI and, except the capability catalog and audit writes, no service API. Contract and implementation `status` columns are set to `ACTIVE` when the registry inserts the row. That value is not the capability or version lifecycle.
+
 ---
 
-# 12. Source References
+# 12. Migration control plane
+
+Database `etp_migration`. Flyway location: `capabilities/etp-migration/src/main/resources/db/migration/`.
+
+| Table | Purpose |
+|-------|---------|
+| `migration_definition` | Named migration: source type, target type, load mode, batch size, JSON configuration (including promotion and UAM target settings), lifecycle |
+| `migration_source` | One source bound to a definition (filesystem CSV or SFTP CSV configuration). Credentials are referenced, not stored as passwords |
+| `migration_mapping` | Reusable mapping definition |
+| `migration_mapping_rule` | Ordered field rules for a mapping (`V3` adds entity name) |
+| `migration_run` | One execution of an ACTIVE definition |
+| `migration_batch` | Claimed work unit inside a run, including lease columns for workers |
+| `migration_artifact` | Metadata for source artifacts associated with a run |
+| `migration_error` | Recorded failure for a run or batch |
+| `migration_record` | Per-record lineage table. Success lineage is not fully used by the current pipeline |
+| `migration_reconciliation` | Reconciliation result for a run (count, checksum, target, full) |
+| `migration_promotion` | Explicit promotion of a run. Created by prepare, executed by promote |
+| `migration_promotion_batch` | Per-batch promotion outcome |
+| `migration_identity_allocation` | Target identities already handed out, so a retry can reuse them (`V4`) |
+| `target_identity_allocator` | PostgreSQL sequence ranges for `PREFIX_SEQUENCE` identities (`V5`) |
+
+Default JDBC in `application.properties` is `localhost:55433/etp_migration`. Copy `capabilities/etp-migration/.env.example` before Compose. The Compose file’s fallback host port is `55446` when `ETP_MIGRATION_DB_PORT` is unset, which does not match the application default.
+
+---
+
+# 13. Source References
+
+## Migration control plane
+
+- `capabilities/etp-migration/src/main/resources/db/migration/V1__initial_migration_schema.sql` through `V5__create_target_identity_allocator.sql`
+- Column-level detail: `capabilities/etp-migration/docs/DATABASE_MODEL.md`
 
 ## Platform migrations
 

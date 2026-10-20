@@ -1,5 +1,6 @@
 package com.etp.migration.connector.target.postgresql;
 
+import com.etp.migration.connector.target.TargetFailureDiagnostics;
 import com.etp.migration.connector.target.TargetInfrastructureException;
 import com.etp.migration.connector.target.TargetVerification;
 import com.etp.migration.entity.MigrationPromotion;
@@ -153,7 +154,7 @@ public class PostgreSqlBusinessTargetVerifier {
 		} catch (SQLException ex) {
 			throw new TargetInfrastructureException(
 					MigrationErrorCodes.TARGET_DATABASE_CONNECTION_ERROR,
-					"PostgreSQL business-target verification failed: " + ex.getMessage(),
+					"PostgreSQL business-target verification failed: " + TargetFailureDiagnostics.describe(ex),
 					ex);
 		}
 	}

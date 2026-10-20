@@ -63,8 +63,8 @@ CREATE TABLE IF NOT EXISTS uam.geographic_sub_address (
     id varchar(64) PRIMARY KEY,
     address_id varchar(64) NOT NULL REFERENCES uam.geographic_address (id),
     geographic_location_id varchar(64) REFERENCES uam.geographic_location (id),
-    private_street_name varchar(128) NOT NULL,
-    private_street_number varchar(32) NOT NULL,
+    private_street_name varchar(128),
+    private_street_number varchar(32),
     sub_unit_type varchar(64),
     sub_unit_number varchar(32),
     sub_unit_name varchar(128),
@@ -72,3 +72,8 @@ CREATE TABLE IF NOT EXISTS uam.geographic_sub_address (
     level_number varchar(32),
     building_name varchar(128)
 );
+
+-- CREATE TABLE IF NOT EXISTS does not change columns that already exist.
+ALTER TABLE uam.geographic_sub_address
+    ALTER COLUMN private_street_name DROP NOT NULL,
+    ALTER COLUMN private_street_number DROP NOT NULL;

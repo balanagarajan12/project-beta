@@ -5,5 +5,6 @@ public enum StorageProvider {
 	S3,
 	AZURE_BLOB,
 	GCS,
-	FILE_SYSTEM
+	FILE_SYSTEM,
+	SFTP
 }

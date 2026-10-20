@@ -8,6 +8,7 @@ import com.etp.migration.mapping.EntityDefinition;
 import com.etp.migration.mapping.EntityRelationshipMapping;
 import com.etp.migration.mapping.RelationshipDefinition;
 import com.etp.migration.mapping.RelationshipKey;
+import com.etp.migration.mapping.TargetForeignKey;
 import com.etp.migration.processing.ProcessingError;
 import com.etp.migration.processing.TargetRecord;
 import com.etp.migration.processing.TransformationException;
@@ -158,6 +159,13 @@ public class EntityTargetComposer {
 				link.put("parentTargetEntity", parentDefinition.targetEntity());
 			}
 			link.put("keys", keys(mapping, parent.source().entityName(), entityName));
+			TargetForeignKey foreignKey = foreignKey(mapping, parent.source().entityName(), entityName);
+			if (foreignKey != null) {
+				Map<String, String> stored = new LinkedHashMap<>();
+				stored.put("column", foreignKey.column());
+				stored.put("referencesColumn", foreignKey.referencesColumn());
+				link.put("targetForeignKey", stored);
+			}
 			links.add(link);
 		}
 		return links;
@@ -180,5 +188,20 @@ public class EntityTargetComposer {
 			}
 		}
 		return keys;
+	}
+
+	private static TargetForeignKey foreignKey(
+			EntityRelationshipMapping mapping,
+			String parentEntity,
+			String childEntity) {
+		if (mapping == null) {
+			return null;
+		}
+		for (RelationshipDefinition relationship : mapping.relationships()) {
+			if (parentEntity.equals(relationship.parent()) && childEntity.equals(relationship.child())) {
+				return relationship.targetForeignKey();
+			}
+		}
+		return null;
 	}
 }

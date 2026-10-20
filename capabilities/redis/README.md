@@ -87,4 +87,4 @@ Applications configure `spring.data.redis.*` (or equivalent) with environment-re
 
 - [ETP PostgreSQL capability](../postgresql/) — reference infrastructure pattern (`etp.postgresql`)
 - [ETP IAM capability](../etp-iam/) — reference onboarding pattern (`etp.iam` ACTIVE)
-- [Capability Registry](../../etp-platform-service/docs/CAPABILITY_REGISTRY.md)
+- [ETP APIs](../../ETP_APIS.md)

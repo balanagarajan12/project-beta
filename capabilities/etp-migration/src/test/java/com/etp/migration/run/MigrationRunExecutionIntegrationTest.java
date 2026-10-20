@@ -1,5 +1,6 @@
 package com.etp.migration.run;
 
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -13,6 +14,9 @@ import com.etp.migration.entity.MigrationConfigStatus;
 import com.etp.migration.entity.MigrationDefinition;
 import com.etp.migration.repository.MigrationBatchRepository;
 import com.etp.migration.repository.MigrationDefinitionRepository;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import javax.sql.DataSource;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Optional;
@@ -39,6 +43,9 @@ class MigrationRunExecutionIntegrationTest {
 
 	@Autowired
 	private MigrationDefinitionRepository migrationDefinitionRepository;
+
+	@Autowired
+	private DataSource dataSource;
 
 	@Autowired
 	private MigrationRunService migrationRunService;
@@ -246,6 +253,70 @@ class MigrationRunExecutionIntegrationTest {
 	}
 
 	@Test
+	void listAllRunsOrdersByStartOrCreationAcrossDefinitions() throws Exception {
+		mockMvc.perform(get("/api/v1/migration-runs"))
+				.andExpect(status().isUnauthorized());
+
+		String firstDefinition = createActiveDefinition();
+		String secondDefinition = createActiveDefinition();
+		UUID createdLatest = createRun(firstDefinition);
+		UUID startedLatest = createRun(firstDefinition);
+		UUID otherDefinition = createRun(secondDefinition);
+		stamp(createdLatest, Instant.parse("2099-01-03T00:00:00Z"), null);
+		stamp(startedLatest, Instant.parse("2099-01-01T00:00:00Z"), Instant.parse("2099-01-04T00:00:00Z"));
+		stamp(otherDefinition, Instant.parse("2099-01-02T00:00:00Z"), Instant.parse("2099-01-02T00:00:00Z"));
+
+		mockMvc.perform(get("/api/v1/migration-runs")
+						.with(jwt())
+						.param("page", "0")
+						.param("size", "2"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.page").value(0))
+				.andExpect(jsonPath("$.size").value(2))
+				.andExpect(jsonPath("$.content[0].id").value(startedLatest.toString()))
+				.andExpect(jsonPath("$.content[0].migrationDefinitionId").value(firstDefinition))
+				.andExpect(jsonPath("$.content[0].startedAt").value("2099-01-04T00:00:00Z"))
+				.andExpect(jsonPath("$.content[1].id").value(createdLatest.toString()))
+				.andExpect(jsonPath("$.content[1].migrationDefinitionId").value(firstDefinition))
+				.andExpect(jsonPath("$.totalElements").value(greaterThanOrEqualTo(3)))
+				.andExpect(jsonPath("$.totalPages").value(greaterThanOrEqualTo(2)));
+
+		mockMvc.perform(get("/api/v1/migration-runs")
+						.with(jwt())
+						.param("page", "1")
+						.param("size", "2"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.page").value(1))
+				.andExpect(jsonPath("$.content[0].id").value(otherDefinition.toString()))
+				.andExpect(jsonPath("$.content[0].migrationDefinitionId").value(secondDefinition));
+
+		mockMvc.perform(get("/api/v1/migration-runs")
+						.with(jwt())
+						.param("page", "-1")
+						.param("size", "500"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.page").value(0))
+				.andExpect(jsonPath("$.size").value(100));
+
+		mockMvc.perform(get("/api/v1/migration-runs").with(jwt()).param("size", "0"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.size").value(20));
+
+		mockMvc.perform(get("/api/v1/migration-runs")
+						.with(jwt())
+						.param("migrationDefinitionId", secondDefinition))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.content[0].id").value(otherDefinition.toString()))
+				.andExpect(jsonPath("$.content[0].migrationDefinitionId").value(secondDefinition))
+				.andExpect(jsonPath("$.content[?(@.migrationDefinitionId=='" + firstDefinition + "')]").isEmpty());
+
+		mockMvc.perform(get("/api/v1/migration-runs")
+						.with(jwt())
+						.param("migrationDefinitionId", "99999999-9999-9999-9999-999999999999"))
+				.andExpect(status().isNotFound());
+	}
+
+	@Test
 	void retryCompletedRunIsRejected() throws Exception {
 		String definitionId = createActiveDefinition();
 		MvcResult created = mockMvc.perform(post("/api/v1/migrations/{id}/runs", definitionId)
@@ -289,6 +360,31 @@ class MigrationRunExecutionIntegrationTest {
 			MigrationDefinition definition = migrationDefinitionRepository.findById(UUID.fromString(definitionId)).orElseThrow();
 			definition.setStatus(status);
 		});
+	}
+
+	private UUID createRun(String definitionId) throws Exception {
+		MvcResult created = mockMvc.perform(post("/api/v1/migrations/{id}/runs", definitionId)
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{}"))
+				.andExpect(status().isCreated())
+				.andReturn();
+		return UUID.fromString(readId(created));
+	}
+
+	private void stamp(UUID runId, Instant createdAt, Instant startedAt) throws Exception {
+		try (Connection connection = dataSource.getConnection();
+				PreparedStatement statement = connection.prepareStatement(
+						"UPDATE migration_run SET created_at = ?, started_at = ? WHERE id = ?")) {
+			statement.setObject(1, java.sql.Timestamp.from(createdAt));
+			if (startedAt == null) {
+				statement.setNull(2, java.sql.Types.TIMESTAMP);
+			} else {
+				statement.setObject(2, java.sql.Timestamp.from(startedAt));
+			}
+			statement.setObject(3, runId);
+			statement.executeUpdate();
+		}
 	}
 
 	private String readId(MvcResult result) throws Exception {

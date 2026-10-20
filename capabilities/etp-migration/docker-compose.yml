@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: ${ETP_MIGRATION_DB_USERNAME:-etp_admin}
       POSTGRES_PASSWORD: ${ETP_MIGRATION_DB_PASSWORD:?ETP_MIGRATION_DB_PASSWORD is required}
     ports:
-      - "${ETP_MIGRATION_DB_PORT:-55433}:5432"
+      - "${ETP_MIGRATION_DB_PORT:-55446}:5432"
     volumes:
       - etp-migration-pgdata:/var/lib/postgresql/data
     healthcheck:

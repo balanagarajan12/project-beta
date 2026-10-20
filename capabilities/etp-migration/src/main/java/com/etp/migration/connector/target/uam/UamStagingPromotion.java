@@ -7,8 +7,10 @@ import com.etp.migration.entity.LoadMode;
 import com.etp.migration.identity.GeneratedTargetIdentityLookup;
 import com.etp.migration.identity.GeneratedTargetIdentityService;
 import com.etp.migration.identity.TargetIdentityLookup;
+import com.etp.migration.mapping.EntityLoadOrder;
 import com.etp.migration.mapping.EntityRelationshipConfiguration;
 import com.etp.migration.mapping.EntityRelationshipMapping;
+import com.etp.migration.mapping.RelationshipDefinition;
 import com.etp.migration.processing.TargetRecord;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -87,7 +89,7 @@ public class UamStagingPromotion {
 				(entityName, sourceIdentities) -> Map.of());
 		Map<String, LinkedHashSet<String>> sources = sourceIdentities(staged);
 		Map<String, Map<String, String>> allocated = new LinkedHashMap<>();
-		for (String entityName : allocationOrder(definitionConfiguration, sources)) {
+		for (String entityName : allocationOrder(definitionConfiguration, mapping, sources)) {
 			LinkedHashSet<String> identities = sources.get(entityName);
 			if (identities == null || identities.isEmpty()) {
 				continue;
@@ -104,10 +106,26 @@ public class UamStagingPromotion {
 
 	private static List<String> allocationOrder(
 			Map<String, Object> configuration,
+			EntityRelationshipMapping mapping,
 			Map<String, LinkedHashSet<String>> sources) {
-		LinkedHashSet<String> order = new LinkedHashSet<>(stringList(configuration.get("loadOrder")));
-		order.addAll(sources.keySet());
-		return List.copyOf(order);
+		List<String> configured = stringList(configuration.get("loadOrder"));
+		if (!configured.isEmpty()) {
+			LinkedHashSet<String> order = new LinkedHashSet<>(configured);
+			order.addAll(sources.keySet());
+			return List.copyOf(order);
+		}
+		LinkedHashSet<String> names = new LinkedHashSet<>();
+		if (mapping != null) {
+			mapping.entities().forEach(entity -> names.add(entity.name()));
+		}
+		names.addAll(sources.keySet());
+		List<EntityLoadOrder.Dependency> dependencies = new ArrayList<>();
+		if (mapping != null) {
+			for (RelationshipDefinition relationship : mapping.relationships()) {
+				dependencies.add(new EntityLoadOrder.Dependency(relationship.parent(), relationship.child()));
+			}
+		}
+		return EntityLoadOrder.parentsFirst(names, dependencies);
 	}
 
 	private static Map<String, LinkedHashSet<String>> sourceIdentities(List<LoadableTargetRecord> staged) {

@@ -619,7 +619,7 @@ Use the **Onboarding Lifecycle** and **Reference Capability** sections above. Ne
 | Security | `capabilities/etp-iam/src/main/java/com/etp/iam/config/SecurityConfig.java` |
 | IAM schema | `capabilities/etp-iam/schema_updated.sql` |
 | Config | `capabilities/etp-iam/src/main/resources/application.properties`, `.env.example` |
-| Registry API docs | `etp-platform-service/docs/CAPABILITY_REGISTRY.md` |
+| Registry API docs | `ETP_APIS.md` (repository root) |
 | Registration payload | `capabilities/etp-iam/etp-iam-capability-registration.json` |
 | Deployment guide | `capabilities/etp-iam/ETP_IAM_CAPABILITY_DEPLOYMENT.md` |
 

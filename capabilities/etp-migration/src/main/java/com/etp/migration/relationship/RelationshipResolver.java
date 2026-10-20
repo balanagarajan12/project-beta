@@ -125,7 +125,7 @@ public class RelationshipResolver {
 				if (!relationship.parent().equals(record.entityName())) {
 					continue;
 				}
-				List<String> key = values(record, relationship.keys(), true);
+				List<String> key = correlation(record, relationship, true);
 				List<String> indexed = indexedKey(edges.get(relationship), identity);
 				if (key == null && indexed == null) {
 					continue;
@@ -149,7 +149,7 @@ public class RelationshipResolver {
 		}
 
 		private void indexEdge(EdgeState edge, EntityRecord record, String identity) {
-			List<String> key = values(record, edge.relationship.keys(), true);
+			List<String> key = correlation(record, edge.relationship, true);
 			if (key == null) {
 				return;
 			}
@@ -185,7 +185,7 @@ public class RelationshipResolver {
 		private void resolveEdge(EdgeState edge, EntityRecord child) {
 			RelationshipDefinition relationship = edge.relationship;
 			String childIdentity = identity(child);
-			List<String> key = values(child, relationship.keys(), false);
+			List<String> key = correlation(child, relationship, false);
 			if (key == null) {
 				failures.add(unresolved(relationship, child, childIdentity, missingKeyMessage(relationship, child, childIdentity)));
 				return;
@@ -200,7 +200,7 @@ public class RelationshipResolver {
 						"Unable to resolve relationship from '" + relationship.child() + "' '" + childIdentity
 								+ "' (source record " + child.sourceRecordNumber() + ") to parent '"
 								+ relationship.parent() + "': parent source identity for relationship key "
-								+ describe(relationship.keys(), key) + " is duplicated."));
+								+ describe(relationship, key) + " is duplicated."));
 				return;
 			}
 			List<ParentRef> parents = edge.parents.get(key);
@@ -211,7 +211,7 @@ public class RelationshipResolver {
 						childIdentity,
 						"Unable to resolve relationship from '" + relationship.child() + "' '" + childIdentity
 								+ "' (source record " + child.sourceRecordNumber() + ") to parent '"
-								+ relationship.parent() + "': relationship key " + describe(relationship.keys(), key)
+								+ relationship.parent() + "': relationship key " + describe(relationship, key)
 								+ " does not match a parent."));
 				return;
 			}
@@ -222,7 +222,7 @@ public class RelationshipResolver {
 						childIdentity,
 						"Unable to resolve relationship from '" + relationship.child() + "' '" + childIdentity
 								+ "' (source record " + child.sourceRecordNumber() + ") to parent '"
-								+ relationship.parent() + "': relationship key " + describe(relationship.keys(), key)
+								+ relationship.parent() + "': relationship key " + describe(relationship, key)
 								+ " matches multiple parent records."));
 				return;
 			}
@@ -393,7 +393,7 @@ public class RelationshipResolver {
 
 		private static String manyToOneMessage(RelationshipDefinition relationship, List<String> key) {
 			return "Relationship from '" + relationship.parent() + "' to '" + relationship.child()
-					+ "' is MANY_TO_ONE but relationship key " + describe(relationship.keys(), key)
+					+ "' is MANY_TO_ONE but relationship key " + describe(relationship, key)
 					+ " is referenced by multiple '" + relationship.child() + "' records.";
 		}
 
@@ -411,6 +411,13 @@ public class RelationshipResolver {
 					+ "': relationship key '" + missing + "' is missing.";
 		}
 
+		private static String describe(RelationshipDefinition relationship, List<String> values) {
+			if (relationship.keys().isEmpty()) {
+				return "source record '" + values.get(0) + "'";
+			}
+			return describe(relationship.keys(), values);
+		}
+
 		private static String describe(List<RelationshipKey> keys, List<String> values) {
 			StringBuilder builder = new StringBuilder();
 			for (int i = 0; i < keys.size(); i++) {
@@ -420,6 +427,16 @@ public class RelationshipResolver {
 				builder.append(keys.get(i).childField()).append("='").append(values.get(i)).append("'");
 			}
 			return builder.toString();
+		}
+
+		private static List<String> correlation(
+				EntityRecord record,
+				RelationshipDefinition relationship,
+				boolean parentSide) {
+			if (relationship.keys().isEmpty()) {
+				return List.of(Long.toString(record.sourceRecordNumber()));
+			}
+			return values(record, relationship.keys(), parentSide);
 		}
 
 		private static List<String> values(EntityRecord record, List<RelationshipKey> keys, boolean parentSide) {

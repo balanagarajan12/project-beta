@@ -44,6 +44,55 @@ class UamCanonicalRowsTest {
 	}
 
 	@Test
+	void derivedOrderWritesTheReferencedParentColumnRatherThanTheParentPrimaryKey() {
+		Map<String, Object> configuration = new LinkedHashMap<>();
+		configuration.put("target", Map.of("mode", "UAM", "schema", "uam"));
+		configuration.put("tables", Map.of(
+				"GeographicAddress", "geographic_address",
+				"GeographicSubAddress", "geographic_sub_address",
+				"Site", "site"));
+		configuration.put("foreignKeys", List.of(Map.of(
+				"entity", "GeographicSubAddress",
+				"parent", "GeographicAddress",
+				"column", "address_id",
+				"referencesColumn", "location_id")));
+
+		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration, List.of(
+				payload("Site", "SITE-1", Map.of("name", "Independent"), List.of()),
+				payload("GeographicSubAddress", "SUB-1", Map.of("sub_unit_number", "12"), List.of(
+						parent("GeographicAddress", "ADDR-1"))),
+				address("ADDR-1", "LOC-9")));
+
+		assertThat(groups).extracting(UamCanonicalRows.InsertGroup::table)
+				.containsExactly("geographic_address", "geographic_sub_address", "site");
+		assertThat(value(groups.get(1), "address_id")).isEqualTo("LOC-9");
+		assertThat(value(groups.get(1), "address_id")).isNotEqualTo("ADDR-1");
+		assertThat(value(groups.get(0), "location_id")).isEqualTo("LOC-9");
+		assertThat(value(groups.get(0), "id")).isEqualTo("ADDR-1");
+	}
+
+	@Test
+	void payloadForeignKeysAreUsedWhenLoadOrderIsOmitted() {
+		Map<String, Object> child = new LinkedHashMap<>();
+		child.put("parentEntity", "GeographicAddress");
+		child.put("parentTargetIdentity", "ADDR-1");
+		child.put("targetForeignKey", Map.of("column", "address_id", "referencesColumn", "location_id"));
+		Map<String, Object> configuration = Map.of(
+				"target", Map.of("mode", "UAM", "schema", "uam"),
+				"tables", Map.of(
+						"GeographicAddress", "geographic_address",
+						"GeographicSubAddress", "geographic_sub_address"));
+
+		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration, List.of(
+				payload("GeographicSubAddress", "SUB-1", Map.of(), List.of(child)),
+				address("ADDR-1", "LOC-9")));
+
+		assertThat(groups).extracting(UamCanonicalRows.InsertGroup::table)
+				.containsExactly("geographic_address", "geographic_sub_address");
+		assertThat(value(groups.get(1), "address_id")).isEqualTo("LOC-9");
+	}
+
+	@Test
 	void mappedCreatedAtIsKept() {
 		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration(), List.of(
 				payload("AddressLocation", "LOC-000000001", Map.of(
@@ -68,6 +117,16 @@ class UamCanonicalRowsTest {
 		fields.put("attributes", attributes);
 		fields.put("relationships", relationships);
 		return new LoadableTargetRecord(1L, new TargetRecord(fields), "key-" + entity);
+	}
+
+	private static LoadableTargetRecord address(String targetIdentity, String locationId) {
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("entity", "GeographicAddress");
+		fields.put("targetKey", "id");
+		fields.put("targetIdentity", targetIdentity);
+		fields.put("attributes", Map.of("location_id", locationId));
+		fields.put("relationships", List.of());
+		return new LoadableTargetRecord(1L, new TargetRecord(fields), "key-address");
 	}
 
 	private static Map<String, Object> parent(String entity, String targetIdentity) {

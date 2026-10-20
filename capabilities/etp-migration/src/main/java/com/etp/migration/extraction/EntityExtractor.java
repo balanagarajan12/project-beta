@@ -58,6 +58,16 @@ public class EntityExtractor {
 		for (EntityDefinition entity : mapping.entities()) {
 			List<MigrationMappingRule> entityRules = mappingEngine.rulesForEntity(rules, entity.name());
 			Set<String> sourceFields = sourceFields(entity, entityRules);
+			if (entity.sourceKey() == null) {
+				if (hasOtherValues(physical, sourceFields, null)) {
+					records.add(new EntityRecord(
+							entity.name(),
+							source.recordNumber(),
+							Long.toString(source.recordNumber()),
+							copyFields(physical, copiedFields(sourceFields, entity.name(), mapping))));
+				}
+				continue;
+			}
 			if (present(physical, entity.sourceKey())) {
 				records.add(new EntityRecord(
 						entity.name(),

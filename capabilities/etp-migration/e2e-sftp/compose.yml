@@ -1,0 +1,10 @@
+services:
+  sftp:
+    image: atmoz/sftp:alpine
+    container_name: etp-migration-sftp
+    ports:
+      - "2222:22"
+    command: "e2e:E2eTestOnly_2026!:1001:100:upload"
+    volumes:
+      - ./incoming:/home/e2e/upload:ro
+    restart: unless-stopped

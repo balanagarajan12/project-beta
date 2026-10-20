@@ -1,5 +1,6 @@
 package com.etp.migration.transformation;
 
+import com.etp.migration.config.AuditActor;
 import com.etp.migration.entity.MigrationConfigStatus;
 import com.etp.migration.entity.MigrationMapping;
 import com.etp.migration.entity.MigrationMappingRule;
@@ -57,8 +58,9 @@ public class MigrationMappingService {
 		mapping.setStatus(MigrationConfigStatus.DRAFT);
 		mapping.setCreatedAt(now);
 		mapping.setUpdatedAt(now);
-		mapping.setCreatedBy(ControlPlaneSupport.SYSTEM_ACTOR);
-		mapping.setUpdatedBy(ControlPlaneSupport.SYSTEM_ACTOR);
+		String actor = AuditActor.current();
+		mapping.setCreatedBy(actor);
+		mapping.setUpdatedBy(actor);
 
 		try {
 			return toMappingResponse(migrationMappingRepository.save(mapping));
