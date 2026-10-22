@@ -126,6 +126,113 @@ public final class CsvRecordReader {
 		return open(input, encoding, delimiter, quote, hasHeader, startRecord, endRecord, true, failure);
 	}
 
+	/**
+	 * Reads {@code count} data records starting at a byte offset the caller has already seeked to.
+	 * {@code headers} is null for a headerless file. When present, columns are mapped by position and the
+	 * header row is not part of this stream.
+	 */
+	public static Stream<SourceRecord> slice(
+			InputStream input,
+			Charset encoding,
+			char delimiter,
+			char quote,
+			List<String> headers,
+			long startRecord,
+			int count) {
+		if (startRecord < 1) {
+			throw new IllegalArgumentException("startRecord must be greater than 0");
+		}
+		if (count < 0) {
+			throw new IllegalArgumentException("count must be zero or greater");
+		}
+		if (count == 0) {
+			closeQuietly(input);
+			return Stream.empty();
+		}
+		BufferedReader reader = null;
+		CSVParser parser = null;
+		try {
+			reader = reader(input, encoding);
+			CSVFormat.Builder builder = CSVFormat.DEFAULT.builder()
+					.setDelimiter(delimiter)
+					.setQuote(quote)
+					.setIgnoreEmptyLines(true)
+					.setTrim(false);
+			if (headers != null) {
+				builder.setHeader(headers.toArray(String[]::new)).setSkipHeaderRecord(false);
+			}
+			parser = builder.get().parse(reader);
+			final CSVParser openParser = parser;
+			final BufferedReader openReader = reader;
+			final InputStream openInput = input;
+			final Iterator<CSVRecord> records = parser.iterator();
+			final List<String> names = headers == null ? List.of() : headers;
+			final boolean named = headers != null;
+			return StreamSupport.stream(
+							Spliterators.spliteratorUnknownSize(
+									new Iterator<SourceRecord>() {
+										int remaining = count;
+										long recordNumber = startRecord;
+
+										@Override
+										public boolean hasNext() {
+											if (remaining <= 0) {
+												return false;
+											}
+											if (!records.hasNext()) {
+												throw new BatchProcessingException(
+														MigrationErrorCodes.SOURCE_READ_ERROR,
+														"Source does not contain record " + recordNumber);
+											}
+											return true;
+										}
+
+										@Override
+										public SourceRecord next() {
+											long started = PipelineTiming.start();
+											try {
+												if (!hasNext()) {
+													throw new BatchProcessingException(
+															MigrationErrorCodes.SOURCE_READ_ERROR,
+															"Source does not contain record " + recordNumber);
+												}
+												CSVRecord csvRecord = records.next();
+												remaining--;
+												PipelineTiming.add("sourceRowsParsed", 1L);
+												return new SourceRecord(
+														recordNumber++,
+														toFields(csvRecord, names, named));
+											} finally {
+												PipelineTiming.stop(PipelineTiming.Stage.SOURCE_READ, started);
+											}
+										}
+									},
+									Spliterator.ORDERED),
+							false)
+					.onClose(() -> closeQuietly(openParser, openReader, openInput));
+		} catch (RuntimeException ex) {
+			closeQuietly(parser, reader, input);
+			throw ex;
+		} catch (Exception ex) {
+			closeQuietly(parser, reader, input);
+			throw new BatchProcessingException(
+					MigrationErrorCodes.SOURCE_READ_ERROR,
+					"Unable to read source batch",
+					ex);
+		}
+	}
+
+	public static List<String> headerNames(
+			InputStream input,
+			Charset encoding,
+			char delimiter,
+			char quote) throws IOException {
+		try (BufferedReader reader = reader(input, encoding);
+				CSVParser parser = format(delimiter, quote, true).parse(reader)) {
+			return requireUniqueHeaders(parser.getHeaderNames());
+		}
+	}
+
 	private static Stream<SourceRecord> open(
 			InputStream input,
 			Charset encoding,

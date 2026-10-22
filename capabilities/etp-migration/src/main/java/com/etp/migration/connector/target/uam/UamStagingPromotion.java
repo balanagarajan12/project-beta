@@ -7,6 +7,7 @@ import com.etp.migration.entity.LoadMode;
 import com.etp.migration.identity.GeneratedTargetIdentityLookup;
 import com.etp.migration.identity.GeneratedTargetIdentityService;
 import com.etp.migration.identity.TargetIdentityLookup;
+import com.etp.migration.mapping.EntityDefinition;
 import com.etp.migration.mapping.EntityLoadOrder;
 import com.etp.migration.mapping.EntityRelationshipConfiguration;
 import com.etp.migration.mapping.EntityRelationshipMapping;
@@ -18,6 +19,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /**
@@ -32,14 +34,17 @@ public class UamStagingPromotion {
 	private final PostgreSqlStagedEntityReader stagedEntityReader;
 	private final GeneratedTargetIdentityService identityService;
 	private final UamPostgreSqlTargetConnector connector;
+	private final com.etp.migration.connector.target.postgresql.PostgreSqlConnectionRegistry connections;
 
 	public UamStagingPromotion(
 			PostgreSqlStagedEntityReader stagedEntityReader,
 			GeneratedTargetIdentityService identityService,
-			UamPostgreSqlTargetConnector connector) {
+			UamPostgreSqlTargetConnector connector,
+			@Autowired(required = false) com.etp.migration.connector.target.postgresql.PostgreSqlConnectionRegistry connections) {
 		this.stagedEntityReader = stagedEntityReader;
 		this.identityService = identityService;
 		this.connector = connector;
+		this.connections = connections;
 	}
 
 	public static boolean configured(Map<String, Object> configuration) {
@@ -47,7 +52,11 @@ public class UamStagingPromotion {
 			return false;
 		}
 		Object mode = target.get("mode");
-		return mode != null && UamCanonicalRows.MODE.equals(mode.toString().trim());
+		if (mode == null) {
+			return false;
+		}
+		String value = mode.toString().trim();
+		return UamCanonicalRows.MODE.equals(value) || "POSTGRESQL".equals(value);
 	}
 
 	public static boolean promotionEnabled(Map<String, Object> configuration) {
@@ -72,7 +81,10 @@ public class UamStagingPromotion {
 			return;
 		}
 		EntityRelationshipMapping mapping = EntityRelationshipConfiguration.parse(mappingConfiguration);
+		long started = com.etp.migration.processing.PipelineTiming.start();
 		List<LoadableTargetRecord> resolved = resolve(migrationRunId, definitionConfiguration, mapping, staged);
+		com.etp.migration.processing.PipelineTiming.stop(
+				com.etp.migration.processing.PipelineTiming.Stage.IDENTITY_RESOLUTION, started);
 		connector.load(context(migrationRunId, migrationBatchId, definitionConfiguration), resolved);
 	}
 
@@ -81,39 +93,37 @@ public class UamStagingPromotion {
 			Map<String, Object> definitionConfiguration,
 			EntityRelationshipMapping mapping,
 			List<LoadableTargetRecord> staged) {
+		javax.sql.DataSource target = connections == null
+				? null
+				: connections.target(definitionConfiguration);
 		TargetIdentityLookup lookup = GeneratedTargetIdentityLookup.decorate(
 				identityService,
 				migrationRunId,
 				mapping,
 				definitionConfiguration,
-				(entityName, sourceIdentities) -> Map.of());
+				(entityName, sourceIdentities) -> Map.of(),
+				target);
 		Map<String, LinkedHashSet<String>> sources = sourceIdentities(staged);
 		Map<String, Map<String, String>> allocated = new LinkedHashMap<>();
-		for (String entityName : allocationOrder(definitionConfiguration, mapping, sources)) {
+		for (String entityName : allocationOrder(mapping, sources)) {
 			LinkedHashSet<String> identities = sources.get(entityName);
 			if (identities == null || identities.isEmpty()) {
 				continue;
 			}
+			com.etp.migration.processing.PipelineTiming.increment("identityLookupCalls");
 			Map<String, String> assigned = lookup.lookup(entityName, List.copyOf(identities));
 			allocated.put(entityName, assigned == null ? Map.of() : assigned);
 		}
 		List<LoadableTargetRecord> resolved = new ArrayList<>(staged.size());
 		for (LoadableTargetRecord record : staged) {
-			resolved.add(apply(record, allocated));
+			resolved.add(apply(record, allocated, mapping));
 		}
 		return resolved;
 	}
 
 	private static List<String> allocationOrder(
-			Map<String, Object> configuration,
 			EntityRelationshipMapping mapping,
 			Map<String, LinkedHashSet<String>> sources) {
-		List<String> configured = stringList(configuration.get("loadOrder"));
-		if (!configured.isEmpty()) {
-			LinkedHashSet<String> order = new LinkedHashSet<>(configured);
-			order.addAll(sources.keySet());
-			return List.copyOf(order);
-		}
 		LinkedHashSet<String> names = new LinkedHashSet<>();
 		if (mapping != null) {
 			mapping.entities().forEach(entity -> names.add(entity.name()));
@@ -146,9 +156,10 @@ public class UamStagingPromotion {
 
 	private static LoadableTargetRecord apply(
 			LoadableTargetRecord record,
-			Map<String, Map<String, String>> allocated) {
+			Map<String, Map<String, String>> allocated,
+			EntityRelationshipMapping mapping) {
 		Map<String, Object> fields = new LinkedHashMap<>();
-		record.targetRecord().fields().forEach((key, value) -> fields.put(key, copyValue(key, value, allocated)));
+		record.targetRecord().fields().forEach((key, value) -> fields.put(key, copyValue(key, value, allocated, mapping)));
 		if (text(fields.get("targetIdentity")) == null) {
 			String resolved = resolve(allocated, text(fields.get("entity")), text(fields.get("sourceIdentity")));
 			if (resolved != null) {
@@ -158,7 +169,11 @@ public class UamStagingPromotion {
 		return new LoadableTargetRecord(record.sourceRecordNumber(), new TargetRecord(fields), record.idempotencyKey());
 	}
 
-	private static Object copyValue(String key, Object value, Map<String, Map<String, String>> allocated) {
+	private static Object copyValue(
+			String key,
+			Object value,
+			Map<String, Map<String, String>> allocated,
+			EntityRelationshipMapping mapping) {
 		if (!"relationships".equals(key) || !(value instanceof List<?> links)) {
 			return value;
 		}
@@ -183,6 +198,12 @@ public class UamStagingPromotion {
 					relationship.put("parentTargetIdentity", resolved);
 				}
 			}
+			if (text(relationship.get("parentTargetKey")) == null) {
+				EntityDefinition parent = definition(mapping, text(relationship.get("parentEntity")));
+				if (parent != null && parent.targetKey() != null) {
+					relationship.put("parentTargetKey", parent.targetKey());
+				}
+			}
 			copied.add(relationship);
 		}
 		return copied;
@@ -200,6 +221,18 @@ public class UamStagingPromotion {
 				null,
 				LoadMode.BULK,
 				configuration);
+	}
+
+	private static EntityDefinition definition(EntityRelationshipMapping mapping, String entityName) {
+		if (mapping == null || entityName == null) {
+			return null;
+		}
+		for (EntityDefinition entity : mapping.entities()) {
+			if (entityName.equals(entity.name())) {
+				return entity;
+			}
+		}
+		return null;
 	}
 
 	private static void add(Map<String, LinkedHashSet<String>> sources, String entityName, String sourceIdentity) {
@@ -222,20 +255,6 @@ public class UamStagingPromotion {
 		}
 		String targetIdentity = identities.get(sourceIdentity);
 		return targetIdentity == null || targetIdentity.isBlank() ? null : targetIdentity;
-	}
-
-	private static List<String> stringList(Object value) {
-		if (!(value instanceof List<?> list)) {
-			return List.of();
-		}
-		List<String> values = new ArrayList<>();
-		for (Object item : list) {
-			String text = text(item);
-			if (text != null) {
-				values.add(text);
-			}
-		}
-		return values;
 	}
 
 	private static String text(Object value) {

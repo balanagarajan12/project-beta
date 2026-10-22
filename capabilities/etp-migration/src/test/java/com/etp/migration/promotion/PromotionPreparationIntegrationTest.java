@@ -14,9 +14,11 @@ import com.etp.migration.entity.MigrationDefinition;
 import com.etp.migration.entity.MigrationPromotion;
 import com.etp.migration.entity.PromotionStatus;
 import com.etp.migration.processing.MigrationErrorCodes;
+import com.etp.migration.run.PhaseAwait;
 import com.etp.migration.repository.MigrationDefinitionRepository;
 import com.etp.migration.repository.MigrationPromotionRepository;
 import com.etp.migration.repository.MigrationRunRepository;
+import jakarta.persistence.EntityManagerFactory;
 import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -35,6 +37,8 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -71,6 +75,10 @@ class PromotionPreparationIntegrationTest {
 	@Autowired
 	private TransactionTemplate transactionTemplate;
 	@Autowired
+	private EntityManagerFactory entityManagerFactory;
+	@Autowired
+	private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
+	@Autowired
 	@Qualifier(PostgreSqlTargetClientConfig.DATASOURCE_BEAN)
 	private DataSource targetDataSource;
 	@MockitoBean
@@ -102,8 +110,7 @@ class PromotionPreparationIntegrationTest {
 				456 Oak Ave,Knoxville
 				""", true);
 		reconcile(runId);
-		MvcResult prepared = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId).with(jwt()))
-				.andExpect(status().isOk())
+		MvcResult prepared = PhaseAwait.prepared(mockMvc, runId)
 				.andReturn();
 		String promotionId = com.jayway.jsonpath.JsonPath.read(prepared.getResponse().getContentAsString(), "$.promotionId");
 		Instant updatedAt = transactionTemplate.execute(tx ->
@@ -116,9 +123,20 @@ class PromotionPreparationIntegrationTest {
 				.andExpect(jsonPath("$.status").value("READY"))
 				.andExpect(jsonPath("$.eligibleBatches").value(1))
 				.andExpect(jsonPath("$.promotedBatches").value(0))
-				.andExpect(jsonPath("$.batches[0].promotionStatus").value("ELIGIBLE"))
-				.andExpect(jsonPath("$.batches[0].eligibleRecordCount").value(2))
-				.andExpect(jsonPath("$.batches[0].promotedRecordCount").value(0));
+				.andExpect(jsonPath("$.batchCounts.ELIGIBLE").value(1))
+				.andExpect(jsonPath("$.eligibleRecords").value(2))
+				.andExpect(jsonPath("$.batches").isEmpty());
+
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}/promotion/batches", runId).with(jwt()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.content[0].promotionStatus").value("ELIGIBLE"))
+				.andExpect(jsonPath("$.content[0].eligibleRecordCount").value(2))
+				.andExpect(jsonPath("$.content[0].durationMillis").doesNotExist())
+				.andExpect(jsonPath("$.totalElements").value(1));
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}/promotion/batches", runId)
+						.param("status", "NOT_A_STATUS")
+						.with(jwt()))
+				.andExpect(status().isBadRequest());
 
 		Instant afterGet = transactionTemplate.execute(tx ->
 				promotionRepository.findById(UUID.fromString(promotionId)).orElseThrow().getUpdatedAt());
@@ -156,22 +174,55 @@ class PromotionPreparationIntegrationTest {
 				456 Oak Ave,Knoxville
 				""", true);
 		reconcile(runId);
-		MvcResult prepared = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId).with(jwt()))
-				.andExpect(status().isOk())
+		MvcResult prepared = PhaseAwait.prepared(mockMvc, runId)
 				.andExpect(jsonPath("$.runId").value(runId))
 				.andExpect(jsonPath("$.status").value("READY"))
 				.andExpect(jsonPath("$.eligibleBatches").value(1))
 				.andExpect(jsonPath("$.eligibleRecords").value(2))
 				.andExpect(jsonPath("$.skippedRecords").value(0))
-				.andExpect(jsonPath("$.batches[0].promotionStatus").value("ELIGIBLE"))
-				.andExpect(jsonPath("$.batches[0].eligibleRecordCount").value(2))
+				.andExpect(jsonPath("$.batchCounts.ELIGIBLE").value(1))
+				.andExpect(jsonPath("$.eligibleRecords").value(2))
 				.andReturn();
 		String promotionId = com.jayway.jsonpath.JsonPath.read(prepared.getResponse().getContentAsString(), "$.promotionId");
 		assertThat(countStaging(UUID.fromString(runId))).isEqualTo(2);
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.prepared(mockMvc, runId)
 				.andExpect(jsonPath("$.promotionId").value(promotionId))
 				.andExpect(jsonPath("$.status").value("READY"));
+	}
+
+	@Test
+	void largeSourceLocatorIsNotLoadedDuringPreparation() throws Exception {
+		String runId = processCsv("""
+				addr1,city
+				123 Main St,Salem
+				456 Oak Ave,Knoxville
+				""", true);
+		reconcile(runId);
+		String fatLocator = "{\"items\":\"" + "x".repeat(2_000_000) + "\"}";
+		int updated = jdbcTemplate.update(
+				"UPDATE migration_batch SET source_locator = ?::jsonb WHERE migration_run_id = ?",
+				fatLocator,
+				UUID.fromString(runId));
+		assertThat(updated).isEqualTo(1);
+
+		Statistics statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
+		statistics.setStatisticsEnabled(true);
+		statistics.clear();
+
+		PhaseAwait.prepared(mockMvc, runId)
+				.andExpect(jsonPath("$.status").value("READY"))
+				.andExpect(jsonPath("$.eligibleBatches").value(1))
+				.andExpect(jsonPath("$.eligibleRecords").value(2))
+				.andExpect(jsonPath("$.promotedBatches").value(0));
+
+		assertThat(statistics.getEntityStatistics("com.etp.migration.entity.MigrationBatch").getLoadCount()).isZero();
+		assertThat(promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(UUID.fromString(runId)))
+				.singleElement()
+				.satisfies(promotion -> {
+					assertThat(promotion.getStatus()).isEqualTo(PromotionStatus.READY);
+					assertThat(promotion.getPromotedBatches()).isZero();
+					assertThat(promotion.getPromotedRecords()).isZero();
+				});
 	}
 
 	@Test
@@ -184,11 +235,13 @@ class PromotionPreparationIntegrationTest {
 		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
 				.andExpect(jsonPath("$.requestedBy").value("user"));
 
-		MvcResult prepared = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId)
-						.with(jwt().jwt(token -> token.subject("alice-subject").claim("preferred_username", "alice")))
-						.contentType(MediaType.APPLICATION_JSON)
-						.content("{\"requestedBy\":\"mallory\"}"))
-				.andExpect(status().isOk())
+		MvcResult prepared = PhaseAwait.prepared(
+						mockMvc,
+						runId,
+						post("/api/v1/migration-runs/{runId}/promotion/prepare", runId)
+								.with(jwt().jwt(token -> token.subject("alice-subject").claim("preferred_username", "alice")))
+								.contentType(MediaType.APPLICATION_JSON)
+								.content("{\"requestedBy\":\"mallory\"}"))
 				.andReturn();
 
 		String promotionId = com.jayway.jsonpath.JsonPath.read(prepared.getResponse().getContentAsString(), "$.promotionId");
@@ -285,8 +338,7 @@ class PromotionPreparationIntegrationTest {
 	}
 
 	private String preparePromotion(String runId) throws Exception {
-		MvcResult prepared = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId).with(jwt()))
-				.andExpect(status().isOk())
+		MvcResult prepared = PhaseAwait.prepared(mockMvc, runId)
 				.andReturn();
 		return com.jayway.jsonpath.JsonPath.read(prepared.getResponse().getContentAsString(), "$.promotionId");
 	}
@@ -316,11 +368,10 @@ class PromotionPreparationIntegrationTest {
 				""", true);
 		reconcile(runId);
 		int staged = countStaging(UUID.fromString(runId));
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.prepared(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("READY"))
 				.andExpect(jsonPath("$.eligibleRecords").value(staged))
-				.andExpect(jsonPath("$.batches[0].promotionStatus").value("ELIGIBLE"));
+				.andExpect(jsonPath("$.batchCounts.ELIGIBLE").value(1));
 	}
 
 	@Test
@@ -353,8 +404,7 @@ class PromotionPreparationIntegrationTest {
 				123 Main St,Salem
 				""", true);
 		reconcile(runId);
-		MvcResult prepared = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId).with(jwt()))
-				.andExpect(status().isOk())
+		MvcResult prepared = PhaseAwait.prepared(mockMvc, runId)
 				.andReturn();
 		String promotionId = com.jayway.jsonpath.JsonPath.read(prepared.getResponse().getContentAsString(), "$.promotionId");
 		transactionTemplate.executeWithoutResult(tx -> {
@@ -381,8 +431,7 @@ class PromotionPreparationIntegrationTest {
 	}
 
 	private void reconcile(String runId) throws Exception {
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId).with(jwt()))
-				.andExpect(status().isOk());
+		PhaseAwait.reconciled(mockMvc, runId);
 	}
 
 	private String createMapping() throws Exception {

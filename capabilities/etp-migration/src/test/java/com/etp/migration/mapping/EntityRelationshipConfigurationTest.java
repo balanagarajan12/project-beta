@@ -185,6 +185,58 @@ class EntityRelationshipConfigurationTest {
 	}
 
 	@Test
+	void geographicModelResolvesAddressLocationAfterEntitiesAreRegistered() throws Exception {
+		String json = """
+				{
+				  "modelType": "ENTITY_RELATIONSHIP",
+				  "rootEntity": "AddressLocation",
+				  "entities": [
+				    {"name": "GeographicSubAddress", "targetEntity": "geographic_sub_address", "sourceKey": "sub_address_id", "targetKey": "id"},
+				    {"name": "LocationGeometry", "targetEntity": "location_geometry", "sourceKey": "geo_id", "targetKey": "id"},
+				    {"name": "GeographicAddress", "targetEntity": "geographic_address", "sourceKey": "address_id", "targetKey": "id"},
+				    {"name": "GeographicLocation", "targetEntity": "geographic_location", "sourceKey": "geo_id", "targetKey": "id"},
+				    {"name": "GeographicPointLocation", "targetEntity": "location", "sourceKey": "geo_id", "targetKey": "id"},
+				    {"name": "ExternalIdentifier", "targetEntity": "external_identifier", "sourceKey": "external_id", "targetKey": "id"},
+				    {"name": "AddressLocation", "targetEntity": "location", "sourceKey": "address_id", "targetKey": "id"}
+				  ],
+				  "relationships": [
+				    {"parent": "AddressLocation", "child": "ExternalIdentifier", "cardinality": "ONE_TO_MANY", "targetForeignKey": {"column": "entity_id", "referencesColumn": "id"}},
+				    {"parent": "AddressLocation", "child": "GeographicAddress", "cardinality": "ONE_TO_ONE", "targetForeignKey": {"column": "location_id", "referencesColumn": "id"}},
+				    {"parent": "GeographicLocation", "child": "GeographicAddress", "cardinality": "ONE_TO_ONE", "targetForeignKey": {"column": "geographic_location_id", "referencesColumn": "id"}},
+				    {"parent": "GeographicAddress", "child": "GeographicSubAddress", "cardinality": "ONE_TO_MANY", "targetForeignKey": {"column": "address_id", "referencesColumn": "location_id"}},
+				    {"parent": "GeographicLocation", "child": "GeographicSubAddress", "cardinality": "ONE_TO_MANY", "targetForeignKey": {"column": "geographic_location_id", "referencesColumn": "id"}},
+				    {"parent": "GeographicPointLocation", "child": "GeographicLocation", "cardinality": "ONE_TO_ONE", "targetForeignKey": {"column": "location_id", "referencesColumn": "id"}},
+				    {"parent": "GeographicLocation", "child": "LocationGeometry", "cardinality": "ONE_TO_ONE", "targetForeignKey": {"column": "location_id", "referencesColumn": "id"}}
+				  ]
+				}
+				""";
+		Map<String, Object> persisted = OBJECT_MAPPER.readValue(json, new TypeReference<>() { });
+		EntityRelationshipMapping mapping = EntityRelationshipConfiguration.parse(persisted);
+
+		assertThat(mapping.entities()).extracting(EntityDefinition::name).containsExactly(
+				"GeographicSubAddress",
+				"LocationGeometry",
+				"GeographicAddress",
+				"GeographicLocation",
+				"GeographicPointLocation",
+				"ExternalIdentifier",
+				"AddressLocation");
+		assertThat(mapping.entities()).filteredOn(entity -> "location".equals(entity.targetEntity()))
+				.extracting(EntityDefinition::name)
+				.containsExactly("GeographicPointLocation", "AddressLocation");
+		assertThat(mapping.relationships()).hasSize(7);
+		assertThat(mapping.graph().outgoing("AddressLocation"))
+				.extracting(RelationshipDefinition::child)
+				.contains("GeographicAddress");
+		assertThat(mapping.relationships())
+				.filteredOn(relationship -> "GeographicAddress".equals(relationship.child())
+						&& "AddressLocation".equals(relationship.parent()))
+				.singleElement()
+				.extracting(relationship -> relationship.targetForeignKey().referencesColumn())
+				.isEqualTo("id");
+	}
+
+	@Test
 	void rejectsUnknownChild() {
 		assertInvalid(
 				model(

@@ -1,7 +1,9 @@
 package com.etp.migration.openapi;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -36,10 +38,14 @@ class OpenApiExposureIntegrationTest {
 		@Test
 		void openApiAndSwaggerRequireAuthenticationAndDoNotExist() throws Exception {
 			mockMvc.perform(get("/v3/api-docs")).andExpect(status().isUnauthorized());
+			mockMvc.perform(get("/v3/api-docs.yaml")).andExpect(status().isUnauthorized());
+			mockMvc.perform(get("/v3/api-docs/swagger-config")).andExpect(status().isUnauthorized());
+			mockMvc.perform(get("/swagger-ui")).andExpect(status().isUnauthorized());
 			mockMvc.perform(get("/swagger-ui/index.html")).andExpect(status().isUnauthorized());
 			mockMvc.perform(get("/swagger-ui.html")).andExpect(status().isUnauthorized());
 
 			mockMvc.perform(get("/v3/api-docs").with(jwt())).andExpect(status().isNotFound());
+			mockMvc.perform(get("/v3/api-docs.yaml").with(jwt())).andExpect(status().isNotFound());
 			mockMvc.perform(get("/swagger-ui/index.html").with(jwt())).andExpect(status().isNotFound());
 		}
 
@@ -58,7 +64,14 @@ class OpenApiExposureIntegrationTest {
 			mockMvc.perform(get("/v3/api-docs"))
 					.andExpect(status().isOk())
 					.andExpect(jsonPath("$.components.securitySchemes.bearer-jwt.scheme").value("bearer"));
+			mockMvc.perform(get("/v3/api-docs.yaml"))
+					.andExpect(status().isOk())
+					.andExpect(content().string(containsString("openapi:")));
+			mockMvc.perform(get("/v3/api-docs/swagger-config")).andExpect(status().isOk());
+			mockMvc.perform(get("/swagger-ui")).andExpect(status().is3xxRedirection());
 			mockMvc.perform(get("/swagger-ui/index.html")).andExpect(status().isOk());
+			mockMvc.perform(get("/swagger-ui/swagger-ui.css")).andExpect(status().isOk());
+			mockMvc.perform(get("/swagger-ui.html")).andExpect(status().is3xxRedirection());
 		}
 
 		@Test
@@ -72,8 +85,10 @@ class OpenApiExposureIntegrationTest {
 	class InTheDevProfile {
 
 		@Test
-		void openApiIsEnabledByDefault() throws Exception {
+		void openApiAndSwaggerArePublic() throws Exception {
 			mockMvc.perform(get("/v3/api-docs")).andExpect(status().isOk());
+			mockMvc.perform(get("/v3/api-docs.yaml")).andExpect(status().isOk());
+			mockMvc.perform(get("/swagger-ui/index.html")).andExpect(status().isOk());
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package com.etp.migration.processing;
 
 import com.etp.migration.connector.source.SftpSourceException;
+import com.etp.migration.connector.target.TargetFailureDiagnostics;
 import com.etp.migration.connector.target.TargetInfrastructureException;
 import com.etp.migration.entity.MigrationBatchStatus;
 import com.etp.migration.entity.MigrationError;
@@ -23,7 +24,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * Records a preparation or planning failure and fails a still-queued, unprepared run.
+ * Records a preparation or planning failure and fails an unprepared QUEUED or RUNNING run.
  * A run that was only created, or that already has batches in flight, is left unchanged.
  */
 @Component
@@ -62,7 +63,11 @@ public class PreparationFailureRecorder {
 
 	private void write(UUID runId, RuntimeException failure) {
 		MigrationRun run = migrationRunRepository.findById(runId).orElse(null);
-		if (run == null || run.getStatus() != MigrationRunStatus.QUEUED || prepared(run)) {
+		if (run == null || prepared(run)) {
+			return;
+		}
+		MigrationRunStatus status = run.getStatus();
+		if (status != MigrationRunStatus.QUEUED && status != MigrationRunStatus.RUNNING) {
 			return;
 		}
 		long inFlight = migrationBatchRepository.countByMigrationRun_IdAndStatusIn(
@@ -74,32 +79,49 @@ public class PreparationFailureRecorder {
 						MigrationBatchStatus.PROCESSING));
 		String code = errorCode(failure);
 		String message = message(failure);
-		log.warn("Preparation failed runId={} errorCode={} exceptionType={}",
-				runId, code, failure.getClass().getName());
+		String raw = failure.getMessage();
+		if (raw == null || raw.isBlank()) {
+			log.warn("Preparation failed runId={} errorCode={} exceptionType={} cause={}",
+					runId, code, failure.getClass().getName(), TargetFailureDiagnostics.describe(failure), failure);
+		} else {
+			log.warn("Preparation failed runId={} errorCode={} exceptionType={} cause={}",
+					runId, code, failure.getClass().getName(), TargetFailureDiagnostics.describe(failure));
+		}
 		String targetEntity = run.getMigrationDefinition() == null
 				? null
 				: run.getMigrationDefinition().getTargetEntity();
-		MigrationError error = new MigrationError();
-		error.setMigrationRun(run);
-		error.setStage(MigrationStage.EXTRACT);
-		error.setErrorCode(code);
-		error.setErrorType("PREPARATION_FAILED");
-		error.setErrorMessage(message);
-		error.setErrorDetails(MigrationErrorDetails.collect(
-				failure, code, "PREPARE", runId, null, targetEntity, false));
-		error.setRetryable(false);
-		migrationErrorRepository.save(error);
+		boolean alreadyRecorded = migrationErrorRepository
+				.existsByMigrationRun_IdAndMigrationBatchIsNullAndStageAndErrorCodeAndErrorMessageAndSourceRecordKeyIsNull(
+						runId, MigrationStage.EXTRACT, code, message);
+		if (!alreadyRecorded) {
+			MigrationError error = new MigrationError();
+			error.setMigrationRun(run);
+			error.setStage(MigrationStage.EXTRACT);
+			error.setErrorCode(code);
+			error.setErrorType("PREPARATION_FAILED");
+			error.setErrorMessage(message);
+			java.util.Map<String, Object> details = MigrationErrorDetails.collect(
+					failure, code, "PREPARE", runId, null, targetEntity, false);
+			details.put("category", "CONFIGURATION");
+			details.put("location", TargetFailureDiagnostics.location(failure));
+			error.setErrorDetails(MigrationErrorDetails.publicDetails(details));
+			error.setRetryable(false);
+			migrationErrorRepository.save(error);
+		}
 		if (inFlight > 0) {
 			return;
 		}
 		Instant now = Instant.now();
-		MigrationRunTransitions.require(MigrationRunStatus.QUEUED, MigrationRunStatus.RUNNING);
-		run.setStatus(MigrationRunStatus.RUNNING);
+		if (status == MigrationRunStatus.QUEUED) {
+			MigrationRunTransitions.require(MigrationRunStatus.QUEUED, MigrationRunStatus.RUNNING);
+			run.setStatus(MigrationRunStatus.RUNNING);
+		}
 		if (run.getStartedAt() == null) {
 			run.setStartedAt(now);
 		}
 		MigrationRunTransitions.require(MigrationRunStatus.RUNNING, MigrationRunStatus.FAILED);
 		run.setStatus(MigrationRunStatus.FAILED);
+		run.setErrorMessage(message);
 		run.setCompletedAt(now);
 		run.setUpdatedAt(now);
 	}
@@ -129,10 +151,7 @@ public class PreparationFailureRecorder {
 	}
 
 	private static String message(RuntimeException failure) {
-		String safe = MigrationErrorDetails.safe(failure.getMessage());
-		if (safe == null) {
-			return "Preparation failed";
-		}
-		return safe.length() <= MAX_MESSAGE ? safe : safe.substring(0, MAX_MESSAGE);
+		String diagnostic = MigrationErrorDetails.diagnostic(failure);
+		return diagnostic.length() <= MAX_MESSAGE ? diagnostic : diagnostic.substring(0, MAX_MESSAGE);
 	}
 }

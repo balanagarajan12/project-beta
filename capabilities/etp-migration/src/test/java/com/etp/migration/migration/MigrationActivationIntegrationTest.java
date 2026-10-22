@@ -2,6 +2,7 @@ package com.etp.migration.migration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -116,11 +117,17 @@ class MigrationActivationIntegrationTest {
 		assertThat(promotionRepository.count()).isEqualTo(promotions);
 		assertThat(reconciliationRepository.count()).isEqualTo(reconciliations);
 
-		mockMvc.perform(post("/api/v1/migrations/{id}/execute", created.definitionId)
+		MvcResult accepted = mockMvc.perform(post("/api/v1/migrations/{id}/execute", created.definitionId)
 						.with(jwt())
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{}"))
-				.andExpect(status().isCreated())
+				.andExpect(status().isAccepted())
+				.andExpect(jsonPath("$.status").value("QUEUED"))
+				.andReturn();
+		String runId = com.jayway.jsonpath.JsonPath.read(accepted.getResponse().getContentAsString(), "$.id");
+		com.etp.migration.run.ExecutionAwait.untilTerminal(mockMvc, runId);
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
+				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.status").value("COMPLETED"));
 	}
 

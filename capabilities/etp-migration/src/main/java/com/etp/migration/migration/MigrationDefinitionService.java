@@ -86,6 +86,7 @@ public class MigrationDefinitionService {
 		definition.setLoadMode(request.loadMode() != null ? request.loadMode() : LoadMode.BULK);
 		definition.setStatus(MigrationConfigStatus.DRAFT);
 		definition.setConfiguration(copyConfiguration(request.configuration()));
+		DefinitionConfigurationContract.require(definition.getConfiguration());
 		validatePromotionConfiguration(definition.getConfiguration());
 		PostgreSqlBulkTargetRules.require(
 				definition.getTargetType(),

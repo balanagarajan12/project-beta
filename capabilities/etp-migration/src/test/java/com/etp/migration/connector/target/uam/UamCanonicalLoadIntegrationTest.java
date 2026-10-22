@@ -4,8 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.etp.migration.connector.source.sftp.SftpCredentialProperties;
+import com.etp.migration.run.PhaseAwait;
+import com.etp.migration.connector.target.postgresql.PostgreSqlConnectionProperties;
+import com.etp.migration.connector.target.postgresql.PostgreSqlConnectionRegistry;
 import com.etp.migration.connector.target.LoadableTargetRecord;
 import com.etp.migration.connector.target.MigrationTargetContext;
 import com.etp.migration.connector.target.TargetInfrastructureException;
@@ -19,19 +24,28 @@ import com.etp.migration.processing.TargetRecord;
 import com.etp.migration.repository.MigrationDefinitionRepository;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.PublicKey;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import javax.sql.DataSource;
+import org.apache.sshd.common.config.keys.PublicKeyEntry;
+import org.apache.sshd.common.file.virtualfs.VirtualFileSystemFactory;
+import org.apache.sshd.server.SshServer;
+import org.apache.sshd.server.keyprovider.SimpleGeneratorHostKeyProvider;
+import org.apache.sshd.sftp.server.SftpSubsystemFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.env.Environment;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -67,6 +81,18 @@ class UamCanonicalLoadIntegrationTest {
 
 	@Autowired
 	private UamPostgreSqlTargetConnector canonicalConnector;
+
+	@Autowired
+	private SftpCredentialProperties sftpProperties;
+
+	@Autowired
+	private Environment environment;
+
+	@Autowired
+	private PostgreSqlConnectionProperties connectionProperties;
+
+	@Autowired
+	private PostgreSqlConnectionRegistry connectionRegistry;
 
 	@Autowired
 	private PostgreSqlTargetConnector stagingConnector;
@@ -174,6 +200,10 @@ class UamCanonicalLoadIntegrationTest {
 				CREATE UNIQUE INDEX IF NOT EXISTS uk_uam_entity_stage_run_identity
 				ON migration_staging.uam_entity_stage (migration_run_id, idempotency_key)
 				""");
+		execute("""
+				CREATE INDEX IF NOT EXISTS idx_uam_entity_stage_run_batch
+				ON migration_staging.uam_entity_stage (migration_run_id, migration_batch_id)
+				""");
 		execute("DELETE FROM target_identity_allocator");
 		execute("DELETE FROM migration_identity_allocation");
 	}
@@ -260,8 +290,7 @@ class UamCanonicalLoadIntegrationTest {
 				"SELECT COUNT(*) FROM migration_staging.uam_entity_stage WHERE migration_run_id = ?",
 				runId)).isEqualTo("500");
 
-		MvcResult reconciled = mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId).with(jwt()))
-				.andExpect(status().isOk())
+		MvcResult reconciled = PhaseAwait.reconciled(mockMvc, runId)
 				.andReturn();
 		String reconciliationBody = reconciled.getResponse().getContentAsString();
 		assertThat(com.jayway.jsonpath.JsonPath.read(reconciliationBody, "$.status").toString())
@@ -273,16 +302,14 @@ class UamCanonicalLoadIntegrationTest {
 		assertThat(allocationCount(runId)).isEqualTo("0");
 		assertThat(count("uam.location")).isZero();
 
-		MvcResult prepared = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId).with(jwt()))
-				.andExpect(status().isOk())
+		MvcResult prepared = PhaseAwait.prepared(mockMvc, runId)
 				.andReturn();
 		String preparedBody = prepared.getResponse().getContentAsString();
 		assertThat(com.jayway.jsonpath.JsonPath.read(preparedBody, "$.status").toString()).isEqualTo("READY");
 		assertThat(((Number) com.jayway.jsonpath.JsonPath.read(preparedBody, "$.eligibleRecords")).intValue())
 				.isEqualTo(500);
 
-		MvcResult promoted = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		MvcResult promoted = PhaseAwait.promoted(mockMvc, runId)
 				.andReturn();
 		String promotedBody = promoted.getResponse().getContentAsString();
 		assertThat(com.jayway.jsonpath.JsonPath.read(promotedBody, "$.status").toString())
@@ -370,15 +397,12 @@ class UamCanonicalLoadIntegrationTest {
 			assertThat(link.get("parentTargetIdentity")).isNull();
 		});
 
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId).with(jwt()))
-				.andExpect(status().isOk());
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId).with(jwt()))
-				.andExpect(status().isOk());
+		PhaseAwait.reconciled(mockMvc, runId);
+		PhaseAwait.prepared(mockMvc, runId);
 		execute("ALTER TABLE uam.geographic_sub_address ADD CONSTRAINT ck_reject_sub_address CHECK (false)");
 		Map<String, String> allocated;
 		try {
-			MvcResult failed = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-					.andExpect(status().isOk())
+			MvcResult failed = PhaseAwait.promoted(mockMvc, runId)
 					.andReturn();
 			String failedBody = failed.getResponse().getContentAsString();
 			assertThat(com.jayway.jsonpath.JsonPath.read(failedBody, "$.status").toString())
@@ -401,10 +425,8 @@ class UamCanonicalLoadIntegrationTest {
 			execute("ALTER TABLE uam.geographic_sub_address DROP CONSTRAINT IF EXISTS ck_reject_sub_address");
 		}
 
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId).with(jwt()))
-				.andExpect(status().isOk());
-		MvcResult promoted = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.prepared(mockMvc, runId);
+		MvcResult promoted = PhaseAwait.promoted(mockMvc, runId)
 				.andReturn();
 		assertThat(com.jayway.jsonpath.JsonPath.read(promoted.getResponse().getContentAsString(), "$.status").toString())
 				.as(promoted.getResponse().getContentAsString())
@@ -452,8 +474,7 @@ class UamCanonicalLoadIntegrationTest {
 				runId)).isEqualTo("515");
 		assertThat(stagedEntity(stagedPayloads(runId), "GeographicSubAddress", "SUB010").get("targetIdentity")).isNull();
 
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk());
+		PhaseAwait.promoted(mockMvc, runId);
 		assertThat(allocatedIdentities(runId)).isEqualTo(allocated);
 		assertThat(count("uam.geographic_sub_address")).isEqualTo(10);
 		assertThat(count("uam.location")).isEqualTo(202);
@@ -467,23 +488,20 @@ class UamCanonicalLoadIntegrationTest {
 		UUID runId = executeMigration(objectKey, 5);
 		assertThat(allocationCount(runId)).isEqualTo("0");
 		assertThat(count("uam.location")).isZero();
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId).with(jwt()))
-				.andExpect(status().isOk());
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId).with(jwt()))
-				.andExpect(status().isOk());
+		PhaseAwait.reconciled(mockMvc, runId);
+		PhaseAwait.prepared(mockMvc, runId);
 
 		execute("ALTER TABLE uam.location ADD CONSTRAINT ck_reject_uam_promotion CHECK (false)");
 		Map<String, String> allocated;
 		try {
-			MvcResult failed = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-					.andExpect(status().isOk())
+			MvcResult failed = PhaseAwait.promoted(mockMvc, runId)
 					.andReturn();
 			String failedBody = failed.getResponse().getContentAsString();
 			assertThat(com.jayway.jsonpath.JsonPath.read(failedBody, "$.status").toString())
 					.as(failedBody)
 					.isEqualTo("PROMOTION_FAILED");
-			assertThat(com.jayway.jsonpath.JsonPath.read(failedBody, "$.batches[0].promotionStatus").toString())
-					.isEqualTo("FAILED");
+			assertThat(com.jayway.jsonpath.JsonPath.read(failedBody, "$.batchCounts.FAILED").toString())
+					.isEqualTo("1");
 			assertThat(count("uam.location")).isZero();
 			assertThat(count("uam.geographic_address")).isZero();
 			assertThat(count("uam.geographic_location")).isZero();
@@ -498,13 +516,11 @@ class UamCanonicalLoadIntegrationTest {
 			execute("ALTER TABLE uam.location DROP CONSTRAINT IF EXISTS ck_reject_uam_promotion");
 		}
 
-		MvcResult preparedAgain = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId).with(jwt()))
-				.andExpect(status().isOk())
+		MvcResult preparedAgain = PhaseAwait.prepared(mockMvc, runId)
 				.andReturn();
 		assertThat(com.jayway.jsonpath.JsonPath.read(preparedAgain.getResponse().getContentAsString(), "$.status").toString())
 				.isEqualTo("READY");
-		MvcResult promoted = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		MvcResult promoted = PhaseAwait.promoted(mockMvc, runId)
 				.andReturn();
 		assertThat(com.jayway.jsonpath.JsonPath.read(promoted.getResponse().getContentAsString(), "$.status").toString())
 				.as(promoted.getResponse().getContentAsString())
@@ -517,8 +533,7 @@ class UamCanonicalLoadIntegrationTest {
 		assertThat(count("uam.location_geometry")).isEqualTo(1);
 		assertThat(count("uam.geographic_sub_address")).isZero();
 
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk());
+		PhaseAwait.promoted(mockMvc, runId);
 		assertThat(allocatedIdentities(runId)).isEqualTo(allocated);
 		assertThat(count("uam.location")).isEqualTo(2);
 		assertThat(count("uam.geographic_address")).isEqualTo(1);
@@ -533,7 +548,7 @@ class UamCanonicalLoadIntegrationTest {
 				canonical("AddressLocation", "LOC-000000001", Map.of("at_type", "geographicAddress", "name", "Address 001"), List.of()),
 				canonical("GeographicPointLocation", "GEO-LOC-000000001", Map.of("at_type", "geographicLocation"), List.of()),
 				canonical("GeographicLocation", "GEO-000000001", Map.of("geo_json_type", "Point"), List.of(
-						link("GeographicPointLocation", "GEO-LOC-000000001"))),
+						link("GeographicPointLocation", "GEO-LOC-000000001", "location_id", "id"))),
 				canonical("GeographicAddress", "ADDR-0000000001", Map.of(
 						"street_number", "1",
 						"street_name", "Sample Street",
@@ -543,13 +558,13 @@ class UamCanonicalLoadIntegrationTest {
 						"postcode", "3001",
 						"country", "Australia",
 						"country_code", "AU"), List.of(
-						link("AddressLocation", "LOC-000000001"),
-						link("GeographicLocation", "GEO-000000001"))),
+						link("AddressLocation", "LOC-000000001", "location_id", "id"),
+						link("GeographicLocation", "GEO-000000001", "geographic_location_id", "id"))),
 				canonical("LocationGeometry", "GEOM-000000001", Map.of(
 						"geometry_type", "Point",
 						"x", "144.910000",
 						"y", "-37.790000"), List.of(
-						link("GeographicLocation", "GEO-000000001"))));
+						link("GeographicLocation", "GEO-000000001", "location_id", "id"))));
 		canonicalConnector.load(context("uam"), records);
 		canonicalConnector.load(context("uam"), records);
 		assertThat(count("uam.location")).isEqualTo(2);
@@ -626,14 +641,14 @@ class UamCanonicalLoadIntegrationTest {
 						"created_at", " "), List.of()),
 				canonical("GeographicLocation", "GEO-1", Map.of(
 						"geo_json_type", "Point"), List.of(
-						link("GeographicPointLocation", "GEO-LOC-1"))),
+						link("GeographicPointLocation", "GEO-LOC-1", "location_id", "id"))),
 				canonical("LocationGeometry", "GEOM-1", attributes(
 						"geometry_type", "Point",
 						"x", "144.910000",
 						"y", "-37.790000",
 						"z", " ",
 						"raw_geojson", geojson), List.of(
-						link("GeographicLocation", "GEO-1"))));
+						link("GeographicLocation", "GEO-1", "location_id", "id"))));
 		canonicalConnector.load(contextWithoutColumnTypes(), records);
 
 		assertThat(row("""
@@ -661,11 +676,11 @@ class UamCanonicalLoadIntegrationTest {
 						"at_type", "geographicLocation",
 						"created_at", " "), List.of()),
 				canonical("GeographicLocation", "GEO-2", Map.of("geo_json_type", "Point"), List.of(
-						link("GeographicPointLocation", "GEO-LOC-2"))),
+						link("GeographicPointLocation", "GEO-LOC-2", "location_id", "id"))),
 				canonical("LocationGeometry", "GEOM-2", Map.of(
 						"geometry_type", "Point",
 						"x", "north"), List.of(
-						link("GeographicLocation", "GEO-2"))))))
+						link("GeographicLocation", "GEO-2", "location_id", "id"))))))
 				.isInstanceOf(TargetInfrastructureException.class)
 				.hasMessageContaining("column 'x'")
 				.hasMessageContaining("numeric");
@@ -800,6 +815,327 @@ class UamCanonicalLoadIntegrationTest {
 				runId)).isEqualTo("1");
 	}
 
+	@Test
+	void definitionConfigurationRejectsDerivedFields() throws Exception {
+		String body = configuration("manual/rejected.csv", promotionConfiguration()).replace(
+				"\"promotion\": {\"enabled\": true}",
+				"""
+				"tables": {"AddressLocation": "location"},
+				"promotion": {"enabled": true}""");
+		mockMvc.perform(post("/api/v1/migration-configurations")
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(body))
+				.andExpect(status().isBadRequest())
+				.andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath("$.message")
+						.value(org.hamcrest.Matchers.containsString("definition.configuration.tables")));
+	}
+
+	@Test
+	void singleRecordSftpCsvStagesAndPromotesFromEntityMappings() throws Exception {
+		Path root = Files.createTempDirectory("sftp-single-record");
+		Path knownHosts = Files.createTempFile("sftp-single-known-hosts", "");
+		SshServer server = null;
+		Path previousKnownHosts = sftpProperties.getKnownHostsFile();
+		Map<String, SftpCredentialProperties.Credential> previousCredentials =
+				new LinkedHashMap<>(sftpProperties.getCredentials());
+		String password = UUID.randomUUID().toString();
+		try {
+			Path upload = root.resolve("upload");
+			Files.createDirectories(upload);
+			Files.writeString(upload.resolve("geographic_addresses_19102026_v1_single_record.csv"), singleRecordCsv());
+			server = SshServer.setUpDefaultServer();
+			server.setPort(0);
+			SimpleGeneratorHostKeyProvider hostKeys = new SimpleGeneratorHostKeyProvider(root.resolve("host.ser"));
+			hostKeys.setAlgorithm("EC");
+			hostKeys.setKeySize(256);
+			server.setKeyPairProvider(hostKeys);
+			server.setPasswordAuthenticator((username, supplied, session) ->
+					"e2e".equals(username) && password.equals(supplied));
+			server.setSubsystemFactories(List.of(new SftpSubsystemFactory()));
+			server.setFileSystemFactory(new VirtualFileSystemFactory(root));
+			server.start();
+			PublicKey hostKey = server.getKeyPairProvider().loadKeys(null).iterator().next().getPublic();
+			Files.writeString(knownHosts, "[127.0.0.1]:" + server.getPort() + " "
+					+ PublicKeyEntry.toString(hostKey) + System.lineSeparator());
+			sftpProperties.setKnownHostsFile(knownHosts);
+			SftpCredentialProperties.Credential credential = new SftpCredentialProperties.Credential();
+			credential.setUsername("e2e");
+			credential.setPassword(password);
+			Map<String, SftpCredentialProperties.Credential> credentials = new LinkedHashMap<>(previousCredentials);
+			credentials.put("single-record", credential);
+			sftpProperties.setCredentials(credentials);
+
+			UUID runId = executeBody(singleRecordConfiguration(server.getPort()), 5);
+			assertThat(count("uam.location")).isZero();
+			assertThat(text(
+					"SELECT COUNT(*) FROM migration_staging.uam_entity_stage WHERE migration_run_id = ?",
+					runId)).isEqualTo("5");
+			assertThat(stagedPayloads(runId).stream()
+					.filter(payload -> "GeographicSubAddress".equals(payload.get("entity")))
+					.count()).isZero();
+			assertThat(stagedEntity(stagedPayloads(runId), "GeographicAddress", "SRC-SFU-000001")
+					.get("targetEntity")).isEqualTo("geographic_address");
+
+			promote(runId);
+			assertThat(count("uam.location")).isEqualTo(2);
+			assertThat(count("uam.geographic_address")).isEqualTo(1);
+			assertThat(count("uam.geographic_location")).isEqualTo(1);
+			assertThat(count("uam.location_geometry")).isEqualTo(1);
+			assertThat(count("uam.geographic_sub_address")).isZero();
+			assertThat(text("SELECT street_name FROM uam.geographic_address")).isEqualTo("Maple");
+			assertThat(text("SELECT state_or_province FROM uam.geographic_address")).isEqualTo("TX");
+			assertThat(text("SELECT city FROM uam.geographic_address")).isEqualTo("Austin");
+			assertThat(text("""
+					SELECT to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
+					FROM uam.location WHERE id LIKE 'LOC-%'
+					""")).isEqualTo("2024-01-01 00:00:37");
+			assertThat(text("SELECT location_id FROM uam.geographic_address")).startsWith("LOC-");
+			assertThat(text("SELECT geographic_location_id FROM uam.geographic_address")).startsWith("GEO-");
+			assertThat(text("SELECT location_id FROM uam.geographic_location")).startsWith("GEO-LOC-");
+			assertThat(text("SELECT location_id FROM uam.location_geometry")).startsWith("GEO-");
+			assertThat(text("SELECT x::text FROM uam.location_geometry")).isEqualTo("-123.6429");
+			assertThat(text("SELECT y::text FROM uam.location_geometry")).isEqualTo("25.7919");
+		} finally {
+			sftpProperties.setKnownHostsFile(previousKnownHosts);
+			sftpProperties.setCredentials(previousCredentials);
+			if (server != null && server.isStarted()) {
+				server.stop();
+			}
+		}
+	}
+
+	@Test
+	void serviceRecordsPromoteWithoutGeographicTables() throws Exception {
+		execute("DROP SCHEMA IF EXISTS svc CASCADE");
+		execute("CREATE SCHEMA svc");
+		execute("""
+				CREATE TABLE svc.service (
+				  id varchar(64) PRIMARY KEY,
+				  name varchar(128) NOT NULL,
+				  created_at timestamptz NOT NULL
+				)
+				""");
+		execute("""
+				CREATE TABLE svc.service_characteristic (
+				  id varchar(64) PRIMARY KEY,
+				  service_id varchar(64) NOT NULL REFERENCES svc.service (id),
+				  name varchar(128) NOT NULL,
+				  value varchar(128)
+				)
+				""");
+		String objectKey = "manual/service-" + System.nanoTime() + ".csv";
+		write(objectKey, """
+				service_id,service_name,characteristic_id,characteristic_name,characteristic_value
+				SVC-100,Internet,CHR-1,speed,100
+				""");
+		try {
+			UUID runId = executeBody(serviceConfiguration(objectKey), 2);
+			assertThat(count("uam.location")).isZero();
+			assertThat(count("svc.service")).isZero();
+			assertThat(text(
+					"SELECT COUNT(*) FROM migration_staging.uam_entity_stage WHERE migration_run_id = ?",
+					runId)).isEqualTo("2");
+			promote(runId);
+			assertThat(count("uam.location")).isZero();
+			assertThat(count("uam.geographic_address")).isZero();
+			assertThat(count("svc.service")).isEqualTo(1);
+			assertThat(count("svc.service_characteristic")).isEqualTo(1);
+			assertThat(text("SELECT name FROM svc.service")).isEqualTo("Internet");
+			assertThat(text("SELECT name FROM svc.service_characteristic")).isEqualTo("speed");
+			assertThat(text("SELECT value FROM svc.service_characteristic")).isEqualTo("100");
+			assertThat(text("""
+					SELECT CASE WHEN c.service_id = s.id THEN 'match' ELSE 'mismatch' END
+					FROM svc.service_characteristic c
+					JOIN svc.service s ON s.id = c.service_id
+					""")).isEqualTo("match");
+			assertThat(text("SELECT CASE WHEN created_at IS NOT NULL THEN 'set' ELSE 'missing' END FROM svc.service"))
+					.isEqualTo("set");
+		} finally {
+			execute("DROP SCHEMA IF EXISTS svc CASCADE");
+		}
+	}
+
+	@Test
+	void customerAndServiceUseSeparateConnectionsSchemasAndSourceFields() throws Exception {
+		String suffix = Long.toUnsignedString(System.nanoTime());
+		String customerDatabase = "cust_" + suffix;
+		String serviceDatabase = "svc_" + suffix;
+		String customerStage = "stg_c_" + suffix;
+		String serviceStage = "stg_s_" + suffix;
+		String baseUrl = environment.getProperty("etp.migration.target.postgresql.url");
+		String username = environment.getProperty("etp.migration.target.postgresql.username");
+		String password = environment.getProperty("etp.migration.target.postgresql.password");
+		String customerUrl = baseUrl.replaceFirst("^(jdbc:postgresql://[^/]+/)[^?]+", "$1" + customerDatabase);
+		String serviceUrl = baseUrl.replaceFirst("^(jdbc:postgresql://[^/]+/)[^?]+", "$1" + serviceDatabase);
+		createDatabase(customerDatabase);
+		createDatabase(serviceDatabase);
+		executeJdbc(customerUrl, username, password, """
+				CREATE SCHEMA customer;
+				CREATE TABLE customer.customer (
+				  id varchar(64) PRIMARY KEY,
+				  name varchar(128) NOT NULL,
+				  created_at timestamptz NOT NULL
+				);
+				CREATE TABLE customer.customer_contact (
+				  id varchar(64) PRIMARY KEY,
+				  customer_id varchar(64) NOT NULL REFERENCES customer.customer (id),
+				  email varchar(128) NOT NULL
+				)
+				""");
+		executeJdbc(serviceUrl, username, password, """
+				CREATE SCHEMA "serviceInventory";
+				CREATE TABLE "serviceInventory".service (
+				  id varchar(64) PRIMARY KEY,
+				  name varchar(128) NOT NULL,
+				  created_at timestamptz NOT NULL
+				);
+				CREATE TABLE "serviceInventory".service_characteristic (
+				  id varchar(64) PRIMARY KEY,
+				  service_id varchar(64) NOT NULL REFERENCES "serviceInventory".service (id),
+				  name varchar(128) NOT NULL
+				)
+				""");
+		registerConnection("migration-db", baseUrl, username, password);
+		registerConnection("customer-db", customerUrl, username, password);
+		registerConnection("service-db", serviceUrl, username, password);
+		execute("CREATE SCHEMA " + customerStage);
+		execute("CREATE SCHEMA " + serviceStage);
+		execute(stagingTable(customerStage));
+		execute(stagingTable(serviceStage));
+
+		assertThatThrownBy(() -> connectionRegistry.target(Map.of("target", Map.of("connectionRef", "missing-db"))))
+				.isInstanceOf(com.etp.migration.connector.target.TargetInfrastructureException.class)
+				.hasMessageContaining("missing-db")
+				.hasMessageNotContaining(password);
+
+		String customerKey = "manual/customer-" + suffix + ".csv";
+		write(customerKey, """
+				party_id,display_name,contact_email
+				P-1,Ada,ada@example.com
+				""");
+		UUID customerRun = executeBody(relationalConfiguration(
+				"customer",
+				"Customer",
+				"customer",
+				"customer-db",
+				customerStage,
+				customerKey,
+				"""
+				{"entity": "Customer", "targetEntity": "customer", "sourceKey": "party_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "CU-", "sequenceLength": 6}},
+				{"entity": "CustomerContact", "targetEntity": "customer_contact", "sourceKey": "contact_email", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "CT-", "sequenceLength": 6}}
+				""",
+				"""
+				{"parent": "Customer", "child": "CustomerContact", "cardinality": "ONE_TO_MANY", "keys": [{"parentField": "party_id", "childField": "party_id"}], "targetForeignKey": {"column": "customer_id", "referencesColumn": "id"}}
+				""",
+				"""
+				{"sequenceNo": 1, "entity": "Customer", "sourceField": "display_name", "targetField": "name", "transformationType": "DIRECT", "mandatory": true, "enabled": true},
+				{"sequenceNo": 2, "entity": "CustomerContact", "sourceField": "contact_email", "targetField": "email", "transformationType": "DIRECT", "mandatory": true, "enabled": true}
+				"""), 2);
+		assertThat(text("SELECT COUNT(*) FROM " + customerStage + ".entity_stage WHERE migration_run_id = ?", customerRun))
+				.isEqualTo("2");
+		assertThat(text("SELECT COUNT(*) FROM " + serviceStage + ".entity_stage WHERE migration_run_id = ?", customerRun))
+				.isEqualTo("0");
+		promote(customerRun);
+		assertThat(scalar(customerUrl, username, password, "SELECT name FROM customer.customer")).isEqualTo("Ada");
+		assertThat(scalar(customerUrl, username, password, "SELECT email FROM customer.customer_contact")).isEqualTo("ada@example.com");
+		assertThat(scalar(customerUrl, username, password, """
+				SELECT CASE WHEN c.customer_id = p.id THEN 'match' ELSE 'mismatch' END
+				FROM customer.customer_contact c JOIN customer.customer p ON p.id = c.customer_id
+				""")).isEqualTo("match");
+		assertThat(scalar(serviceUrl, username, password, "SELECT COUNT(*) FROM \"serviceInventory\".service")).isEqualTo("0");
+
+		String serviceKey = "manual/service-" + suffix + ".csv";
+		write(serviceKey, """
+				svc_code,svc_name,char_code,char_name
+				S-1,Fiber,C-1,bandwidth
+				""");
+		UUID serviceRun = executeBody(relationalConfiguration(
+				"service",
+				"Service",
+				"serviceInventory",
+				"service-db",
+				serviceStage,
+				serviceKey,
+				"""
+				{"entity": "Service", "targetEntity": "service", "sourceKey": "svc_code", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "SV-", "sequenceLength": 6}},
+				{"entity": "ServiceCharacteristic", "targetEntity": "service_characteristic", "sourceKey": "char_code", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "SC-", "sequenceLength": 6}}
+				""",
+				"""
+				{"parent": "Service", "child": "ServiceCharacteristic", "cardinality": "ONE_TO_MANY", "keys": [{"parentField": "svc_code", "childField": "svc_code"}], "targetForeignKey": {"column": "service_id", "referencesColumn": "id"}}
+				""",
+				"""
+				{"sequenceNo": 1, "entity": "Service", "sourceField": "svc_name", "targetField": "name", "transformationType": "DIRECT", "mandatory": true, "enabled": true},
+				{"sequenceNo": 2, "entity": "ServiceCharacteristic", "sourceField": "char_name", "targetField": "name", "transformationType": "DIRECT", "mandatory": true, "enabled": true}
+				"""), 2);
+		assertThat(text("SELECT COUNT(*) FROM " + serviceStage + ".entity_stage WHERE migration_run_id = ?", serviceRun))
+				.isEqualTo("2");
+		assertThat(text("SELECT COUNT(*) FROM " + customerStage + ".entity_stage WHERE migration_run_id = ?", serviceRun))
+				.isEqualTo("0");
+		promote(serviceRun);
+		assertThat(scalar(serviceUrl, username, password, "SELECT name FROM \"serviceInventory\".service")).isEqualTo("Fiber");
+		assertThat(scalar(serviceUrl, username, password, "SELECT name FROM \"serviceInventory\".service_characteristic"))
+				.isEqualTo("bandwidth");
+		assertThat(scalar(serviceUrl, username, password, """
+				SELECT CASE WHEN c.service_id = s.id THEN 'match' ELSE 'mismatch' END
+				FROM "serviceInventory".service_characteristic c
+				JOIN "serviceInventory".service s ON s.id = c.service_id
+				""")).isEqualTo("match");
+		assertThat(scalar(customerUrl, username, password, "SELECT COUNT(*) FROM customer.customer")).isEqualTo("1");
+		assertThat(count("uam.location")).isZero();
+	}
+
+	@Test
+	void missingTargetTableAndMismatchedForeignKeyFailBeforeInsert() {
+		assertThatThrownBy(() -> canonicalConnector.load(context("uam"), List.of(record(
+				"AddressLocation",
+				"missing_table",
+				"LOC-1",
+				Map.of("at_type", "geographicAddress"),
+				List.of()))))
+				.isInstanceOf(TargetInfrastructureException.class)
+				.hasMessageContaining("uam.missing_table")
+				.hasMessageContaining("was not found");
+
+		assertThatThrownBy(() -> canonicalConnector.load(context("uam"), List.of(
+				canonical("GeographicLocation", "GEO-1", Map.of(
+						"geo_json_type", "Point",
+						"location_id", "GEO-LOC-1"), List.of()),
+				canonical("GeographicAddress", "ADDR-1", Map.of(), List.of(
+						link("GeographicLocation", "GEO-1", "geographic_location_id", "location_id"))))))
+				.isInstanceOf(TargetInfrastructureException.class)
+				.hasMessageContaining("geographic_location_id")
+				.hasMessageContaining("references 'id'")
+				.hasMessageContaining("not 'location_id'");
+
+		assertThatThrownBy(() -> canonicalConnector.load(context("uam"), List.of(
+				canonical("AddressLocation", "LOC-1", Map.of(), List.of()))))
+				.isInstanceOf(TargetInfrastructureException.class)
+				.hasMessage("Column 'at_type' on 'location' is required");
+	}
+
+	private static LoadableTargetRecord record(
+			String entity,
+			String targetEntity,
+			String targetIdentity,
+			Map<String, Object> attributes,
+			List<Map<String, Object>> relationships) {
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("entity", entity);
+		fields.put("targetEntity", targetEntity);
+		fields.put("targetKey", "id");
+		fields.put("targetIdentity", targetIdentity);
+		fields.put("attributes", attributes);
+		fields.put("relationships", relationships);
+		return new LoadableTargetRecord(1L, new TargetRecord(fields), entity + ":" + targetIdentity);
+	}
+
+	private void promote(UUID runId) throws Exception {
+		PhaseAwait.reconciled(mockMvc, runId);
+		PhaseAwait.prepared(mockMvc, runId);
+		PhaseAwait.promoted(mockMvc, runId);
+	}
+
 	private UUID migrate(String objectKey, int expectedSuccess) throws Exception {
 		String body = configuration(objectKey);
 		MvcResult created = mockMvc.perform(post("/api/v1/migration-configurations")
@@ -899,7 +1235,10 @@ class UamCanonicalLoadIntegrationTest {
 	}
 
 	private UUID executeMigration(String objectKey, int expectedSuccess) throws Exception {
-		String body = configuration(objectKey, promotionConfiguration());
+		return executeBody(configuration(objectKey, promotionConfiguration()), expectedSuccess);
+	}
+
+	private UUID executeBody(String body, int expectedSuccess) throws Exception {
 		MvcResult created = mockMvc.perform(post("/api/v1/migration-configurations")
 						.with(jwt())
 						.contentType(MediaType.APPLICATION_JSON)
@@ -915,17 +1254,19 @@ class UamCanonicalLoadIntegrationTest {
 						.with(jwt())
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{}"))
-				.andExpect(status().isCreated())
+				.andExpect(status().isAccepted())
+				.andExpect(jsonPath("$.status").value("QUEUED"))
 				.andReturn();
-		String response = executed.getResponse().getContentAsString();
+		String runId = com.jayway.jsonpath.JsonPath.read(executed.getResponse().getContentAsString(), "$.id");
+		MvcResult finished = com.etp.migration.run.ExecutionAwait.untilTerminal(mockMvc, runId);
+		String response = finished.getResponse().getContentAsString();
 		assertThat(com.jayway.jsonpath.JsonPath.read(response, "$.status").toString())
-				.as(response + " " + errors(UUID.fromString(
-						com.jayway.jsonpath.JsonPath.read(response, "$.id"))))
+				.as(response + " " + errors(UUID.fromString(runId)))
 				.isEqualTo("COMPLETED");
 		assertThat(((Number) com.jayway.jsonpath.JsonPath.read(response, "$.successRecords")).intValue())
 				.as(response)
 				.isEqualTo(expectedSuccess);
-		return UUID.fromString(com.jayway.jsonpath.JsonPath.read(response, "$.id"));
+		return UUID.fromString(runId);
 	}
 
 	private static String configuration(String objectKey) {
@@ -963,14 +1304,14 @@ class UamCanonicalLoadIntegrationTest {
 				        {"name": "GeographicSubAddress", "targetEntity": "geographic_sub_address", "sourceKey": "sub_address_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "SUB-", "sequenceLength": 9}}
 				      ],
 				      "relationships": [
-				        {"parent": "AddressLocation", "child": "GeographicAddress", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "address_id", "childField": "address_id"}]},
+				        {"parent": "AddressLocation", "child": "GeographicAddress", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "address_id", "childField": "address_id"}], "targetForeignKey": {"column": "location_id", "referencesColumn": "id"}},
 				        {"parent": "AddressLocation", "child": "GeographicPointLocation", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "geo_id", "childField": "geo_id"}]},
-				        {"parent": "GeographicPointLocation", "child": "GeographicLocation", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "geo_id", "childField": "geo_id"}]},
+				        {"parent": "GeographicPointLocation", "child": "GeographicLocation", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "geo_id", "childField": "geo_id"}], "targetForeignKey": {"column": "location_id", "referencesColumn": "id"}},
 				        {"parent": "GeographicPointLocation", "child": "LocationGeometry", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "geo_id", "childField": "geo_id"}]},
-				        {"parent": "GeographicLocation", "child": "GeographicAddress", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "geo_id", "childField": "geo_id"}]},
-				        {"parent": "GeographicLocation", "child": "LocationGeometry", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "geo_id", "childField": "geo_id"}]},
-				        {"parent": "GeographicAddress", "child": "GeographicSubAddress", "cardinality": "ONE_TO_MANY", "keys": [{"parentField": "address_id", "childField": "address_id"}]},
-				        {"parent": "GeographicLocation", "child": "GeographicSubAddress", "cardinality": "ONE_TO_MANY", "keys": [{"parentField": "geo_id", "childField": "geo_id"}]}
+				        {"parent": "GeographicLocation", "child": "GeographicAddress", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "geo_id", "childField": "geo_id"}], "targetForeignKey": {"column": "geographic_location_id", "referencesColumn": "id"}},
+				        {"parent": "GeographicLocation", "child": "LocationGeometry", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "geo_id", "childField": "geo_id"}], "targetForeignKey": {"column": "location_id", "referencesColumn": "id"}},
+				        {"parent": "GeographicAddress", "child": "GeographicSubAddress", "cardinality": "ONE_TO_MANY", "keys": [{"parentField": "address_id", "childField": "address_id"}], "targetForeignKey": {"column": "address_id", "referencesColumn": "id"}},
+				        {"parent": "GeographicLocation", "child": "GeographicSubAddress", "cardinality": "ONE_TO_MANY", "keys": [{"parentField": "geo_id", "childField": "geo_id"}], "targetForeignKey": {"column": "geographic_location_id", "referencesColumn": "id"}}
 				      ]
 				    }
 				  },
@@ -1025,38 +1366,6 @@ class UamCanonicalLoadIntegrationTest {
 				    "stagingTable": "uam_entity_stage",
 				    "mergeStrategy": "NONE"
 				  },
-				  "tables": {
-				    "AddressLocation": "location",
-				    "GeographicPointLocation": "location",
-				    "GeographicAddress": "geographic_address",
-				    "GeographicLocation": "geographic_location",
-				    "LocationGeometry": "location_geometry",
-				    "GeographicSubAddress": "geographic_sub_address"
-				  },
-				  "loadOrder": [
-				    "AddressLocation",
-				    "GeographicPointLocation",
-				    "GeographicLocation",
-				    "GeographicAddress",
-				    "LocationGeometry",
-				    "GeographicSubAddress"
-				  ],
-				  "foreignKeys": [
-				    {"entity": "GeographicAddress", "parent": "AddressLocation", "column": "location_id"},
-				    {"entity": "GeographicAddress", "parent": "GeographicLocation", "column": "geographic_location_id"},
-				    {"entity": "GeographicLocation", "parent": "GeographicPointLocation", "column": "location_id"},
-				    {"entity": "LocationGeometry", "parent": "GeographicLocation", "column": "location_id"},
-				    {"entity": "GeographicSubAddress", "parent": "GeographicAddress", "column": "address_id"},
-				    {"entity": "GeographicSubAddress", "parent": "GeographicLocation", "column": "geographic_location_id"}
-				  ],
-				  "loadTimestampColumns": [
-				    {"table": "location", "column": "created_at"}
-				  ],
-				  "columnTypes": [
-				    {"table": "location", "column": "created_at", "type": "timestamptz"},
-				    {"table": "location_geometry", "column": "x", "type": "numeric"},
-				    {"table": "location_geometry", "column": "y", "type": "numeric"}
-				  ],
 				  "promotion": {"enabled": true}
 				}
 				""";
@@ -1074,62 +1383,9 @@ class UamCanonicalLoadIntegrationTest {
 				""";
 	}
 
-	private static String canonicalConfiguration(String schema) {
-		return """
-				{
-				  "target": {"mode": "UAM", "schema": "%s"},
-				  "tables": {
-				    "AddressLocation": "location",
-				    "GeographicPointLocation": "location",
-				    "GeographicAddress": "geographic_address",
-				    "GeographicLocation": "geographic_location",
-				    "LocationGeometry": "location_geometry"
-				  },
-				  "loadOrder": [
-				    "AddressLocation",
-				    "GeographicPointLocation",
-				    "GeographicLocation",
-				    "GeographicAddress",
-				    "LocationGeometry"
-				  ],
-				  "foreignKeys": [
-				    {"entity": "GeographicAddress", "parent": "AddressLocation", "column": "location_id"},
-				    {"entity": "GeographicAddress", "parent": "GeographicLocation", "column": "geographic_location_id"},
-				    {"entity": "GeographicLocation", "parent": "GeographicPointLocation", "column": "location_id"},
-				    {"entity": "LocationGeometry", "parent": "GeographicLocation", "column": "location_id"}
-				  ],
-				  "loadTimestampColumns": [
-				    {"table": "location", "column": "created_at"}
-				  ],
-				  "columnTypes": [
-				    {"table": "location", "column": "created_at", "type": "timestamptz"},
-				    {"table": "location_geometry", "column": "x", "type": "numeric"},
-				    {"table": "location_geometry", "column": "y", "type": "numeric"}
-				  ]
-				}
-				""".formatted(schema);
-	}
-
 	private MigrationTargetContext contextWithoutColumnTypes() {
 		Map<String, Object> configuration = new LinkedHashMap<>();
 		configuration.put("target", Map.of("mode", "UAM", "schema", "uam"));
-		configuration.put("tables", Map.of(
-				"AddressLocation", "location",
-				"GeographicPointLocation", "location",
-				"GeographicLocation", "geographic_location",
-				"GeographicAddress", "geographic_address",
-				"LocationGeometry", "location_geometry"));
-		configuration.put("loadOrder", List.of(
-				"AddressLocation",
-				"GeographicPointLocation",
-				"GeographicLocation",
-				"GeographicAddress",
-				"LocationGeometry"));
-		configuration.put("foreignKeys", List.of(
-				Map.of("entity", "GeographicLocation", "parent", "GeographicPointLocation", "column", "location_id"),
-				Map.of("entity", "LocationGeometry", "parent", "GeographicLocation", "column", "location_id")));
-		configuration.put("loadTimestampColumns", List.of(
-				Map.of("table", "location", "column", "created_at")));
 		return new MigrationTargetContext(
 				UUID.randomUUID(),
 				1L,
@@ -1143,10 +1399,6 @@ class UamCanonicalLoadIntegrationTest {
 	private MigrationTargetContext probeContext() {
 		Map<String, Object> configuration = new LinkedHashMap<>();
 		configuration.put("target", Map.of("mode", "UAM", "schema", "uam"));
-		configuration.put("tables", Map.of(
-				"TypeProbe", "type_probe",
-				"TypeProbeAlways", "type_probe_always"));
-		configuration.put("loadOrder", List.of("TypeProbe", "TypeProbeAlways"));
 		return new MigrationTargetContext(
 				UUID.randomUUID(),
 				1L,
@@ -1173,31 +1425,7 @@ class UamCanonicalLoadIntegrationTest {
 				UamPostgreSqlTargetConnector.TARGET_TYPE,
 				"location",
 				LoadMode.BULK,
-				Map.of(
-						"target", Map.of("mode", "UAM", "schema", schema),
-						"tables", Map.of(
-								"AddressLocation", "location",
-								"GeographicPointLocation", "location",
-								"GeographicLocation", "geographic_location",
-								"GeographicAddress", "geographic_address",
-								"LocationGeometry", "location_geometry"),
-						"loadOrder", List.of(
-								"AddressLocation",
-								"GeographicPointLocation",
-								"GeographicLocation",
-								"GeographicAddress",
-								"LocationGeometry"),
-						"foreignKeys", List.of(
-								Map.of("entity", "GeographicAddress", "parent", "AddressLocation", "column", "location_id"),
-								Map.of("entity", "GeographicAddress", "parent", "GeographicLocation", "column", "geographic_location_id"),
-								Map.of("entity", "GeographicLocation", "parent", "GeographicPointLocation", "column", "location_id"),
-								Map.of("entity", "LocationGeometry", "parent", "GeographicLocation", "column", "location_id")),
-						"loadTimestampColumns", List.of(
-								Map.of("table", "location", "column", "created_at")),
-						"columnTypes", List.of(
-								Map.of("table", "location", "column", "created_at", "type", "timestamptz"),
-								Map.of("table", "location_geometry", "column", "x", "type", "numeric"),
-								Map.of("table", "location_geometry", "column", "y", "type", "numeric"))));
+				Map.of("target", Map.of("mode", "UAM", "schema", schema)));
 	}
 
 	private static LoadableTargetRecord canonical(
@@ -1207,6 +1435,11 @@ class UamCanonicalLoadIntegrationTest {
 			List<Map<String, Object>> relationships) {
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("entity", entity);
+		String table = TARGET_TABLES.get(entity);
+		if (table == null) {
+			throw new IllegalArgumentException("No target table for " + entity);
+		}
+		fields.put("targetEntity", table);
 		fields.put("targetKey", "id");
 		fields.put("targetIdentity", targetIdentity);
 		fields.put("attributes", new LinkedHashMap<>(attributes));
@@ -1214,10 +1447,25 @@ class UamCanonicalLoadIntegrationTest {
 		return new LoadableTargetRecord(1L, new TargetRecord(fields), entity + ":" + targetIdentity);
 	}
 
-	private static Map<String, Object> link(String entity, String targetIdentity) {
+	private static final Map<String, String> TARGET_TABLES = Map.of(
+			"AddressLocation", "location",
+			"GeographicPointLocation", "location",
+			"GeographicAddress", "geographic_address",
+			"GeographicLocation", "geographic_location",
+			"LocationGeometry", "location_geometry",
+			"GeographicSubAddress", "geographic_sub_address",
+			"TypeProbe", "type_probe",
+			"TypeProbeAlways", "type_probe_always");
+
+	private static Map<String, Object> link(
+			String entity,
+			String targetIdentity,
+			String column,
+			String referencesColumn) {
 		Map<String, Object> parent = new LinkedHashMap<>();
 		parent.put("parentEntity", entity);
 		parent.put("parentTargetIdentity", targetIdentity);
+		parent.put("targetForeignKey", Map.of("column", column, "referencesColumn", referencesColumn));
 		return parent;
 	}
 
@@ -1273,6 +1521,282 @@ class UamCanonicalLoadIntegrationTest {
 					.append('\n');
 		}
 		return builder.toString();
+	}
+
+	private static String singleRecordCsv() {
+		return """
+				source_address_id,source_parent_address_id,source_sub_address_id,premise_type,market_segment,street_number,street_name,street_type,building_name,unit_number,private_street_number,private_street_name,city,state_or_province,postcode,country,latitude,longitude,address_type,validation_status,created_at
+				SRC-SFU-000001,,,SFU,RESIDENTIAL,38,Maple,St,,,,,Austin,TX,78701,US,25.7919,-123.6429,RESIDENTIAL,VALIDATED,2024-01-01T00:00:37Z
+				""";
+	}
+
+	private static String singleRecordConfiguration(int port) {
+		String name = "sftp-single-" + System.nanoTime();
+		return """
+				{
+				  "definition": {
+				    "name": "%s",
+				    "version": "1",
+				    "sourceType": "FILE",
+				    "targetType": "POSTGRESQL",
+				    "targetEntity": "location",
+				    "batchSize": 1000,
+				    "loadMode": "BULK",
+				    "configuration": {
+				      "target": {
+				        "mode": "UAM",
+				        "schema": "uam",
+				        "stagingSchema": "migration_staging",
+				        "stagingTable": "uam_entity_stage",
+				        "mergeStrategy": "NONE"
+				      },
+				      "promotion": {"enabled": true}
+				    }
+				  },
+				  "entityMappings": {
+				    "name": "%s-mapping",
+				    "version": "1",
+				    "sourceType": "FILE",
+				    "targetType": "UAM_POSTGRESQL",
+				    "configuration": {
+				      "modelType": "ENTITY_RELATIONSHIP",
+				      "rootEntity": "AddressLocation",
+				      "entities": [
+				        {"entity": "AddressLocation", "targetEntity": "location", "sourceKey": "source_address_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "LOC-", "sequenceLength": 9}},
+				        {"entity": "GeographicPointLocation", "targetEntity": "location", "sourceKey": "source_address_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "GEO-LOC-", "sequenceLength": 9}},
+				        {"entity": "GeographicAddress", "targetEntity": "geographic_address", "sourceKey": "source_address_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "ADDR-", "sequenceLength": 10}},
+				        {"entity": "GeographicLocation", "targetEntity": "geographic_location", "sourceKey": "source_address_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "GEO-", "sequenceLength": 9}},
+				        {"entity": "LocationGeometry", "targetEntity": "location_geometry", "sourceKey": "source_address_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "GEOM-", "sequenceLength": 9}},
+				        {"entity": "GeographicSubAddress", "targetEntity": "geographic_sub_address", "sourceKey": "source_sub_address_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "SUB-", "sequenceLength": 9}}
+				      ],
+				      "relationships": [
+				        {"parent": "AddressLocation", "child": "GeographicAddress", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}], "targetForeignKey": {"column": "location_id", "referencesColumn": "id"}},
+				        {"parent": "AddressLocation", "child": "GeographicPointLocation", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}]},
+				        {"parent": "GeographicPointLocation", "child": "GeographicLocation", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}], "targetForeignKey": {"column": "location_id", "referencesColumn": "id"}},
+				        {"parent": "GeographicPointLocation", "child": "LocationGeometry", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}]},
+				        {"parent": "GeographicLocation", "child": "GeographicAddress", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}], "targetForeignKey": {"column": "geographic_location_id", "referencesColumn": "id"}},
+				        {"parent": "GeographicLocation", "child": "LocationGeometry", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}], "targetForeignKey": {"column": "location_id", "referencesColumn": "id"}},
+				        {"parent": "GeographicAddress", "child": "GeographicSubAddress", "cardinality": "ONE_TO_MANY", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}], "targetForeignKey": {"column": "address_id", "referencesColumn": "id"}},
+				        {"parent": "GeographicLocation", "child": "GeographicSubAddress", "cardinality": "ONE_TO_MANY", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}], "targetForeignKey": {"column": "geographic_location_id", "referencesColumn": "id"}}
+				      ]
+				    }
+				  },
+				  "fieldMappings": [
+				    {"sequenceNo": 1, "entity": "AddressLocation", "targetField": "at_type", "transformationType": "DEFAULT", "defaultValue": "geographicAddress", "mandatory": true, "enabled": true},
+				    {"sequenceNo": 2, "entity": "AddressLocation", "sourceField": "created_at", "targetField": "created_at", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 3, "entity": "GeographicPointLocation", "targetField": "at_type", "transformationType": "DEFAULT", "defaultValue": "geographicLocation", "mandatory": true, "enabled": true},
+				    {"sequenceNo": 4, "entity": "GeographicPointLocation", "sourceField": "created_at", "targetField": "created_at", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 5, "entity": "GeographicAddress", "sourceField": "street_number", "targetField": "street_number", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 6, "entity": "GeographicAddress", "sourceField": "street_name", "targetField": "street_name", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 7, "entity": "GeographicAddress", "sourceField": "street_type", "targetField": "street_type", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 8, "entity": "GeographicAddress", "sourceField": "city", "targetField": "city", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 9, "entity": "GeographicAddress", "sourceField": "state_or_province", "targetField": "state_or_province", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 10, "entity": "GeographicAddress", "sourceField": "postcode", "targetField": "postcode", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 11, "entity": "GeographicAddress", "sourceField": "country", "targetField": "country", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 12, "entity": "GeographicAddress", "sourceField": "address_type", "targetField": "address_type", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 13, "entity": "GeographicAddress", "sourceField": "validation_status", "targetField": "validation_status", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 14, "entity": "GeographicLocation", "targetField": "geo_json_type", "transformationType": "DEFAULT", "defaultValue": "Point", "mandatory": true, "enabled": true},
+				    {"sequenceNo": 15, "entity": "LocationGeometry", "targetField": "geometry_type", "transformationType": "DEFAULT", "defaultValue": "Point", "mandatory": true, "enabled": true},
+				    {"sequenceNo": 16, "entity": "LocationGeometry", "sourceField": "longitude", "targetField": "x", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 17, "entity": "LocationGeometry", "sourceField": "latitude", "targetField": "y", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 18, "entity": "GeographicSubAddress", "sourceField": "building_name", "targetField": "building_name", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 19, "entity": "GeographicSubAddress", "sourceField": "unit_number", "targetField": "sub_unit_number", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 20, "entity": "GeographicSubAddress", "sourceField": "private_street_number", "targetField": "private_street_number", "transformationType": "DIRECT", "enabled": true},
+				    {"sequenceNo": 21, "entity": "GeographicSubAddress", "sourceField": "private_street_name", "targetField": "private_street_name", "transformationType": "DIRECT", "enabled": true}
+				  ],
+				  "source": {
+				    "name": "%s-source",
+				    "sourceType": "FILE",
+				    "enabled": true,
+				    "configuration": {
+				      "provider": "SFTP",
+				      "fileFormat": "CSV",
+				      "host": "127.0.0.1",
+				      "port": %d,
+				      "credentialRef": "single-record",
+				      "remotePath": "/upload/geographic_addresses_19102026_v1_single_record.csv",
+				      "hasHeader": true,
+				      "delimiter": ","
+				    }
+				  }
+				}
+				""".formatted(name, name, name, port);
+	}
+
+	private static String serviceConfiguration(String objectKey) {
+		String name = "service-" + System.nanoTime();
+		return """
+				{
+				  "definition": {
+				    "name": "%s",
+				    "version": "1",
+				    "sourceType": "FILE",
+				    "targetType": "POSTGRESQL",
+				    "targetEntity": "service",
+				    "batchSize": 1000,
+				    "loadMode": "BULK",
+				    "configuration": {
+				      "target": {
+				        "mode": "UAM",
+				        "schema": "svc",
+				        "stagingSchema": "migration_staging",
+				        "stagingTable": "uam_entity_stage",
+				        "mergeStrategy": "NONE"
+				      },
+				      "promotion": {"enabled": true}
+				    }
+				  },
+				  "entityMappings": {
+				    "name": "%s-mapping",
+				    "version": "1",
+				    "sourceType": "FILE",
+				    "targetType": "UAM_POSTGRESQL",
+				    "configuration": {
+				      "modelType": "ENTITY_RELATIONSHIP",
+				      "rootEntity": "Service",
+				      "entities": [
+				        {"entity": "Service", "targetEntity": "service", "sourceKey": "service_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "SV-", "sequenceLength": 6}},
+				        {"entity": "ServiceCharacteristic", "targetEntity": "service_characteristic", "sourceKey": "characteristic_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "CH-", "sequenceLength": 6}}
+				      ],
+				      "relationships": [
+				        {"parent": "Service", "child": "ServiceCharacteristic", "cardinality": "ONE_TO_MANY", "keys": [{"parentField": "service_id", "childField": "service_id"}], "targetForeignKey": {"column": "service_id", "referencesColumn": "id"}}
+				      ]
+				    }
+				  },
+				  "fieldMappings": [
+				    {"sequenceNo": 1, "entity": "Service", "sourceField": "service_name", "targetField": "name", "transformationType": "DIRECT", "mandatory": true, "enabled": true},
+				    {"sequenceNo": 2, "entity": "ServiceCharacteristic", "sourceField": "characteristic_name", "targetField": "name", "transformationType": "DIRECT", "mandatory": true, "enabled": true},
+				    {"sequenceNo": 3, "entity": "ServiceCharacteristic", "sourceField": "characteristic_value", "targetField": "value", "transformationType": "DIRECT", "enabled": true}
+				  ],
+				  "source": {
+				    "name": "%s-source",
+				    "sourceType": "FILE",
+				    "enabled": true,
+				    "configuration": {
+				      "provider": "FILE_SYSTEM",
+				      "fileFormat": "CSV",
+				      "objectKey": "%s",
+				      "hasHeader": true,
+				      "delimiter": ","
+				    }
+				  }
+				}
+				""".formatted(name, name, name, objectKey);
+	}
+
+	private void createDatabase(String name) throws Exception {
+		try (Connection connection = targetDataSource.getConnection()) {
+			connection.setAutoCommit(true);
+			try (Statement statement = connection.createStatement()) {
+				statement.execute("CREATE DATABASE " + name);
+			}
+		}
+	}
+
+	private void executeJdbc(String url, String username, String password, String sql) throws Exception {
+		try (Connection connection = DriverManager.getConnection(url, username, password);
+				Statement statement = connection.createStatement()) {
+			for (String command : sql.split(";")) {
+				if (!command.isBlank()) {
+					statement.execute(command);
+				}
+			}
+		}
+	}
+
+	private String scalar(String url, String username, String password, String sql) throws Exception {
+		try (Connection connection = DriverManager.getConnection(url, username, password);
+				ResultSet resultSet = connection.createStatement().executeQuery(sql)) {
+			resultSet.next();
+			return resultSet.getString(1);
+		}
+	}
+
+	private void registerConnection(String name, String url, String username, String password) {
+		PostgreSqlConnectionProperties.Profile profile = new PostgreSqlConnectionProperties.Profile();
+		profile.setUrl(url);
+		profile.setUsername(username);
+		profile.setPassword(password);
+		profile.setMaxPoolSize(2);
+		connectionProperties.getConnections().put(name, profile);
+	}
+
+	private static String stagingTable(String schema) {
+		return """
+				CREATE TABLE %s.entity_stage (
+				  migration_run_id UUID NOT NULL,
+				  migration_batch_id BIGINT NOT NULL,
+				  source_record_number BIGINT NOT NULL,
+				  target_payload JSONB NOT NULL,
+				  idempotency_key VARCHAR(500),
+				  loaded_at TIMESTAMPTZ NOT NULL
+				)
+				""".formatted(schema);
+	}
+
+	private static String relationalConfiguration(
+			String targetEntity,
+			String root,
+			String schema,
+			String connectionRef,
+			String stagingSchema,
+			String objectKey,
+			String entities,
+			String relationships,
+			String rules) {
+		String name = root.toLowerCase(Locale.ROOT) + "-" + System.nanoTime();
+		return """
+				{
+				  "definition": {
+				    "name": "%s",
+				    "version": "1",
+				    "sourceType": "FILE",
+				    "targetType": "POSTGRESQL",
+				    "targetEntity": "%s",
+				    "batchSize": 1000,
+				    "loadMode": "BULK",
+				    "configuration": {
+				      "target": {
+				        "mode": "POSTGRESQL",
+				        "connectionRef": "%s",
+				        "stagingConnectionRef": "migration-db",
+				        "schema": "%s",
+				        "stagingSchema": "%s",
+				        "stagingTable": "entity_stage",
+				        "mergeStrategy": "NONE"
+				      },
+				      "promotion": {"enabled": true}
+				    }
+				  },
+				  "entityMappings": {
+				    "name": "%s-mapping",
+				    "version": "1",
+				    "sourceType": "FILE",
+				    "targetType": "POSTGRESQL",
+				    "configuration": {
+				      "modelType": "ENTITY_RELATIONSHIP",
+				      "rootEntity": "%s",
+				      "entities": [%s],
+				      "relationships": [%s]
+				    }
+				  },
+				  "fieldMappings": [%s],
+				  "source": {
+				    "name": "%s-source",
+				    "sourceType": "FILE",
+				    "enabled": true,
+				    "configuration": {
+				      "provider": "FILE_SYSTEM",
+				      "fileFormat": "CSV",
+				      "objectKey": "%s",
+				      "hasHeader": true,
+				      "delimiter": ","
+				    }
+				  }
+				}
+				""".formatted(
+				name, targetEntity, connectionRef, schema, stagingSchema,
+				name, root, entities, relationships, rules, name, objectKey);
 	}
 
 	private void write(String objectKey, String content) throws Exception {

@@ -14,3 +14,6 @@ CREATE TABLE IF NOT EXISTS migration_staging.uam_entity_stage (
 
 CREATE UNIQUE INDEX IF NOT EXISTS uk_uam_entity_stage_run_identity
     ON migration_staging.uam_entity_stage (migration_run_id, idempotency_key);
+
+CREATE INDEX IF NOT EXISTS idx_uam_entity_stage_run_batch
+    ON migration_staging.uam_entity_stage (migration_run_id, migration_batch_id);

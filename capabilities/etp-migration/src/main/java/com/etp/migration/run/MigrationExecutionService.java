@@ -1,9 +1,6 @@
 package com.etp.migration.run;
 
-import com.etp.migration.config.ShutdownSignal;
-import com.etp.migration.processing.MigrationBatchWorker;
 import com.etp.migration.processing.MigrationLogContext;
-import com.etp.migration.processing.SourceInspectionService;
 import com.etp.migration.run.dto.CreateMigrationRunRequest;
 import com.etp.migration.run.dto.MigrationRunResponse;
 import java.util.UUID;
@@ -11,28 +8,26 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+/**
+ * Accepts an execution request. Preparation and batch processing run on
+ * {@link MigrationExecutionCoordinator} after the run row has committed.
+ */
 @Service
 public class MigrationExecutionService {
 
 	private static final Logger log = LoggerFactory.getLogger(MigrationExecutionService.class);
 
 	private final MigrationRunService migrationRunService;
-	private final SourceInspectionService sourceInspectionService;
-	private final MigrationBatchWorker migrationBatchWorker;
-	private final RunExecutionLifecycle runExecutionLifecycle;
-	private final ShutdownSignal shutdownSignal;
+	private final MigrationExecutionCoordinator coordinator;
+	private final ExecutionControlService controls;
 
 	public MigrationExecutionService(
 			MigrationRunService migrationRunService,
-			SourceInspectionService sourceInspectionService,
-			MigrationBatchWorker migrationBatchWorker,
-			RunExecutionLifecycle runExecutionLifecycle,
-			ShutdownSignal shutdownSignal) {
+			MigrationExecutionCoordinator coordinator,
+			ExecutionControlService controls) {
 		this.migrationRunService = migrationRunService;
-		this.sourceInspectionService = sourceInspectionService;
-		this.migrationBatchWorker = migrationBatchWorker;
-		this.runExecutionLifecycle = runExecutionLifecycle;
-		this.shutdownSignal = shutdownSignal;
+		this.coordinator = coordinator;
+		this.controls = controls;
 	}
 
 	public MigrationRunResponse execute(UUID migrationId, CreateMigrationRunRequest request) {
@@ -40,35 +35,16 @@ public class MigrationExecutionService {
 				? new CreateMigrationRunRequest(null, null, null)
 				: request;
 		MigrationRunResponse created = migrationRunService.create(migrationId, createRequest);
-		UUID runId = created.id();
-		try (MigrationLogContext ignored = MigrationLogContext.forRun(runId)) {
-			sourceInspectionService.prepare(runId);
-			runExecutionLifecycle.beginExecution(runId);
-			boolean finished = false;
-			try {
-				while (!shutdownSignal.isShuttingDown() && migrationBatchWorker.processNextBatch(runId).isPresent()) {
-					// Continue until no eligible batch remains.
-				}
-				finished = true;
-			} finally {
-				if (!finished) {
-					finalizeQuietly(runId);
-				}
-			}
-			if (shutdownSignal.isShuttingDown()) {
-				log.warn("Stopped claiming batches because the application is shutting down migrationRunId={}; "
-						+ "continue with POST /api/v1/migration-runs/{}/process-next-batch", runId, runId);
-			}
-			runExecutionLifecycle.finalizeIfIdle(runId);
-			return migrationRunService.getById(runId);
+		if (MigrationRunTransitions.isTerminal(created.status())) {
+			log.info("Run already finished runId={} status={}", created.id(), created.status());
+			return created;
 		}
-	}
-
-	private void finalizeQuietly(UUID runId) {
-		try {
-			runExecutionLifecycle.finalizeIfIdle(runId);
-		} catch (RuntimeException ex) {
-			log.warn("Run finalization failed runId={} exceptionType={}", runId, ex.getClass().getName());
+		controls.requireRunRunnable(created.id());
+		migrationRunService.requestBackgroundExecution(created.id());
+		try (MigrationLogContext ignored = MigrationLogContext.forRun(created.id())) {
+			log.info("Run accepted runId={} status={}", created.id(), created.status());
 		}
+		coordinator.submit(created.id());
+		return created;
 	}
 }

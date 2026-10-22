@@ -47,7 +47,7 @@ final class PostgreSqlStagingTarget {
 	}
 
 	static String quoted(Resolved resolved) {
-		return "\"" + resolved.schema() + "\".\"" + resolved.table() + "\"";
+		return PostgreSqlIdentifiers.quote(resolved.schema()) + "." + PostgreSqlIdentifiers.quote(resolved.table());
 	}
 
 	@SuppressWarnings("unchecked")

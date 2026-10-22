@@ -28,7 +28,19 @@ public class PostgreSqlTargetIdentityFloorProbe implements TargetIdentityFloorPr
 
 	@Override
 	public long existingMaximum(String schema, String table, String idColumn, String prefix, int sequenceLength) {
-		if (jdbc == null || schema == null || schema.isBlank() || table == null || table.isBlank()
+		return existingMaximum(schema, table, idColumn, prefix, sequenceLength, null);
+	}
+
+	@Override
+	public long existingMaximum(
+			String schema,
+			String table,
+			String idColumn,
+			String prefix,
+			int sequenceLength,
+			DataSource dataSource) {
+		JdbcTemplate template = dataSource == null ? jdbc : new JdbcTemplate(dataSource);
+		if (template == null || schema == null || schema.isBlank() || table == null || table.isBlank()
 				|| idColumn == null || idColumn.isBlank()) {
 			return 0L;
 		}
@@ -44,7 +56,7 @@ public class PostgreSqlTargetIdentityFloorProbe implements TargetIdentityFloorPr
 		String sql = "SELECT MAX(CAST(SUBSTRING(" + PostgreSqlIdentifiers.quote(idColumn) + " FROM ?) AS BIGINT)) FROM "
 				+ PostgreSqlIdentifiers.quote(schema) + "." + PostgreSqlIdentifiers.quote(table)
 				+ " WHERE " + PostgreSqlIdentifiers.quote(idColumn) + " ~ ?";
-		Long maximum = jdbc.query(sql, resultSet -> {
+		Long maximum = template.query(sql, resultSet -> {
 			if (!resultSet.next() || resultSet.getObject(1) == null) {
 				return null;
 			}

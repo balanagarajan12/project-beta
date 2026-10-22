@@ -13,7 +13,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.type.AnnotatedTypeMetadata;
 
 @Configuration
-@EnableConfigurationProperties(PostgreSqlTargetProperties.class)
+@EnableConfigurationProperties({PostgreSqlTargetProperties.class, PostgreSqlConnectionProperties.class})
 public class PostgreSqlTargetClientConfig {
 
 	public static final String DATASOURCE_BEAN = "postgresqlTargetDataSource";
@@ -36,6 +36,7 @@ public class PostgreSqlTargetClientConfig {
 				? 4
 				: properties.maxPoolSize());
 		config.setDriverClassName("org.postgresql.Driver");
+		config.addDataSourceProperty("reWriteBatchedInserts", "true");
 		PostgreSqlTargetProperties.Pool pool = properties.pool();
 		config.setConnectionTimeout(pool.connectionTimeout().toMillis());
 		config.setValidationTimeout(pool.validationTimeout().toMillis());

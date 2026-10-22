@@ -1,5 +1,6 @@
 package com.etp.migration.entity;
 
+import com.etp.migration.run.ExecutionControlState;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -77,6 +78,16 @@ public class MigrationPromotion {
 
 	@Column(name = "error_message", length = 2000)
 	private String errorMessage;
+
+	@Enumerated(EnumType.STRING)
+	@Column(name = "control_state", nullable = false, length = 20)
+	private ExecutionControlState controlState = ExecutionControlState.RUNNING;
+
+	@Column(name = "control_updated_at")
+	private Instant controlUpdatedAt;
+
+	@Column(name = "last_control_action", length = 20)
+	private String lastControlAction;
 
 	@Column(name = "created_at", nullable = false, updatable = false)
 	private Instant createdAt;
@@ -248,6 +259,30 @@ public class MigrationPromotion {
 
 	public void setErrorMessage(String errorMessage) {
 		this.errorMessage = errorMessage;
+	}
+
+	public ExecutionControlState getControlState() {
+		return controlState == null ? ExecutionControlState.RUNNING : controlState;
+	}
+
+	public void setControlState(ExecutionControlState controlState) {
+		this.controlState = controlState;
+	}
+
+	public Instant getControlUpdatedAt() {
+		return controlUpdatedAt;
+	}
+
+	public void setControlUpdatedAt(Instant controlUpdatedAt) {
+		this.controlUpdatedAt = controlUpdatedAt;
+	}
+
+	public String getLastControlAction() {
+		return lastControlAction;
+	}
+
+	public void setLastControlAction(String lastControlAction) {
+		this.lastControlAction = lastControlAction;
 	}
 
 	public Instant getCreatedAt() {

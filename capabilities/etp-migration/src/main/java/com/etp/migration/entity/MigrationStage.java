@@ -8,5 +8,6 @@ public enum MigrationStage {
 	VALIDATE,
 	DEDUPLICATE,
 	LOAD,
-	RECONCILE
+	RECONCILE,
+	PROMOTE
 }

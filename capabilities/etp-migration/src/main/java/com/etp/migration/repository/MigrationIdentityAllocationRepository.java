@@ -6,7 +6,8 @@ import java.util.List;
 import java.util.UUID;
 import org.springframework.data.jpa.repository.JpaRepository;
 
-public interface MigrationIdentityAllocationRepository extends JpaRepository<MigrationIdentityAllocation, Long> {
+public interface MigrationIdentityAllocationRepository
+		extends JpaRepository<MigrationIdentityAllocation, Long>, MigrationIdentityAllocationBatch {
 
 	List<MigrationIdentityAllocation> findByMigrationRunIdAndEntityNameAndSourceIdentityIn(
 			UUID migrationRunId,

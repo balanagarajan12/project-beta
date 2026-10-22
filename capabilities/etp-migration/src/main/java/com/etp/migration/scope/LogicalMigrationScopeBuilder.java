@@ -26,7 +26,9 @@ import org.springframework.stereotype.Component;
  * endpoints are retained. Source field maps are not read and are not stored.
  * The index lives until the returned stream is closed. It grows with distinct identities and resolved
  * relationships, not with source payloads. Scopes are assembled one root at a time.
- * Disconnected entities are omitted. This component is not used by flat migration execution.
+ * Membership follows resolved relationships from the root in either direction, so a parent of an
+ * in-scope entity and that parent's other children stay in the same scope. Disconnected entities
+ * are omitted. This component is not used by flat migration execution.
  */
 @Component
 public class LogicalMigrationScopeBuilder {
@@ -55,6 +57,7 @@ public class LogicalMigrationScopeBuilder {
 		private final String rootEntity;
 		private final Map<Ref, Long> provenance = new LinkedHashMap<>();
 		private final Map<Ref, List<Link>> children = new HashMap<>();
+		private final Map<Ref, List<Link>> parents = new HashMap<>();
 		private final Set<String> rootIdentities = new LinkedHashSet<>();
 
 		private Index(String rootEntity) {
@@ -93,6 +96,8 @@ public class LogicalMigrationScopeBuilder {
 			provenance.putIfAbsent(child, relationship.childSourceRecordNumber());
 			children.computeIfAbsent(parent, ignored -> new ArrayList<>())
 					.add(new Link(child, relationship.cardinality()));
+			parents.computeIfAbsent(child, ignored -> new ArrayList<>())
+					.add(new Link(parent, relationship.cardinality()));
 			if (rootEntity.equals(parentEntity)) {
 				rootIdentities.add(parentIdentity);
 			}
@@ -125,23 +130,12 @@ public class LogicalMigrationScopeBuilder {
 			ArrayDeque<Ref> pending = new ArrayDeque<>();
 			pending.add(root);
 			while (!pending.isEmpty()) {
-				Ref parent = pending.removeFirst();
-				for (Link link : children.getOrDefault(parent, List.of())) {
-					String relationshipKey = parent.entityName() + "\0" + parent.sourceIdentity()
-							+ "\0" + link.child().entityName() + "\0" + link.child().sourceIdentity();
-					if (seenRelationships.add(relationshipKey)) {
-						relationships.add(new ScopedRelationship(
-								parent.entityName(),
-								parent.sourceIdentity(),
-								link.child().entityName(),
-								link.child().sourceIdentity(),
-								link.cardinality()));
-					}
-					if (members.containsKey(link.child())) {
-						continue;
-					}
-					members.put(link.child(), entity(link.child()));
-					pending.add(link.child());
+				Ref current = pending.removeFirst();
+				for (Link link : children.getOrDefault(current, List.of())) {
+					connect(current, link.child(), link.cardinality(), members, relationships, seenRelationships, pending);
+				}
+				for (Link link : parents.getOrDefault(current, List.of())) {
+					connect(link.child(), current, link.cardinality(), members, relationships, seenRelationships, pending);
 				}
 			}
 			com.etp.migration.processing.PipelineTiming.max("maxScopeMembers", members.size());
@@ -152,6 +146,36 @@ public class LogicalMigrationScopeBuilder {
 					List.copyOf(relationships));
 		}
 
+		private void connect(
+				Ref parent,
+				Ref child,
+				RelationshipCardinality cardinality,
+				Map<Ref, ScopedEntity> members,
+				List<ScopedRelationship> relationships,
+				Set<String> seenRelationships,
+				ArrayDeque<Ref> pending) {
+			String relationshipKey = parent.entityName() + "\0" + parent.sourceIdentity()
+					+ "\0" + child.entityName() + "\0" + child.sourceIdentity();
+			if (seenRelationships.add(relationshipKey)) {
+				relationships.add(new ScopedRelationship(
+						parent.entityName(),
+						parent.sourceIdentity(),
+						child.entityName(),
+						child.sourceIdentity(),
+						cardinality));
+			}
+			addMember(parent, members, pending);
+			addMember(child, members, pending);
+		}
+
+		private void addMember(Ref ref, Map<Ref, ScopedEntity> members, ArrayDeque<Ref> pending) {
+			if (members.containsKey(ref)) {
+				return;
+			}
+			members.put(ref, entity(ref));
+			pending.add(ref);
+		}
+
 		private ScopedEntity entity(Ref ref) {
 			return new ScopedEntity(ref.entityName(), ref.sourceIdentity(), provenance.getOrDefault(ref, 0L));
 		}
@@ -159,6 +183,7 @@ public class LogicalMigrationScopeBuilder {
 		private void clear() {
 			provenance.clear();
 			children.clear();
+			parents.clear();
 			rootIdentities.clear();
 		}
 

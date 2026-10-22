@@ -34,21 +34,32 @@ public class PostgreSqlStagedEntityReader {
 	private final PostgreSqlTargetProperties properties;
 	private final DataSource dataSource;
 	private final ObjectMapper objectMapper;
+	private final PostgreSqlConnectionRegistry connections;
 
 	@Autowired
 	public PostgreSqlStagedEntityReader(
 			PostgreSqlTargetProperties properties,
-			@Autowired(required = false) @Qualifier(PostgreSqlTargetClientConfig.DATASOURCE_BEAN) DataSource dataSource) {
-		this(properties, dataSource, new ObjectMapper());
+			@Autowired(required = false) @Qualifier(PostgreSqlTargetClientConfig.DATASOURCE_BEAN) DataSource dataSource,
+			@Autowired(required = false) PostgreSqlConnectionRegistry connections) {
+		this(properties, dataSource, new ObjectMapper(), connections);
 	}
 
 	PostgreSqlStagedEntityReader(
 			PostgreSqlTargetProperties properties,
 			DataSource dataSource,
 			ObjectMapper objectMapper) {
+		this(properties, dataSource, objectMapper, null);
+	}
+
+	PostgreSqlStagedEntityReader(
+			PostgreSqlTargetProperties properties,
+			DataSource dataSource,
+			ObjectMapper objectMapper,
+			PostgreSqlConnectionRegistry connections) {
 		this.properties = properties;
 		this.dataSource = dataSource;
 		this.objectMapper = objectMapper;
+		this.connections = connections;
 	}
 
 	public List<LoadableTargetRecord> read(UUID migrationRunId, Long migrationBatchId, Map<String, Object> configuration) {
@@ -58,29 +69,29 @@ public class PostgreSqlStagedEntityReader {
 		if (migrationBatchId == null) {
 			throw new IllegalArgumentException("migration batch id is required");
 		}
-		if (dataSource == null) {
-			throw new TargetInfrastructureException(
-					MigrationErrorCodes.TARGET_DATABASE_CONNECTION_ERROR,
-					"PostgreSQL target datasource is not configured");
-		}
+		DataSource source = PostgreSqlConnectionRegistry.stagingOf(connections, dataSource, configuration);
 		PostgreSqlStagingTarget.Resolved staging = PostgreSqlStagingTarget.resolve(configuration, properties);
 		String sql = "SELECT source_record_number, target_payload, idempotency_key FROM "
 				+ PostgreSqlStagingTarget.quoted(staging)
 				+ " WHERE migration_run_id = ? AND migration_batch_id = ?"
 				+ " ORDER BY source_record_number, idempotency_key";
-		try (Connection connection = dataSource.getConnection();
-				PreparedStatement statement = connection.prepareStatement(sql)) {
-			statement.setObject(1, migrationRunId);
-			statement.setLong(2, migrationBatchId);
-			try (ResultSet resultSet = statement.executeQuery()) {
-				List<LoadableTargetRecord> records = new ArrayList<>();
-				while (resultSet.next()) {
-					records.add(toRecord(
-							resultSet.getLong("source_record_number"),
-							resultSet.getString("idempotency_key"),
-							payload(resultSet.getObject("target_payload"))));
+		long started = com.etp.migration.processing.PipelineTiming.start();
+		try (Connection connection = source.getConnection()) {
+			PostgreSqlStagingIndexes.ensureBatchLookup(connection, staging);
+			try (PreparedStatement statement = connection.prepareStatement(sql)) {
+				statement.setObject(1, migrationRunId);
+				statement.setLong(2, migrationBatchId);
+				try (ResultSet resultSet = statement.executeQuery()) {
+					List<LoadableTargetRecord> records = new ArrayList<>();
+					while (resultSet.next()) {
+						records.add(toRecord(
+								resultSet.getLong("source_record_number"),
+								resultSet.getString("idempotency_key"),
+								payload(resultSet.getObject("target_payload"))));
+					}
+					com.etp.migration.processing.PipelineTiming.add("stagingRowsRead", records.size());
+					return List.copyOf(records);
 				}
-				return List.copyOf(records);
 			}
 		} catch (TargetInfrastructureException ex) {
 			throw ex;
@@ -89,6 +100,9 @@ public class PostgreSqlStagedEntityReader {
 					MigrationErrorCodes.TARGET_DATABASE_CONNECTION_ERROR,
 					"PostgreSQL staged entity read failed",
 					ex);
+		} finally {
+			com.etp.migration.processing.PipelineTiming.stop(
+					com.etp.migration.processing.PipelineTiming.Stage.STAGING_READ, started);
 		}
 	}
 

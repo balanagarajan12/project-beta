@@ -64,6 +64,15 @@ class MigrationRunControllerTest {
 	@MockitoBean
 	private ReconciliationService reconciliationService;
 
+	@MockitoBean
+	private MigrationPhaseSubmissionService phaseSubmissionService;
+
+	@MockitoBean
+	private ExecutionControlService executionControlService;
+
+	@MockitoBean
+	private MigrationExecutionCoordinator executionCoordinator;
+
 	@Test
 	void createRunReturnsCreated() throws Exception {
 		when(migrationRunService.create(eq(DEFINITION_ID), any())).thenReturn(sampleRun(MigrationRunStatus.QUEUED));
@@ -207,7 +216,7 @@ class MigrationRunControllerTest {
 
 	@Test
 	void reconcileActiveRunReturnsConflict() throws Exception {
-		when(reconciliationService.reconcile(RUN_ID))
+		when(phaseSubmissionService.submitReconciliation(RUN_ID, null))
 				.thenThrow(new com.etp.migration.reconciliation.ReconciliationNotReadyException("Migration run still has active batches"));
 
 		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", RUN_ID))
@@ -260,7 +269,7 @@ class MigrationRunControllerTest {
 		PSQLException database = new PSQLException(new ServerErrorMessage(
 				"SERROR\0C23514\0Mnew row violates check constraint\0DFailing row contains (LOC-2, secret-value).\0"
 						+ "suam\0tlocation\0nck_location\0"));
-		when(reconciliationService.reconcile(RUN_ID)).thenThrow(new TargetInfrastructureException(
+		when(phaseSubmissionService.submitReconciliation(RUN_ID, null)).thenThrow(new TargetInfrastructureException(
 				"MIGRATION_TARGET_COPY_FAILED",
 				"Canonical target load failed and was rolled back: " + TargetFailureDiagnostics.describe(database),
 				database));

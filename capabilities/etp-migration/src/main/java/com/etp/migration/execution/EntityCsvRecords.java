@@ -5,6 +5,7 @@ import com.etp.migration.extraction.EntityExtractionFailure;
 import com.etp.migration.extraction.EntityExtractor;
 import com.etp.migration.extraction.EntityRecord;
 import com.etp.migration.identity.EntityIdentity;
+import com.etp.migration.connector.source.csv.CsvPositionedFile;
 import com.etp.migration.connector.source.csv.MultiFileEntitySource;
 import com.etp.migration.connector.source.csv.SourceLayout;
 import com.etp.migration.entity.MigrationMappingRule;
@@ -12,6 +13,7 @@ import com.etp.migration.mapping.EntityRelationshipMapping;
 import com.etp.migration.processing.SourceRecord;
 import com.etp.migration.relationship.EntityRecordSource;
 import java.util.ArrayList;
+import java.util.OptionalLong;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -31,6 +33,7 @@ public final class EntityCsvRecords {
 	private final MultiFileEntitySource multiFileEntitySource;
 	private final SourceLayout layout;
 	private final Supplier<Stream<SourceRecord>> singleFile;
+	private final CsvPositionedFile positioned;
 	private final EntityRelationshipMapping mapping;
 	private final List<MigrationMappingRule> rules;
 	private final List<EntityExtractionFailure> extractionFailures = new ArrayList<>();
@@ -43,12 +46,39 @@ public final class EntityCsvRecords {
 			Supplier<Stream<SourceRecord>> singleFile,
 			EntityRelationshipMapping mapping,
 			List<MigrationMappingRule> rules) {
+		this(entityExtractor, multiFileEntitySource, layout, singleFile, null, mapping, rules);
+	}
+
+	EntityCsvRecords(
+			EntityExtractor entityExtractor,
+			MultiFileEntitySource multiFileEntitySource,
+			SourceLayout layout,
+			Supplier<Stream<SourceRecord>> singleFile,
+			CsvPositionedFile positioned,
+			EntityRelationshipMapping mapping,
+			List<MigrationMappingRule> rules) {
 		this.entityExtractor = entityExtractor;
 		this.multiFileEntitySource = multiFileEntitySource;
 		this.layout = layout;
 		this.singleFile = singleFile;
+		this.positioned = positioned;
 		this.mapping = mapping;
 		this.rules = rules;
+	}
+
+	boolean isSingleFile() {
+		return layout == null && singleFile != null;
+	}
+
+	/**
+	 * Data rows in a single positioned CSV. Empty when this source has no row index,
+	 * including multi-file layouts.
+	 */
+	OptionalLong physicalRowCount() {
+		if (positioned == null) {
+			return OptionalLong.empty();
+		}
+		return OptionalLong.of(positioned.recordCount());
 	}
 
 	EntityRecordSource byEntity() {
@@ -63,22 +93,38 @@ public final class EntityCsvRecords {
 	}
 
 	Map<EntityIdentity, EntityRecord> matching(Set<EntityIdentity> wanted) {
+		return matching(wanted, null);
+	}
+
+	Map<EntityIdentity, EntityRecord> matching(Set<EntityIdentity> wanted, long[] sourceRecordNumbers) {
 		Map<EntityIdentity, EntityRecord> kept = new LinkedHashMap<>();
 		if (wanted == null || wanted.isEmpty()) {
 			return kept;
 		}
+		if (positioned != null && sourceRecordNumbers != null && sourceRecordNumbers.length > 0) {
+			com.etp.migration.processing.PipelineTiming.increment("sourceFileOpens");
+			try (Stream<SourceRecord> rows = positioned.readRecordNumbers(sourceRecordNumbers)) {
+				rows.flatMap(this::extractAll).forEach(record -> keep(kept, wanted, record));
+			}
+			return kept;
+		}
 		try (Stream<EntityRecord> records = all()) {
-			records.forEach(record -> {
-				if (record == null || record.sourceIdentity() == null) {
-					return;
-				}
-				EntityIdentity identity = new EntityIdentity(record.entityName(), record.sourceIdentity());
-				if (wanted.contains(identity)) {
-					kept.putIfAbsent(identity, record);
-				}
-			});
+			records.forEach(record -> keep(kept, wanted, record));
 		}
 		return kept;
+	}
+
+	private static void keep(
+			Map<EntityIdentity, EntityRecord> kept,
+			Set<EntityIdentity> wanted,
+			EntityRecord record) {
+		if (record == null || record.sourceIdentity() == null) {
+			return;
+		}
+		EntityIdentity identity = new EntityIdentity(record.entityName(), record.sourceIdentity());
+		if (wanted.contains(identity)) {
+			kept.putIfAbsent(identity, record);
+		}
 	}
 
 	List<EntityExtractionFailure> extractionFailures() {

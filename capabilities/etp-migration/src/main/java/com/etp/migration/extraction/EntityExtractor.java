@@ -59,7 +59,10 @@ public class EntityExtractor {
 			List<MigrationMappingRule> entityRules = mappingEngine.rulesForEntity(rules, entity.name());
 			Set<String> sourceFields = sourceFields(entity, entityRules);
 			if (entity.sourceKey() == null) {
-				if (hasOtherValues(physical, sourceFields, null)) {
+				// A null source key means this entity is the source row. Constant-only entities,
+				// such as a parent whose attributes are defaults, still belong to that row.
+				// Entities that read source columns are emitted only when one of those columns has a value.
+				if (hasOtherValues(physical, sourceFields, null) || derivedFromEverySourceRecord(entityRules)) {
 					records.add(new EntityRecord(
 							entity.name(),
 							source.recordNumber(),
@@ -136,6 +139,39 @@ public class EntityExtractor {
 			}
 		}
 		return copy;
+	}
+
+	private static boolean derivedFromEverySourceRecord(List<MigrationMappingRule> rules) {
+		boolean enabled = false;
+		for (MigrationMappingRule rule : rules) {
+			if (rule == null || !rule.isEnabled()) {
+				continue;
+			}
+			enabled = true;
+			if (readsSource(rule)) {
+				return false;
+			}
+		}
+		return enabled;
+	}
+
+	private static boolean readsSource(MigrationMappingRule rule) {
+		if (rule.getSourceField() != null && !rule.getSourceField().isBlank()) {
+			return true;
+		}
+		Map<String, Object> configuration = rule.getConfiguration();
+		if (configuration == null) {
+			return false;
+		}
+		Object listed = configuration.get("sourceFields");
+		if (listed instanceof List<?> values) {
+			for (Object value : values) {
+				if (value instanceof String text && !text.isBlank()) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	private static boolean hasOtherValues(Map<String, Object> physical, Set<String> sourceFields, String sourceKey) {

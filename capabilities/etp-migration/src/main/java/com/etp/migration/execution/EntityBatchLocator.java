@@ -51,6 +51,22 @@ public final class EntityBatchLocator {
 		return locator;
 	}
 
+	public static int relationshipFailureCount(Map<String, Object> locator) {
+		if (locator == null || !(locator.get("relationshipFailureCount") instanceof Number number)) {
+			return 0;
+		}
+		return Math.max(0, number.intValue());
+	}
+
+	public static Map<String, Object> withRelationshipFailures(Map<String, Object> locator, int count) {
+		Map<String, Object> copy = new LinkedHashMap<>();
+		if (locator != null) {
+			copy.putAll(locator);
+		}
+		copy.put("relationshipFailureCount", count);
+		return copy;
+	}
+
 	public static ExecutionBatchPlan read(Map<String, Object> locator) {
 		if (!isEntityBatch(locator)) {
 			throw new BatchProcessingException(

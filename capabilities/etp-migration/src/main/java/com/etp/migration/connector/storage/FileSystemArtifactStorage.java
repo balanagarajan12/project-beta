@@ -32,6 +32,10 @@ public class FileSystemArtifactStorage {
 		return root;
 	}
 
+	public Path path(String objectKey) {
+		return resolveExisting(objectKey);
+	}
+
 	public InputStream open(String objectKey) {
 		Path path = resolveExisting(objectKey);
 		try {

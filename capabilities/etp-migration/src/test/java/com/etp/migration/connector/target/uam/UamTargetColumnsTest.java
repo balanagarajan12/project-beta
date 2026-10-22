@@ -71,15 +71,37 @@ class UamTargetColumnsTest {
 	}
 
 	@Test
+	void requiredTimestampWithoutADefaultUsesOneBatchInstant() {
+		Map<String, UamTargetColumns.Column> catalog = Map.of(
+				"id", column("id", "varchar", false, null, false, null),
+				"created_at", column("created_at", "timestamptz", false, null, false, null));
+		java.time.OffsetDateTime loadedAt = java.time.OffsetDateTime.parse("2024-06-01T00:00:00Z");
+
+		List<UamCanonicalRows.InsertGroup> bound = UamTargetColumns.bind(
+				new UamCanonicalRows.InsertGroup(
+						"uam",
+						"location",
+						List.of("id", "created_at"),
+						List.of(List.of("LOC-1", " "), java.util.Arrays.asList("LOC-2", null))),
+				catalog,
+				loadedAt);
+
+		assertThat(bound).hasSize(1);
+		assertThat(bound.get(0).parameters()).hasSize(2);
+		assertThat(bound.get(0).parameters().get(0).get(1)).isEqualTo(loadedAt);
+		assertThat(bound.get(0).parameters().get(1).get(1)).isEqualTo(loadedAt);
+	}
+
+	@Test
 	void requiredColumnRejectsABlankValue() {
 		Map<String, UamTargetColumns.Column> catalog = Map.of(
-				"created_at", column("created_at", "timestamptz", false, null, false, null));
+				"name", column("name", "varchar", false, null, false, null));
 
 		assertThatThrownBy(() -> UamTargetColumns.bind(
-				group(List.of("created_at"), List.of(" ")),
+				group(List.of("name"), List.of(" ")),
 				catalog))
 				.isInstanceOf(TargetInfrastructureException.class)
-				.hasMessage("Column 'created_at' on 'location' is required");
+				.hasMessage("Column 'name' on 'location' is required");
 	}
 
 	@Test

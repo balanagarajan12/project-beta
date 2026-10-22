@@ -29,6 +29,7 @@ import com.etp.migration.repository.MigrationPromotionRepository;
 import com.etp.migration.repository.MigrationReconciliationRepository;
 import com.etp.migration.repository.MigrationRunRepository;
 import com.etp.migration.run.MigrationRunNotFoundException;
+import jakarta.persistence.EntityManager;
 import java.lang.reflect.Field;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -40,6 +41,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.springframework.data.jpa.repository.Query;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -61,9 +63,12 @@ class PromotionPreparationServiceTest {
 	private MigrationPromotionBatchRepository promotionBatchRepository;
 	@Mock
 	private StagingRecordCounter stagingRecordCounter;
+	@Mock
+	private EntityManager entityManager;
 
 	private PromotionPreparationService service;
 	private UUID runId;
+	private final Map<Long, Long> stagedCounts = new HashMap<>();
 
 	@BeforeEach
 	void setUp() {
@@ -73,7 +78,15 @@ class PromotionPreparationServiceTest {
 				reconciliationRepository,
 				promotionRepository,
 				promotionBatchRepository,
-				stagingRecordCounter);
+				stagingRecordCounter,
+				entityManager);
+		stagedCounts.clear();
+		when(stagingRecordCounter.countStagedRecordsByBatch(any(), any())).thenAnswer(invocation -> Map.copyOf(stagedCounts));
+		when(entityManager.getReference(eq(MigrationBatch.class), any())).thenAnswer(invocation -> {
+			MigrationBatch reference = new MigrationBatch();
+			setId(reference, invocation.getArgument(1));
+			return reference;
+		});
 		runId = UUID.randomUUID();
 		when(promotionRepository.save(any(MigrationPromotion.class))).thenAnswer(invocation -> {
 			MigrationPromotion promotion = invocation.getArgument(0);
@@ -85,16 +98,30 @@ class PromotionPreparationServiceTest {
 	}
 
 	@Test
+	void batchHeaderQueryDoesNotReadSourceLocator() throws Exception {
+		Query headers = MigrationBatchRepository.class
+				.getMethod("findHeadersByMigrationRunId", UUID.class)
+				.getAnnotation(Query.class);
+		Query refs = com.etp.migration.repository.MigrationPromotionBatchRepository.class
+				.getMethod("findRefsByPromotionAndStatus", UUID.class, PromotionBatchStatus.class)
+				.getAnnotation(Query.class);
+		assertThat(headers.value()).doesNotContain("sourceLocator");
+		assertThat(refs.value()).doesNotContain("sourceLocator");
+		assertThat(headers.value()).contains("b.id", "b.batchNumber", "b.status");
+	}
+
+	@Test
 	void completedRunWithReconciliationIsReady() {
 		MigrationBatch batch = batch(11L, MigrationBatchStatus.COMPLETED);
 		stubReadyRun(MigrationRunStatus.COMPLETED, List.of(batch), enabledPromotion());
-		when(stagingRecordCounter.countStagedRecords(eq(runId), eq(11L), any())).thenReturn(3L);
+		stagedCounts.put(11L, 3L);
 
 		PreparePromotionResponse response = service.prepare(runId, null);
 
 		assertThat(response.status()).isEqualTo(PromotionStatus.READY);
 		assertThat(response.eligibleBatches()).isEqualTo(1);
 		assertThat(response.eligibleRecords()).isEqualTo(3L);
+		verify(migrationBatchRepository, never()).findByMigrationRun_IdOrderByBatchNumberAsc(any());
 		assertThat(response.batches()).singleElement().satisfies(item -> {
 			assertThat(item.executionStatus()).isEqualTo(MigrationBatchStatus.COMPLETED);
 			assertThat(item.promotionStatus()).isEqualTo(PromotionBatchStatus.ELIGIBLE);
@@ -106,7 +133,7 @@ class PromotionPreparationServiceTest {
 	void completedWithErrorsRunWithReconciliationIsReady() {
 		MigrationBatch batch = batch(12L, MigrationBatchStatus.COMPLETED_WITH_ERRORS);
 		stubReadyRun(MigrationRunStatus.COMPLETED_WITH_ERRORS, List.of(batch), enabledPromotion());
-		when(stagingRecordCounter.countStagedRecords(eq(runId), eq(12L), any())).thenReturn(2L);
+		stagedCounts.put(12L, 2L);
 
 		PreparePromotionResponse response = service.prepare(runId, null);
 
@@ -162,7 +189,7 @@ class PromotionPreparationServiceTest {
 	void completedBatchWithZeroStagedRowsIsNotEligible() {
 		MigrationBatch batch = batch(13L, MigrationBatchStatus.COMPLETED);
 		stubReadyRun(MigrationRunStatus.COMPLETED, List.of(batch), enabledPromotion());
-		when(stagingRecordCounter.countStagedRecords(eq(runId), eq(13L), any())).thenReturn(0L);
+		stagedCounts.put(13L, 0L);
 
 		PreparePromotionResponse response = service.prepare(runId, null);
 
@@ -182,8 +209,8 @@ class PromotionPreparationServiceTest {
 		MigrationBatch failed = batch(14L, MigrationBatchStatus.FAILED);
 		MigrationBatch completed = batch(15L, MigrationBatchStatus.COMPLETED);
 		stubReadyRun(MigrationRunStatus.COMPLETED_WITH_ERRORS, List.of(failed, completed), enabledPromotion());
-		when(stagingRecordCounter.countStagedRecords(eq(runId), eq(14L), any())).thenReturn(0L);
-		when(stagingRecordCounter.countStagedRecords(eq(runId), eq(15L), any())).thenReturn(4L);
+		stagedCounts.put(14L, 0L);
+		stagedCounts.put(15L, 4L);
 
 		PreparePromotionResponse response = service.prepare(runId, null);
 
@@ -199,7 +226,7 @@ class PromotionPreparationServiceTest {
 		batch.setValidationFailureCount(5);
 		batch.setRecordCount(7);
 		stubReadyRun(MigrationRunStatus.COMPLETED_WITH_ERRORS, List.of(batch), enabledPromotion());
-		when(stagingRecordCounter.countStagedRecords(eq(runId), eq(16L), any())).thenReturn(2L);
+		stagedCounts.put(16L, 2L);
 
 		PreparePromotionResponse response = service.prepare(runId, null);
 
@@ -221,6 +248,60 @@ class PromotionPreparationServiceTest {
 	}
 
 	@Test
+	void reservedNotStartedPromotionIsFilledWithoutASecondRow() {
+		MigrationBatch batch = batch(21L, MigrationBatchStatus.COMPLETED);
+		MigrationRun run = stubReadyRun(MigrationRunStatus.COMPLETED, List.of(batch), enabledPromotion());
+		UUID reservedId = UUID.randomUUID();
+		MigrationPromotion reserved = new MigrationPromotion();
+		reserved.setId(reservedId);
+		reserved.setMigrationRun(run);
+		reserved.setStatus(PromotionStatus.NOT_STARTED);
+		reserved.setRequestedBy("operator");
+		when(promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId)).thenReturn(List.of(reserved));
+		stagedCounts.put(21L, 4L);
+
+		PreparePromotionResponse response = service.prepare(runId, null);
+
+		assertThat(response.promotionId()).isEqualTo(reservedId);
+		assertThat(response.status()).isEqualTo(PromotionStatus.READY);
+		assertThat(response.eligibleRecords()).isEqualTo(4L);
+		verify(promotionRepository, never()).save(any());
+	}
+
+	@Test
+	void reserveCreatesOneNotStartedPromotion() {
+		MigrationRun run = stubRunOnly(MigrationRunStatus.COMPLETED, enabledPromotion());
+		when(promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId)).thenReturn(List.of());
+		when(promotionRepository.saveAndFlush(any(MigrationPromotion.class))).thenAnswer(invocation -> {
+			MigrationPromotion promotion = invocation.getArgument(0);
+			promotion.setId(UUID.fromString("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
+			return promotion;
+		});
+
+		UUID reserved = service.reserve(runId, "operator");
+
+		assertThat(reserved).isEqualTo(UUID.fromString("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
+		ArgumentCaptor<MigrationPromotion> captor = ArgumentCaptor.forClass(MigrationPromotion.class);
+		verify(promotionRepository).saveAndFlush(captor.capture());
+		assertThat(captor.getValue().getStatus()).isEqualTo(PromotionStatus.NOT_STARTED);
+		assertThat(captor.getValue().getMigrationRun()).isSameAs(run);
+		assertThat(captor.getValue().getRequestedBy()).isEqualTo("operator");
+	}
+
+	@Test
+	void reserveReusesAnExistingReadyPromotion() {
+		MigrationRun run = stubRunOnly(MigrationRunStatus.COMPLETED, enabledPromotion());
+		MigrationPromotion ready = new MigrationPromotion();
+		ready.setId(UUID.randomUUID());
+		ready.setMigrationRun(run);
+		ready.setStatus(PromotionStatus.READY);
+		when(promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId)).thenReturn(List.of(ready));
+
+		assertThat(service.reserve(runId, "operator")).isEqualTo(ready.getId());
+		verify(promotionRepository, never()).saveAndFlush(any());
+	}
+
+	@Test
 	void existingPromotedPromotionIsReturnedWithoutDuplicate() {
 		MigrationRun run = stubReadyRun(MigrationRunStatus.COMPLETED, List.of(batch(17L, MigrationBatchStatus.COMPLETED)), enabledPromotion());
 		MigrationPromotion promoted = new MigrationPromotion();
@@ -231,12 +312,8 @@ class PromotionPreparationServiceTest {
 		promoted.setEligibleBatches(1);
 		promoted.setTotalRecords(3L);
 		when(promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId)).thenReturn(List.of(promoted));
-		MigrationPromotionBatch row = new MigrationPromotionBatch();
-		row.setPromotion(promoted);
-		row.setMigrationBatch(batch(17L, MigrationBatchStatus.COMPLETED));
-		row.setStatus(PromotionBatchStatus.PROMOTED);
-		row.setEligibleRecordCount(3L);
-		when(promotionBatchRepository.findByPromotion_Id(promoted.getId())).thenReturn(List.of(row));
+		when(promotionBatchRepository.findHeadersByPromotionId(promoted.getId())).thenReturn(List.of(
+				new PromotionBatchHeader(17L, PromotionBatchStatus.PROMOTED, 3L, 0L)));
 
 		PreparePromotionResponse response = service.prepare(runId, null);
 
@@ -255,14 +332,10 @@ class PromotionPreparationServiceTest {
 		previous.setMigrationRun(run);
 		previous.setStatus(PromotionStatus.PARTIALLY_PROMOTED);
 		when(promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId)).thenReturn(List.of(previous));
-		MigrationPromotionBatch promotedRow = new MigrationPromotionBatch();
-		promotedRow.setPromotion(previous);
-		promotedRow.setMigrationBatch(first);
-		promotedRow.setStatus(PromotionBatchStatus.PROMOTED);
-		promotedRow.setEligibleRecordCount(3L);
-		when(promotionBatchRepository.findByMigrationRun_Id(runId)).thenReturn(List.of(promotedRow));
-		when(stagingRecordCounter.countStagedRecords(eq(runId), eq(18L), any())).thenReturn(3L);
-		when(stagingRecordCounter.countStagedRecords(eq(runId), eq(19L), any())).thenReturn(4L);
+		when(promotionBatchRepository.findBatchIdsByRunAndStatus(runId, PromotionBatchStatus.PROMOTED))
+				.thenReturn(List.of(18L));
+		stagedCounts.put(18L, 3L);
+		stagedCounts.put(19L, 4L);
 
 		PreparePromotionResponse response = service.prepare(runId, null);
 
@@ -293,7 +366,7 @@ class PromotionPreparationServiceTest {
 		reconciliation.setReconciliationType(ReconciliationType.FULL);
 		reconciliation.setStatus(ReconciliationStatus.PASSED_WITH_WARNINGS);
 		stubReadyRun(MigrationRunStatus.COMPLETED, List.of(batch), enabledPromotion(), List.of(reconciliation));
-		when(stagingRecordCounter.countStagedRecords(eq(runId), eq(20L), any())).thenReturn(1L);
+		stagedCounts.put(20L, 1L);
 
 		PreparePromotionResponse response = service.prepare(runId, null);
 
@@ -349,8 +422,10 @@ class PromotionPreparationServiceTest {
 		when(migrationBatchRepository.countByMigrationRun_IdAndStatusIn(eq(runId), any())).thenReturn(0L);
 		when(reconciliationRepository.findByMigrationRun_Id(runId)).thenReturn(reconciliations);
 		when(promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId)).thenReturn(List.of());
-		when(promotionBatchRepository.findByMigrationRun_Id(runId)).thenReturn(List.of());
-		when(migrationBatchRepository.findByMigrationRun_IdOrderByBatchNumberAsc(runId)).thenReturn(batches);
+		when(promotionBatchRepository.findBatchIdsByRunAndStatus(runId, PromotionBatchStatus.PROMOTED)).thenReturn(List.of());
+		when(migrationBatchRepository.findHeadersByMigrationRunId(runId)).thenReturn(batches.stream()
+				.map(batch -> new BatchHeader(batch.getId(), batch.getBatchNumber(), batch.getStatus()))
+				.toList());
 		return run;
 	}
 

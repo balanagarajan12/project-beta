@@ -20,9 +20,11 @@ import com.etp.migration.repository.MigrationPromotionRepository;
 import com.etp.migration.repository.MigrationReconciliationRepository;
 import com.etp.migration.repository.MigrationRunRepository;
 import com.etp.migration.run.MigrationRunNotFoundException;
+import jakarta.persistence.EntityManager;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -47,10 +49,6 @@ public class PromotionPreparationService {
 	private static final EnumSet<MigrationBatchStatus> EXECUTION_ELIGIBLE = EnumSet.of(
 			MigrationBatchStatus.COMPLETED,
 			MigrationBatchStatus.COMPLETED_WITH_ERRORS);
-	private static final EnumSet<PromotionStatus> ACTIVE_PROMOTION = EnumSet.of(
-			PromotionStatus.NOT_STARTED,
-			PromotionStatus.READY,
-			PromotionStatus.PROMOTING);
 
 	private final MigrationRunRepository migrationRunRepository;
 	private final MigrationBatchRepository migrationBatchRepository;
@@ -58,6 +56,7 @@ public class PromotionPreparationService {
 	private final MigrationPromotionRepository promotionRepository;
 	private final MigrationPromotionBatchRepository promotionBatchRepository;
 	private final StagingRecordCounter stagingRecordCounter;
+	private final EntityManager entityManager;
 
 	public PromotionPreparationService(
 			MigrationRunRepository migrationRunRepository,
@@ -65,17 +64,88 @@ public class PromotionPreparationService {
 			MigrationReconciliationRepository reconciliationRepository,
 			MigrationPromotionRepository promotionRepository,
 			MigrationPromotionBatchRepository promotionBatchRepository,
-			StagingRecordCounter stagingRecordCounter) {
+			StagingRecordCounter stagingRecordCounter,
+			EntityManager entityManager) {
 		this.migrationRunRepository = migrationRunRepository;
 		this.migrationBatchRepository = migrationBatchRepository;
 		this.reconciliationRepository = reconciliationRepository;
 		this.promotionRepository = promotionRepository;
 		this.promotionBatchRepository = promotionBatchRepository;
 		this.stagingRecordCounter = stagingRecordCounter;
+		this.entityManager = entityManager;
+	}
+
+	/**
+	 * Returns the promotion this preparation will fill. A new row is {@code NOT_STARTED}
+	 * until {@link #prepare} classifies batches. The caller holds the run lock.
+	 */
+	@Transactional
+	public UUID reserve(UUID runId, String requestedBy) {
+		MigrationRun run = migrationRunRepository.findByIdForUpdate(runId)
+				.orElseThrow(() -> new MigrationRunNotFoundException(runId));
+		List<MigrationPromotion> existing = promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId);
+		if (existing.stream().anyMatch(promotion -> promotion.getStatus() == PromotionStatus.PROMOTING)) {
+			throw conflict(MigrationErrorCodes.PROMOTION_IN_PROGRESS, "A promotion is already in progress for this run");
+		}
+		for (PromotionStatus status : List.of(PromotionStatus.PROMOTED, PromotionStatus.READY, PromotionStatus.NOT_STARTED)) {
+			for (MigrationPromotion promotion : existing) {
+				if (promotion.getStatus() == status) {
+					return promotion.getId();
+				}
+			}
+		}
+		Instant now = Instant.now();
+		MigrationPromotion promotion = new MigrationPromotion();
+		promotion.setMigrationRun(run);
+		promotion.setStatus(PromotionStatus.NOT_STARTED);
+		promotion.setRequestedBy(requestedBy == null ? AuditActor.current() : requestedBy);
+		promotion.setRequestedAt(now);
+		promotion.setPromotedBatches(0);
+		promotion.setFailedBatches(0);
+		promotion.setPromotedRecords(0L);
+		promotion.setFailedRecords(0L);
+		promotionRepository.saveAndFlush(promotion);
+		return promotion.getId();
+	}
+
+	@Transactional(readOnly = true)
+	public void assertEligible(UUID runId) {
+		MigrationRun run = migrationRunRepository.findById(runId)
+				.orElseThrow(() -> new MigrationRunNotFoundException(runId));
+		Map<String, Object> configuration = run.getMigrationDefinition().getConfiguration() == null
+				? Map.of()
+				: run.getMigrationDefinition().getConfiguration();
+		requirePostgresqlTarget(run.getMigrationDefinition().getTargetType());
+		PromotionConfigurationGate.requireEnabled(configuration);
+		requireExecutionComplete(run);
+		requireNoActiveBatches(runId);
+		requireReconciliation(runId);
+		boolean promoting = promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId).stream()
+				.anyMatch(promotion -> promotion.getStatus() == PromotionStatus.PROMOTING);
+		if (promoting) {
+			throw conflict(MigrationErrorCodes.PROMOTION_IN_PROGRESS, "A promotion is already in progress for this run");
+		}
 	}
 
 	@Transactional
 	public PreparePromotionResponse prepare(UUID runId, PreparePromotionRequest request) {
+		return prepare(runId, request, () -> { });
+	}
+
+	@Transactional
+	public PreparePromotionResponse prepare(UUID runId, PreparePromotionRequest request, Runnable progress) {
+		return prepare(runId, request, progress, null);
+	}
+
+	@Transactional
+	public PreparePromotionResponse prepare(
+			UUID runId,
+			PreparePromotionRequest request,
+			Runnable progress,
+			String requestedBy) {
+		if (progress != null) {
+			progress.run();
+		}
 		MigrationRun run = migrationRunRepository.findByIdForUpdate(runId)
 				.orElseThrow(() -> new MigrationRunNotFoundException(runId));
 		MigrationDefinition definition = run.getMigrationDefinition();
@@ -101,36 +171,50 @@ public class PromotionPreparationService {
 			return toResponse(promoted, loadEligibility(promoted, runId));
 		}
 		MigrationPromotion active = existing.stream()
-				.filter(promotion -> ACTIVE_PROMOTION.contains(promotion.getStatus()))
+				.filter(promotion -> promotion.getStatus() == PromotionStatus.READY
+						|| promotion.getStatus() == PromotionStatus.PROMOTING)
 				.findFirst()
 				.orElse(null);
 		if (active != null) {
 			return toResponse(active, loadEligibility(active, runId));
 		}
+		MigrationPromotion reserved = existing.stream()
+				.filter(promotion -> promotion.getStatus() == PromotionStatus.NOT_STARTED)
+				.findFirst()
+				.orElse(null);
 
 		Set<Long> alreadyPromotedBatchIds = alreadyPromotedBatchIds(runId);
-		List<MigrationBatch> batches = migrationBatchRepository.findByMigrationRun_IdOrderByBatchNumberAsc(runId);
+		List<BatchHeader> batches = migrationBatchRepository.findHeadersByMigrationRunId(runId);
+		Map<Long, Long> stagedByBatch = stagingRecordCounter.countStagedRecordsByBatch(runId, configuration);
 		Instant now = Instant.now();
-		MigrationPromotion promotion = new MigrationPromotion();
-		promotion.setMigrationRun(run);
+		MigrationPromotion promotion = reserved == null ? new MigrationPromotion() : reserved;
+		if (reserved == null) {
+			promotion.setMigrationRun(run);
+		}
 		promotion.setStatus(PromotionStatus.READY);
-		promotion.setRequestedBy(AuditActor.current());
-		promotion.setRequestedAt(now);
+		if (promotion.getRequestedBy() == null) {
+			promotion.setRequestedBy(requestedBy == null ? AuditActor.current() : requestedBy);
+		}
+		if (promotion.getRequestedAt() == null) {
+			promotion.setRequestedAt(now);
+		}
 		promotion.setPromotedBatches(0);
 		promotion.setFailedBatches(0);
 		promotion.setPromotedRecords(0L);
 		promotion.setFailedRecords(0L);
-		promotionRepository.save(promotion);
+		if (reserved == null) {
+			promotionRepository.save(promotion);
+		}
 
 		List<PromotionBatchEligibilityResponse> details = new ArrayList<>();
 		int eligibleBatches = 0;
 		int skippedBatches = 0;
 		long eligibleRecords = 0L;
 		long skippedRecords = 0L;
-		for (MigrationBatch batch : batches) {
-			long staged = stagingRecordCounter.countStagedRecords(runId, batch.getId(), configuration);
-			boolean alreadyPromoted = alreadyPromotedBatchIds.contains(batch.getId());
-			boolean executionEligible = EXECUTION_ELIGIBLE.contains(batch.getStatus());
+		for (BatchHeader batch : batches) {
+			long staged = stagedByBatch.getOrDefault(batch.id(), 0L);
+			boolean alreadyPromoted = alreadyPromotedBatchIds.contains(batch.id());
+			boolean executionEligible = EXECUTION_ELIGIBLE.contains(batch.status());
 			PromotionBatchStatus promotionStatus;
 			long eligibleRecordCount;
 			long skippedRecordCount;
@@ -152,11 +236,14 @@ public class PromotionPreparationService {
 				skippedRecordCount = 0L;
 				skippedBatches++;
 			}
+			if (progress != null) {
+				progress.run();
+			}
 			if (!alreadyPromoted) {
 				MigrationPromotionBatch promotionBatch = new MigrationPromotionBatch();
 				promotionBatch.setPromotion(promotion);
 				promotionBatch.setMigrationRun(run);
-				promotionBatch.setMigrationBatch(batch);
+				promotionBatch.setMigrationBatch(entityManager.getReference(MigrationBatch.class, batch.id()));
 				promotionBatch.setStatus(promotionStatus);
 				promotionBatch.setEligibleRecordCount(eligibleRecordCount);
 				promotionBatch.setSkippedRecordCount(skippedRecordCount);
@@ -165,8 +252,8 @@ public class PromotionPreparationService {
 				promotionBatchRepository.save(promotionBatch);
 			}
 			details.add(new PromotionBatchEligibilityResponse(
-					batch.getId(),
-					batch.getStatus(),
+					batch.id(),
+					batch.status(),
 					promotionStatus,
 					eligibleRecordCount,
 					skippedRecordCount));
@@ -215,38 +302,31 @@ public class PromotionPreparationService {
 	}
 
 	private Set<Long> alreadyPromotedBatchIds(UUID runId) {
-		Set<Long> ids = new HashSet<>();
-		for (MigrationPromotionBatch row : promotionBatchRepository.findByMigrationRun_Id(runId)) {
-			if (row.getStatus() == PromotionBatchStatus.PROMOTED && row.getMigrationBatch() != null) {
-				ids.add(row.getMigrationBatch().getId());
-			}
-		}
-		return ids;
+		return new HashSet<>(promotionBatchRepository.findBatchIdsByRunAndStatus(runId, PromotionBatchStatus.PROMOTED));
 	}
 
 	private List<PromotionBatchEligibilityResponse> loadEligibility(MigrationPromotion promotion, UUID runId) {
-		List<MigrationBatch> batches = migrationBatchRepository.findByMigrationRun_IdOrderByBatchNumberAsc(runId);
-		List<MigrationPromotionBatch> rows = promotionBatchRepository.findByPromotion_Id(promotion.getId());
+		Map<Long, PromotionBatchHeader> rows = new HashMap<>();
+		for (PromotionBatchHeader row : promotionBatchRepository.findHeadersByPromotionId(promotion.getId())) {
+			rows.put(row.migrationBatchId(), row);
+		}
 		List<PromotionBatchEligibilityResponse> details = new ArrayList<>();
-		for (MigrationBatch batch : batches) {
-			MigrationPromotionBatch match = rows.stream()
-					.filter(row -> row.getMigrationBatch() != null && row.getMigrationBatch().getId().equals(batch.getId()))
-					.findFirst()
-					.orElse(null);
+		for (BatchHeader batch : migrationBatchRepository.findHeadersByMigrationRunId(runId)) {
+			PromotionBatchHeader match = rows.get(batch.id());
 			if (match == null) {
 				details.add(new PromotionBatchEligibilityResponse(
-						batch.getId(),
-						batch.getStatus(),
+						batch.id(),
+						batch.status(),
 						PromotionBatchStatus.NOT_ELIGIBLE,
 						0L,
 						0L));
 			} else {
 				details.add(new PromotionBatchEligibilityResponse(
-						batch.getId(),
-						batch.getStatus(),
-						match.getStatus(),
-						nz(match.getEligibleRecordCount()),
-						nz(match.getSkippedRecordCount())));
+						batch.id(),
+						batch.status(),
+						match.status(),
+						nz(match.eligibleRecordCount()),
+						nz(match.skippedRecordCount())));
 			}
 		}
 		return details;

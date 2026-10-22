@@ -41,6 +41,57 @@ class EntityExtractorTest {
 	}
 
 	@Test
+	void emitsAConstantEntityForTheSourceRecordWithoutASourceKey() {
+		EntityDefinition root = new EntityDefinition("AddressLocation", "location", null, "id");
+		EntityDefinition location = new EntityDefinition("GeographicLocation", "geographic_location", null, "id");
+		EntityDefinition geometry = new EntityDefinition("LocationGeometry", "location_geometry", null, "id");
+		MigrationMappingRule street = rule(1, "street_name", "name");
+		street.setEntityName("AddressLocation");
+		MigrationMappingRule geoType = constant(2, "geo_json_type", "geoJsonPoint");
+		geoType.setEntityName("GeographicLocation");
+		MigrationMappingRule longitude = rule(3, "longitude", "x");
+		longitude.setEntityName("LocationGeometry");
+		EntityRelationshipMapping mapping = new EntityRelationshipMapping(
+				"AddressLocation",
+				List.of(root, location, geometry),
+				List.of());
+
+		EntityExtraction extraction = extractor.extract(
+				row(1, Map.of("street_name", "Sample", "longitude", "144.91")),
+				mapping,
+				List.of(street, geoType, longitude));
+
+		assertThat(extraction.failures()).isEmpty();
+		assertThat(identity(extraction, "AddressLocation")).isEqualTo("1");
+		assertThat(identity(extraction, "GeographicLocation")).isEqualTo("1");
+		assertThat(identity(extraction, "LocationGeometry")).isEqualTo("1");
+		assertThat(record(extraction, "GeographicLocation").fields()).isEmpty();
+		assertThat(record(extraction, "LocationGeometry").fields()).containsEntry("longitude", "144.91");
+	}
+
+	@Test
+	void omitsASourceRecordEntityWhenItsSourceColumnsAreBlank() {
+		EntityDefinition location = new EntityDefinition("GeographicLocation", "geographic_location", null, "id");
+		EntityDefinition subAddress = new EntityDefinition("GeographicSubAddress", "geographic_sub_address", null, "id");
+		MigrationMappingRule geoType = constant(1, "geo_json_type", "geoJsonPoint");
+		geoType.setEntityName("GeographicLocation");
+		MigrationMappingRule unit = rule(2, "unit_number", "sub_unit_number");
+		unit.setEntityName("GeographicSubAddress");
+		EntityRelationshipMapping mapping = new EntityRelationshipMapping(
+				"GeographicLocation",
+				List.of(location, subAddress),
+				List.of());
+
+		EntityExtraction extraction = extractor.extract(
+				row(1, Map.of("unit_number", "  ")),
+				mapping,
+				List.of(geoType, unit));
+
+		assertThat(extraction.failures()).isEmpty();
+		assertThat(extraction.records()).extracting(EntityRecord::entityName).containsExactly("GeographicLocation");
+	}
+
+	@Test
 	void nullSourceKeyUsesTheSourceRecordAndDoesNotReadANullField() {
 		EntityDefinition parent = new EntityDefinition("GeographicAddress", "geographic_address", "address_id", "location_id");
 		EntityDefinition child = new EntityDefinition("GeographicSubAddress", "geographic_sub_address", null, "id");
@@ -332,6 +383,17 @@ class EntityExtractorTest {
 
 	private static ConfiguredEntity entity(String name, String sourceKey, MigrationMappingRule... rules) {
 		return new ConfiguredEntity(name, sourceKey, List.of(rules));
+	}
+
+	private static MigrationMappingRule constant(int sequence, String target, String value) {
+		MigrationMappingRule rule = new MigrationMappingRule();
+		rule.setSequenceNo(sequence);
+		rule.setTargetField(target);
+		rule.setTransformationType(TransformationType.DEFAULT);
+		rule.setDefaultValue(value);
+		rule.setEnabled(true);
+		rule.setConfiguration(Map.of());
+		return rule;
 	}
 
 	private static MigrationMappingRule rule(int sequence, String source, String target) {

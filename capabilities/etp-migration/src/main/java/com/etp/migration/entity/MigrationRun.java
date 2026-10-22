@@ -1,5 +1,6 @@
 package com.etp.migration.entity;
 
+import com.etp.migration.run.ExecutionControlState;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -103,6 +104,28 @@ public class MigrationRun {
 
 	@Column(name = "error_message", length = 2000)
 	private String errorMessage;
+
+	@Column(name = "background_execution", nullable = false)
+	private boolean backgroundExecution;
+
+	@Enumerated(EnumType.STRING)
+	@Column(name = "control_state", nullable = false, length = 20)
+	private ExecutionControlState controlState = ExecutionControlState.RUNNING;
+
+	@Column(name = "control_updated_at")
+	private Instant controlUpdatedAt;
+
+	@Column(name = "last_control_action", length = 20)
+	private String lastControlAction;
+
+	/**
+	 * Written only by {@code MigrationExecutionClaim}. A batch flush must not put a stale null back.
+	 */
+	@Column(name = "execution_worker_id", length = 200, updatable = false)
+	private String executionWorkerId;
+
+	@Column(name = "execution_lease_until", updatable = false)
+	private Instant executionLeaseUntil;
 
 	@Column(name = "created_at", nullable = false, updatable = false)
 	private Instant createdAt;
@@ -321,6 +344,54 @@ public class MigrationRun {
 
 	public void setErrorMessage(String errorMessage) {
 		this.errorMessage = errorMessage;
+	}
+
+	public boolean isBackgroundExecution() {
+		return backgroundExecution;
+	}
+
+	public void setBackgroundExecution(boolean backgroundExecution) {
+		this.backgroundExecution = backgroundExecution;
+	}
+
+	public ExecutionControlState getControlState() {
+		return controlState == null ? ExecutionControlState.RUNNING : controlState;
+	}
+
+	public void setControlState(ExecutionControlState controlState) {
+		this.controlState = controlState;
+	}
+
+	public Instant getControlUpdatedAt() {
+		return controlUpdatedAt;
+	}
+
+	public void setControlUpdatedAt(Instant controlUpdatedAt) {
+		this.controlUpdatedAt = controlUpdatedAt;
+	}
+
+	public String getLastControlAction() {
+		return lastControlAction;
+	}
+
+	public void setLastControlAction(String lastControlAction) {
+		this.lastControlAction = lastControlAction;
+	}
+
+	public String getExecutionWorkerId() {
+		return executionWorkerId;
+	}
+
+	public void setExecutionWorkerId(String executionWorkerId) {
+		this.executionWorkerId = executionWorkerId;
+	}
+
+	public Instant getExecutionLeaseUntil() {
+		return executionLeaseUntil;
+	}
+
+	public void setExecutionLeaseUntil(Instant executionLeaseUntil) {
+		this.executionLeaseUntil = executionLeaseUntil;
 	}
 
 	public Instant getCreatedAt() {

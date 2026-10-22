@@ -47,6 +47,7 @@ class MigrationExecutionIntegrationTest {
 	@DynamicPropertySource
 	static void storageProperties(DynamicPropertyRegistry registry) {
 		registry.add("etp.migration.storage.root", () -> storageRoot.toAbsolutePath().toString());
+		registry.add("etp.migration.execution.recovery-interval-ms", () -> "3600000");
 	}
 
 	@Autowired
@@ -61,6 +62,10 @@ class MigrationExecutionIntegrationTest {
 	private TransactionTemplate transactionTemplate;
 	@Autowired
 	private JdbcTemplate jdbcTemplate;
+	@Autowired
+	private MigrationExecutionCoordinator coordinator;
+	@Autowired
+	private MigrationExecutionClaim executionClaim;
 	@Autowired
 	@Qualifier(PostgreSqlTargetClientConfig.DATASOURCE_BEAN)
 	private DataSource targetDataSource;
@@ -95,24 +100,17 @@ class MigrationExecutionIntegrationTest {
 				456 Oak Ave,Knoxville
 				""");
 
-		MvcResult executed = mockMvc.perform(post("/api/v1/migrations/{id}/execute", definitionId)
-						.with(jwt())
-						.contentType(MediaType.APPLICATION_JSON)
-						.content("{}"))
-				.andExpect(status().isCreated())
+		String runId = acceptedRun(definitionId, "{}");
+		assertThat(background(runId)).isTrue();
+
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
+				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.status").value("COMPLETED"))
 				.andExpect(jsonPath("$.successRecords").value(2))
 				.andExpect(jsonPath("$.processedRecords").value(2))
 				.andExpect(jsonPath("$.totalBatches").value(1))
 				.andExpect(jsonPath("$.completedBatches").value(1))
-				.andExpect(jsonPath("$.failedBatches").value(0))
-				.andReturn();
-		String runId = read(executed, "$.id");
-		assertThat(executed.getResponse().getHeader("Location")).isEqualTo("/api/v1/migration-runs/" + runId);
-
-		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
-				.andExpect(status().isOk())
-				.andExpect(jsonPath("$.status").value("COMPLETED"));
+				.andExpect(jsonPath("$.failedBatches").value(0));
 		assertThat(batchRepository.findByMigrationRun_IdOrderByBatchNumberAsc(UUID.fromString(runId)))
 				.hasSize(1)
 				.allMatch(batch -> batch.getStatus() == MigrationBatchStatus.COMPLETED);
@@ -130,11 +128,9 @@ class MigrationExecutionIntegrationTest {
 				456 Oak Ave,Knoxville
 				""");
 
-		mockMvc.perform(post("/api/v1/migrations/{id}/execute", definitionId)
-						.with(jwt())
-						.contentType(MediaType.APPLICATION_JSON)
-						.content("{}"))
-				.andExpect(status().isCreated())
+		String runId = acceptedRun(definitionId, "{}");
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
+				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.status").value("COMPLETED_WITH_ERRORS"))
 				.andExpect(jsonPath("$.successRecords").value(1))
 				.andExpect(jsonPath("$.validationFailures").value(1))
@@ -149,11 +145,9 @@ class MigrationExecutionIntegrationTest {
 				123 Main St,Salem
 				""");
 
-		mockMvc.perform(post("/api/v1/migrations/{id}/execute", definitionId)
-						.with(jwt())
-						.contentType(MediaType.APPLICATION_JSON)
-						.content("{}"))
-				.andExpect(status().isCreated())
+		String runId = acceptedRun(definitionId, "{}");
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
+				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.status").value("FAILED"))
 				.andExpect(jsonPath("$.failedBatches").value(1));
 	}
@@ -163,11 +157,9 @@ class MigrationExecutionIntegrationTest {
 		String definitionId = activeDefinition(10_000, "BULK", true);
 		createSource(definitionId, "addr1,city\n");
 
-		mockMvc.perform(post("/api/v1/migrations/{id}/execute", definitionId)
-						.with(jwt())
-						.contentType(MediaType.APPLICATION_JSON)
-						.content("{}"))
-				.andExpect(status().isCreated())
+		String runId = acceptedRun(definitionId, "{}");
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
+				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.status").value("COMPLETED"))
 				.andExpect(jsonPath("$.totalBatches").value(0))
 				.andExpect(jsonPath("$.failedBatches").value(0));
@@ -177,17 +169,14 @@ class MigrationExecutionIntegrationTest {
 	void executeWithoutASourceFailsTheRunAndRecordsPreparationDetails() throws Exception {
 		String definitionId = activeDefinition(10_000, "BULK", true);
 
-		mockMvc.perform(post("/api/v1/migrations/{id}/execute", definitionId)
-						.with(jwt())
-						.contentType(MediaType.APPLICATION_JSON)
-						.content("{}"))
-				.andExpect(status().isNotFound());
-
-		MvcResult listed = mockMvc.perform(get("/api/v1/migrations/{id}/runs", definitionId).with(jwt()))
+		String runId = acceptedRun(definitionId, "{}");
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
 				.andExpect(status().isOk())
-				.andExpect(jsonPath("$.content[0].status").value("FAILED"))
-				.andReturn();
-		String runId = read(listed, "$.content[0].id");
+				.andExpect(jsonPath("$.status").value("FAILED"));
+
+		mockMvc.perform(get("/api/v1/migrations/{id}/runs", definitionId).with(jwt()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.content[0].status").value("FAILED"));
 		mockMvc.perform(get("/api/v1/migration-runs/{runId}/errors", runId).with(jwt()))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.content[0].errorCode").value("MIGRATION_PREPARATION_FAILED"))
@@ -213,16 +202,13 @@ class MigrationExecutionIntegrationTest {
 				123 Main St,Salem
 				""");
 
-		MvcResult executed = mockMvc.perform(post("/api/v1/migrations/{id}/execute", definitionId)
-						.with(jwt())
-						.contentType(MediaType.APPLICATION_JSON)
-						.content("{}"))
-				.andExpect(status().isCreated())
-				.andExpect(jsonPath("$.status").value("FAILED"))
-				.andExpect(jsonPath("$.failedBatches").value(1))
-				.andReturn();
-		String failedRunId = read(executed, "$.id");
+		String failedRunId = acceptedRun(definitionId, "{}");
 		assertThat(failedRunId).isNotEqualTo(queuedRunId);
+		assertThat(background(queuedRunId)).isFalse();
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", failedRunId).with(jwt()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("FAILED"))
+				.andExpect(jsonPath("$.failedBatches").value(1));
 
 		mockMvc.perform(get("/api/v1/migration-runs/{runId}", queuedRunId).with(jwt()))
 				.andExpect(status().isOk())
@@ -274,6 +260,10 @@ class MigrationExecutionIntegrationTest {
 				.andExpect(jsonPath("$.status").value("QUEUED"))
 				.andReturn();
 		String runId = read(created, "$.id");
+		assertThat(background(runId)).isFalse();
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("QUEUED"));
 		mockMvc.perform(post("/api/v1/migration-runs/{runId}/prepare", runId).with(jwt()))
 				.andExpect(status().isOk());
 		mockMvc.perform(post("/api/v1/migration-runs/{runId}/process-next-batch", runId).with(jwt()))
@@ -289,13 +279,125 @@ class MigrationExecutionIntegrationTest {
 				123 Main St,Salem
 				""", "FILE_SYSTEM");
 
-		mockMvc.perform(post("/api/v1/migrations/{id}/execute", definitionId)
+		String runId = acceptedRun(definitionId, "{}");
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("COMPLETED"))
+				.andExpect(jsonPath("$.successRecords").value(1));
+	}
+
+	@Test
+	void executeKeepsOwnershipAcrossBatchesUntilTheRunFinishes() throws Exception {
+		String definitionId = activeDefinition(1, "BULK", true);
+		createSource(definitionId, """
+				addr1,city
+				123 Main St,Salem
+				456 Oak Ave,Knoxville
+				""");
+
+		String runId = acceptedRun(definitionId, "{}");
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("COMPLETED"))
+				.andExpect(jsonPath("$.totalBatches").value(2))
+				.andExpect(jsonPath("$.completedBatches").value(2))
+				.andExpect(jsonPath("$.successRecords").value(2));
+	}
+
+	@Test
+	void unknownRunReturnsNotFound() throws Exception {
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", UUID.randomUUID()).with(jwt()))
+				.andExpect(status().isNotFound());
+	}
+
+	@Test
+	void repeatedExecuteWithTheSameIdempotencyKeyRunsOnce() throws Exception {
+		String definitionId = activeDefinition(10_000, "BULK", true);
+		createSource(definitionId, """
+				addr1,city
+				123 Main St,Salem
+				""");
+		String body = """
+				{"idempotencyKey":"same-execute-%s"}
+				""".formatted(System.nanoTime());
+
+		String first = acceptedRun(definitionId, body);
+		MvcResult second = mockMvc.perform(post("/api/v1/migrations/{id}/execute", definitionId)
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(body))
+				.andExpect(status().isAccepted())
+				.andReturn();
+		assertThat(read(second, "$.id")).isEqualTo(first);
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", first).with(jwt()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("COMPLETED"));
+		assertThat(batchRepository.findByMigrationRun_IdOrderByBatchNumberAsc(UUID.fromString(first))).hasSize(1);
+	}
+
+	@Test
+	void expiredBackgroundRunIsDiscoveredWithoutExecutingAManualRun() throws Exception {
+		String definitionId = activeDefinition(10_000, "BULK", true);
+		createSource(definitionId, """
+				addr1,city
+				123 Main St,Salem
+				""");
+		String runId = acceptedRun(definitionId, "{}");
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
+				.andExpect(jsonPath("$.successRecords").value(1));
+
+		jdbcTemplate.update("""
+				update migration_run
+				set status = 'RUNNING',
+				    completed_at = null,
+				    execution_worker_id = null,
+				    execution_lease_until = null,
+				    background_execution = true
+				where id = ?
+				""", UUID.fromString(runId));
+		coordinator.recover();
+		ExecutionAwait.untilTerminal(mockMvc, runId);
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
+				.andExpect(jsonPath("$.status").value("COMPLETED"))
+				.andExpect(jsonPath("$.successRecords").value(1));
+		assertThat(batchRepository.findByMigrationRun_IdOrderByBatchNumberAsc(UUID.fromString(runId))).hasSize(1);
+	}
+
+	@Test
+	void concurrentClaimsCannotBothOwnTheSameRun() throws Exception {
+		String definitionId = activeDefinition(10_000, "BULK", true);
+		createSource(definitionId, """
+				addr1,city
+				123 Main St,Salem
+				""");
+		MvcResult created = mockMvc.perform(post("/api/v1/migrations/{id}/runs", definitionId)
 						.with(jwt())
 						.contentType(MediaType.APPLICATION_JSON)
 						.content("{}"))
 				.andExpect(status().isCreated())
-				.andExpect(jsonPath("$.status").value("COMPLETED"))
-				.andExpect(jsonPath("$.successRecords").value(1));
+				.andReturn();
+		UUID runId = UUID.fromString(read(created, "$.id"));
+		jdbcTemplate.update("update migration_run set background_execution = true where id = ?", runId);
+
+		java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+		java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+		try {
+			java.util.concurrent.Future<Boolean> first = pool.submit(() -> {
+				start.await();
+				return executionClaim.tryClaim(runId);
+			});
+			java.util.concurrent.Future<Boolean> second = pool.submit(() -> {
+				start.await();
+				return executionClaim.tryClaim(runId);
+			});
+			start.countDown();
+			assertThat(java.util.List.of(first.get(), second.get())).containsExactlyInAnyOrder(true, false);
+		} finally {
+			executionClaim.release(runId);
+			pool.shutdownNow();
+		}
+		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))
+				.andExpect(jsonPath("$.status").value("RUNNING"));
 	}
 
 	private String activeDefinition(int batchSize, String loadMode, boolean activate) throws Exception {
@@ -404,6 +506,29 @@ class MigrationExecutionIntegrationTest {
 								}
 								""".formatted(sourceType, objectKey)))
 				.andExpect(status().isCreated());
+	}
+
+	private String acceptedRun(String definitionId, String body) throws Exception {
+		MvcResult accepted = mockMvc.perform(post("/api/v1/migrations/{id}/execute", definitionId)
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content(body))
+				.andExpect(status().isAccepted())
+				.andExpect(jsonPath("$.status").value("QUEUED"))
+				.andExpect(jsonPath("$.message").value("Migration execution accepted."))
+				.andExpect(jsonPath("$.runId").exists())
+				.andReturn();
+		String runId = read(accepted, "$.id");
+		assertThat(accepted.getResponse().getHeader("Location")).isEqualTo("/api/v1/migration-runs/" + runId);
+		ExecutionAwait.untilTerminal(mockMvc, runId);
+		return runId;
+	}
+
+	private boolean background(String runId) {
+		return Boolean.TRUE.equals(transactionTemplate.execute(status -> jdbcTemplate.queryForObject(
+				"select background_execution from migration_run where id = ?",
+				Boolean.class,
+				UUID.fromString(runId))));
 	}
 
 	private static String read(MvcResult result, String path) throws Exception {

@@ -59,6 +59,7 @@ class OpenApiSecurityIntegrationTest {
 		assertOperationRequiresBearerJwt(openApiJson, "/api/v1/migrations", "post");
 		assertOperationRequiresBearerJwt(openApiJson, "/api/v1/migration-configurations", "post");
 		assertOperationRequiresBearerJwt(openApiJson, "/api/v1/migration-runs/{runId}/promotion", "get");
+		assertOperationRequiresBearerJwt(openApiJson, "/api/v1/migration-runs/{runId}/promotion/batches", "get");
 		assertOperationRequiresBearerJwt(openApiJson, "/api/v1/migration-runs/{runId}/errors", "get");
 	}
 

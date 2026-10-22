@@ -43,7 +43,7 @@ class JwtAudienceValidationIntegrationTest {
 
 	private static final RSAKey SIGNING_KEY = rsaKey();
 	private static final WireMockServer KEYCLOAK = keycloak();
-	private static final String ISSUER = KEYCLOAK.baseUrl() + "/realms/etp";
+	private static final String ISSUER = issuer(KEYCLOAK);
 
 	@Autowired
 	MockMvc mockMvc;
@@ -127,11 +127,17 @@ class JwtAudienceValidationIntegrationTest {
 		}
 	}
 
+	private static String issuer(WireMockServer server) {
+		return "http://127.0.0.1:" + server.port() + "/realms/etp";
+	}
+
 	private static WireMockServer keycloak() {
-		WireMockServer server = new WireMockServer(wireMockConfig().dynamicPort());
+		// Bind and advertise 127.0.0.1. WireMock's baseUrl() is "localhost", and on Windows that name
+		// can connect over IPv6 and sit until the issuer-discovery read times out.
+		WireMockServer server = new WireMockServer(wireMockConfig().dynamicPort().bindAddress("127.0.0.1"));
 		server.start();
 		Runtime.getRuntime().addShutdownHook(new Thread(server::stop));
-		String issuer = server.baseUrl() + "/realms/etp";
+		String issuer = issuer(server);
 		server.stubFor(WireMock.get(urlPathEqualTo("/realms/etp/.well-known/openid-configuration"))
 				.willReturn(aResponse()
 						.withHeader("Content-Type", "application/json")

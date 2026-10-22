@@ -14,7 +14,18 @@ import org.springframework.security.web.SecurityFilterChain;
 @EnableWebSecurity
 public class SecurityConfig {
 
-	static final String[] OPENAPI_PATHS = {"/v3/api-docs", "/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html"};
+	/**
+	 * Springdoc serves YAML at {@code /v3/api-docs.yaml}, which is not covered by {@code /v3/api-docs/**}.
+	 * {@code /swagger-ui} is the welcome redirect; {@code /swagger-ui/**} is the UI.
+	 */
+	static final String[] OPENAPI_PATHS = {
+			"/v3/api-docs",
+			"/v3/api-docs.yaml",
+			"/v3/api-docs/**",
+			"/swagger-ui",
+			"/swagger-ui/**",
+			"/swagger-ui.html"
+	};
 
 	@Bean
 	@Order(2)

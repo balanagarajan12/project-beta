@@ -15,6 +15,7 @@ import com.etp.migration.entity.MigrationDefinition;
 import com.etp.migration.entity.MigrationPromotion;
 import com.etp.migration.entity.PromotionStatus;
 import com.etp.migration.processing.MigrationErrorCodes;
+import com.etp.migration.run.PhaseAwait;
 import com.etp.migration.repository.MigrationBatchRepository;
 import com.etp.migration.repository.MigrationDefinitionRepository;
 import com.etp.migration.repository.MigrationPromotionRepository;
@@ -106,8 +107,7 @@ class PromotionExecutionIntegrationTest {
 				E1,123 Main St,Salem
 				E2,456 Oak Ave,Knoxville
 				""");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.promoted(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("PROMOTED"))
 				.andExpect(jsonPath("$.promotedBatches").value(1))
 				.andExpect(jsonPath("$.promotedRecords").value(2))
@@ -123,8 +123,7 @@ class PromotionExecutionIntegrationTest {
 				G1,123 Main St,Salem
 				G2,456 Oak Ave,Knoxville
 				""");
-		MvcResult promoted = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		MvcResult promoted = PhaseAwait.promoted(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("PROMOTED"))
 				.andReturn();
 		String promotionId = com.jayway.jsonpath.JsonPath.read(promoted.getResponse().getContentAsString(), "$.promotionId");
@@ -140,8 +139,8 @@ class PromotionExecutionIntegrationTest {
 				.andExpect(jsonPath("$.promotedBatches").value(1))
 				.andExpect(jsonPath("$.promotedRecords").value(2))
 				.andExpect(jsonPath("$.failedRecords").value(0))
-				.andExpect(jsonPath("$.batches[0].promotionStatus").value("PROMOTED"))
-				.andExpect(jsonPath("$.batches[0].promotedRecordCount").value(2));
+				.andExpect(jsonPath("$.batchCounts.PROMOTED").value(1))
+				.andExpect(jsonPath("$.promotedRecords").value(2));
 
 		MigrationPromotion afterGet = transactionTemplate.execute(tx ->
 				promotionRepository.findById(UUID.fromString(promotionId)).orElseThrow());
@@ -158,8 +157,7 @@ class PromotionExecutionIntegrationTest {
 				Q1,123 Main St,Salem
 				Q2,456 Oak Ave,Salem
 				""");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.promoted(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("PARTIALLY_PROMOTED"));
 
 		mockMvc.perform(get("/api/v1/migration-runs/{runId}/promotion", runId).with(jwt()))
@@ -177,8 +175,7 @@ class PromotionExecutionIntegrationTest {
 				external_id,addr1,city
 				U1,123 Main St,Salem
 				""");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.promoted(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("PROMOTED"));
 		assertThat(businessCity("U1")).isEqualTo("Salem");
 	}
@@ -190,8 +187,7 @@ class PromotionExecutionIntegrationTest {
 				external_id,addr1,city
 				U1,New Street,Knoxville
 				""");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.promoted(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("PROMOTED"));
 		assertThat(countBusiness()).isEqualTo(1);
 		assertThat(businessLine("U1")).isEqualTo("New Street");
@@ -206,8 +202,7 @@ class PromotionExecutionIntegrationTest {
 				M1,123 Main St,Salem
 				M2,456 Oak Ave,Knoxville
 				""");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.promoted(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("PROMOTED"))
 				.andExpect(jsonPath("$.promotedBatches").value(2))
 				.andExpect(jsonPath("$.promotedRecords").value(2));
@@ -221,8 +216,7 @@ class PromotionExecutionIntegrationTest {
 				V1,123 Main St,Salem
 				V2,,Knoxville
 				""");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.promoted(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("PROMOTED"))
 				.andExpect(jsonPath("$.promotedBatches").value(1))
 				.andExpect(jsonPath("$.skippedBatches").value(1))
@@ -240,8 +234,7 @@ class PromotionExecutionIntegrationTest {
 				external_id,addr1,city
 				C1,New Street,Salem
 				""");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.promoted(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("PROMOTED"));
 		assertThat(countBusiness()).isEqualTo(1);
 		assertThat(businessLine("C1")).isEqualTo("New Street");
@@ -255,8 +248,7 @@ class PromotionExecutionIntegrationTest {
 				R1,123 Main St,Salem
 				R2,456 Oak Ave,Salem
 				""");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.promoted(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("PROMOTION_FAILED"))
 				.andExpect(jsonPath("$.promotedRecords").value(0))
 				.andExpect(jsonPath("$.failedRecords").value(2))
@@ -272,8 +264,7 @@ class PromotionExecutionIntegrationTest {
 				P1,123 Main St,Salem
 				P2,456 Oak Ave,Salem
 				""");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.promoted(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("PARTIALLY_PROMOTED"))
 				.andExpect(jsonPath("$.promotedBatches").value(1))
 				.andExpect(jsonPath("$.failedBatches").value(1))
@@ -289,20 +280,18 @@ class PromotionExecutionIntegrationTest {
 				external_id,addr1,city
 				I1,123 Main St,Salem
 				""");
-		MvcResult first = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		MvcResult first = PhaseAwait.promoted(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("PROMOTED"))
 				.andReturn();
 		String promotionId = com.jayway.jsonpath.JsonPath.read(first.getResponse().getContentAsString(), "$.promotionId");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.promoted(mockMvc, runId)
 				.andExpect(jsonPath("$.promotionId").value(promotionId))
 				.andExpect(jsonPath("$.status").value("PROMOTED"));
 		assertThat(countBusiness()).isEqualTo(1);
 	}
 
 	@Test
-	void concurrentPromotionAttemptsAreRejected() throws Exception {
+	void concurrentPromotionAttemptsShareOneJob() throws Exception {
 		StringBuilder csv = new StringBuilder("external_id,addr1,city\n");
 		for (int i = 0; i < 200; i++) {
 			csv.append("X").append(i).append(",Street ").append(i).append(",City").append(i).append("\n");
@@ -311,18 +300,20 @@ class PromotionExecutionIntegrationTest {
 		CyclicBarrier barrier = new CyclicBarrier(2);
 		ExecutorService executor = Executors.newFixedThreadPool(2);
 		try {
-			Callable<Integer> task = () -> {
+			Callable<String> task = () -> {
 				barrier.await();
-				return mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-						.andReturn()
-						.getResponse()
-						.getStatus();
+				MvcResult result = mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
+						.andReturn();
+				assertThat(result.getResponse().getStatus()).isEqualTo(202);
+				return result.getResponse().getContentAsString();
 			};
-			Future<Integer> first = executor.submit(task);
-			Future<Integer> second = executor.submit(task);
-			List<Integer> statuses = List.of(first.get(), second.get());
-			assertThat(statuses).contains(200);
-			assertThat(statuses).contains(409);
+			Future<String> first = executor.submit(task);
+			Future<String> second = executor.submit(task);
+			String firstBody = first.get();
+			String secondBody = second.get();
+			String jobId = com.jayway.jsonpath.JsonPath.read(firstBody, "$.jobId");
+			assertThat(com.jayway.jsonpath.JsonPath.read(secondBody, "$.jobId").toString()).isEqualTo(jobId);
+			PhaseAwait.untilComplete(mockMvc, runId, jobId);
 		} finally {
 			executor.shutdownNow();
 		}
@@ -390,8 +381,7 @@ class PromotionExecutionIntegrationTest {
 
 	private String stageAndPrepare(String promotionJson, int batchSize, String csv) throws Exception {
 		String runId = stage(promotionJson, batchSize, csv, true);
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.prepared(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("READY"));
 		return runId;
 	}
@@ -406,7 +396,7 @@ class PromotionExecutionIntegrationTest {
 		mockMvc.perform(post("/api/v1/migration-runs/{runId}/prepare", runId).with(jwt())).andExpect(status().isOk());
 		processAll(runId);
 		if (reconcile) {
-			mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId).with(jwt())).andExpect(status().isOk());
+			PhaseAwait.reconciled(mockMvc, runId);
 		}
 		return runId;
 	}

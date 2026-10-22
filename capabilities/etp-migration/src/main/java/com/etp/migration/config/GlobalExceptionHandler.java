@@ -27,6 +27,7 @@ import com.etp.migration.promotion.PromotionException;
 import com.etp.migration.run.DefinitionNotActiveException;
 import com.etp.migration.run.InvalidStateTransitionException;
 import com.etp.migration.run.MigrationRunNotFoundException;
+import com.etp.migration.run.PhaseJobNotFoundException;
 import com.etp.migration.promotion.PromotionNotFoundException;
 import com.etp.migration.reconciliation.ReconciliationNotFoundException;
 import com.etp.migration.reconciliation.ReconciliationNotReadyException;
@@ -119,7 +120,8 @@ public class GlobalExceptionHandler {
 			MigrationBatchNotFoundException.class,
 			ArtifactNotFoundException.class,
 			ReconciliationNotFoundException.class,
-			PromotionNotFoundException.class
+			PromotionNotFoundException.class,
+			PhaseJobNotFoundException.class
 	})
 	public ResponseEntity<ApiErrorResponse> handleNotFound(RuntimeException ex, HttpServletRequest request) {
 		return error(HttpStatus.NOT_FOUND, ex.getMessage(), request);

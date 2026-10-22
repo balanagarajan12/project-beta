@@ -3,6 +3,9 @@ package com.etp.migration.processing;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.etp.migration.connector.target.TargetInfrastructureException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -87,5 +90,66 @@ class MigrationErrorDetailsTest {
 				.containsEntry("exceptionType", IllegalStateException.class.getName())
 				.doesNotContainKeys("message", "rootCauseMessage", "sqlState", "runId");
 		assertThat(details.toString()).doesNotContain("hunter2");
+	}
+
+	@Test
+	void nullMessageUsesTheApplicationFrame() {
+		NullPointerException failure = new NullPointerException();
+		failure.setStackTrace(new StackTraceElement[] {
+				new StackTraceElement(
+						"com.etp.migration.processing.MigrationBatchWorker",
+						"processOwnedBatch",
+						"MigrationBatchWorker.java",
+						174)
+		});
+
+		String diagnostic = MigrationErrorDetails.diagnostic(failure);
+
+		assertThat(diagnostic).isEqualTo(
+				"java.lang.NullPointerException at com.etp.migration.processing.MigrationBatchWorker"
+						+ ".processOwnedBatch(MigrationBatchWorker.java:174)");
+		assertThat(MigrationErrorDetails.summary(failure)).isEqualTo(diagnostic);
+		assertThat(MigrationErrorDetails.publicDetails(Map.of(
+				"stackTrace", diagnostic,
+				"sqlState", "23503",
+				"message", "password=hunter2")))
+				.containsOnlyKeys("sqlState")
+				.containsEntry("sqlState", "23503");
+		assertThat(MigrationErrorDetails.publicMessage("token=abc api_key=hidden"))
+				.isEqualTo("Error details were redacted");
+		assertThat(MigrationErrorDetails.publicMessage("city is required")).isEqualTo("city is required");
+	}
+
+	@Test
+	void publicViewRedactsNestedValuesAndLeavesTheStoredObjectAlone() {
+		Map<String, Object> inner = new LinkedHashMap<>();
+		inner.put("note", "password=hunter2");
+		inner.put("stage", "VALIDATE");
+		List<Object> rows = new ArrayList<>();
+		rows.add(Map.of("value", "secret=row", "field", "city"));
+		rows.add("bearer token");
+		rows.add("addr-41");
+		Map<String, Object> stored = new LinkedHashMap<>();
+		stored.put("category", "RECORD");
+		stored.put("location", "com.etp.migration.processing.MigrationBatchWorker.processOwnedBatch");
+		stored.put("context", inner);
+		stored.put("rows", rows);
+		stored.put("stackTrace", "at hidden.Frame.line");
+
+		Map<String, Object> published = MigrationErrorDetails.publicDetails(stored);
+
+		assertThat(published)
+				.containsEntry("category", "RECORD")
+				.containsEntry("location", "com.etp.migration.processing.MigrationBatchWorker.processOwnedBatch")
+				.doesNotContainKey("stackTrace");
+		assertThat(published.get("context")).isEqualTo(Map.of("stage", "VALIDATE"));
+		assertThat(published.get("rows")).isEqualTo(List.of(Map.of("field", "city"), "addr-41"));
+		assertThat(inner).containsEntry("note", "password=hunter2");
+		assertThat(rows).hasSize(3);
+		assertThat(stored).containsKey("stackTrace");
+		assertThat(MigrationErrorDetails.publicSourceKey("addr-41")).isEqualTo("addr-41");
+		assertThat(MigrationErrorDetails.publicSourceKey("password")).isEqualTo("password");
+		assertThat(MigrationErrorDetails.publicSourceKey("password=hunter2")).isEqualTo("redacted");
+		assertThat(MigrationErrorDetails.publicSourceKey("key (id)=(1)")).isEqualTo("redacted");
 	}
 }

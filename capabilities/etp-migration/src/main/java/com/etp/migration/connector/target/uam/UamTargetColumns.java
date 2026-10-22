@@ -27,7 +27,10 @@ import org.postgresql.util.PGobject;
 
 /**
  * Reads PostgreSQL column metadata and converts canonical values to those types.
- * The catalog is authoritative. Configured {@code columnTypes} are not consulted here.
+ * The catalog is authoritative. Request configuration does not supply column types.
+ * A required {@code timestamp} or {@code timestamptz} column with no default receives one UTC
+ * instant for the load when the mapped value is missing or blank. Other required columns with
+ * no value fail before insert.
  * An unrecognized {@code udt_name}, including an array, enum, domain, or {@code bytea}, is left unchanged.
  */
 final class UamTargetColumns {
@@ -65,7 +68,7 @@ final class UamTargetColumns {
 			}
 		}
 		if (columns.isEmpty()) {
-			throw configurationError("Target table '" + schema + "." + table + "' has no columns");
+			throw configurationError("Target table '" + schema + "." + table + "' was not found");
 		}
 		return columns;
 	}
@@ -73,10 +76,22 @@ final class UamTargetColumns {
 	static List<UamCanonicalRows.InsertGroup> bind(
 			UamCanonicalRows.InsertGroup group,
 			Map<String, Column> catalog) {
+		return bind(group, catalog, OffsetDateTime.now(ZoneOffset.UTC));
+	}
+
+	static List<UamCanonicalRows.InsertGroup> bind(
+			UamCanonicalRows.InsertGroup group,
+			Map<String, Column> catalog,
+			OffsetDateTime loadedAt) {
 		String insertKey = group.columns().isEmpty() ? null : group.columns().get(0);
 		Map<List<String>, List<List<Object>>> grouped = new LinkedHashMap<>();
 		for (List<Object> row : group.parameters()) {
-			BoundRow bound = bindRow(group, catalog, row, insertKey);
+			Map<String, Object> values = new LinkedHashMap<>();
+			for (int index = 0; index < group.columns().size(); index++) {
+				values.put(group.columns().get(index), row.get(index));
+			}
+			fillRequiredTimestamps(catalog, values, loadedAt);
+			BoundRow bound = bindRow(group, catalog, values, insertKey);
 			grouped.computeIfAbsent(bound.columns(), ignored -> new ArrayList<>()).add(bound.values());
 		}
 		List<UamCanonicalRows.InsertGroup> groups = new ArrayList<>();
@@ -88,17 +103,61 @@ final class UamTargetColumns {
 		return groups;
 	}
 
+	private static void fillRequiredTimestamps(
+			Map<String, Column> catalog,
+			Map<String, Object> values,
+			OffsetDateTime loadedAt) {
+		for (Column column : catalog.values()) {
+			if (!column.required() || !timestampType(column)) {
+				continue;
+			}
+			Object current = values.get(column.name());
+			if (!values.containsKey(column.name()) || blank(current)) {
+				values.put(column.name(), timestampFill(column, loadedAt));
+			}
+		}
+	}
+
+	private static boolean timestampType(Column column) {
+		String type = column.udtName() == null ? "" : column.udtName().toLowerCase(Locale.ROOT);
+		return "timestamptz".equals(type) || "timestamp".equals(type);
+	}
+
+	private static Object timestampFill(Column column, OffsetDateTime loadedAt) {
+		if ("timestamp".equalsIgnoreCase(column.udtName())) {
+			return loadedAt.toLocalDateTime();
+		}
+		return loadedAt;
+	}
+
 	private static BoundRow bindRow(
 			UamCanonicalRows.InsertGroup group,
 			Map<String, Column> catalog,
-			List<Object> row,
+			Map<String, Object> row,
 			String insertKey) {
+		for (Column column : catalog.values()) {
+			if (!column.required() || timestampType(column)) {
+				continue;
+			}
+			if (!row.containsKey(column.name()) || blank(row.get(column.name()))) {
+				throw configurationError(
+						"Column '" + column.name() + "' on '" + column.table() + "' is required");
+			}
+		}
+		List<String> ordered = new ArrayList<>();
+		if (insertKey != null) {
+			ordered.add(insertKey);
+		}
+		for (String name : row.keySet()) {
+			if (!name.equals(insertKey)) {
+				ordered.add(name);
+			}
+		}
 		List<String> columns = new ArrayList<>();
 		List<Object> values = new ArrayList<>();
-		for (int index = 0; index < group.columns().size(); index++) {
-			String name = group.columns().get(index);
+		for (String name : ordered) {
 			Column column = require(catalog, group, name);
-			Object raw = row.get(index);
+			Object raw = row.get(name);
 			if (column.generatedAlways()) {
 				continue;
 			}

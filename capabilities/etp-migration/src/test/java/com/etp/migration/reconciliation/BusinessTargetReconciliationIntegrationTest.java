@@ -13,6 +13,7 @@ import com.etp.migration.entity.MigrationPromotion;
 import com.etp.migration.entity.MigrationRun;
 import com.etp.migration.entity.PromotionStatus;
 import com.etp.migration.processing.MigrationErrorCodes;
+import com.etp.migration.run.PhaseAwait;
 import com.etp.migration.repository.MigrationDefinitionRepository;
 import com.etp.migration.repository.MigrationPromotionRepository;
 import com.etp.migration.repository.MigrationRunRepository;
@@ -93,8 +94,7 @@ class BusinessTargetReconciliationIntegrationTest {
 	@Test
 	void stagingReconciliationRemainsUnchangedBeforePromotion() throws Exception {
 		String runId = stage(upsertConfig("external_id"), 10_000, sevenRows(), true);
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId)
 				.andExpect(jsonPath("$.reconciliation.target.details.verificationScope").value("STAGING"))
 				.andExpect(jsonPath("$.reconciliation.target.details.businessTargetVerified").value(false))
 				.andExpect(jsonPath("$.reconciliation.target.details.targetCount").value(7))
@@ -105,10 +105,7 @@ class BusinessTargetReconciliationIntegrationTest {
 	void successfulUpsertPromotionVerifiesBusinessTarget() throws Exception {
 		String runId = promote(upsertConfig("external_id"), 10_000, sevenRows());
 		insertBusiness("UNRELATED", "Other", "Portland");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId)
-						.param("verificationScope", "BUSINESS_TARGET")
-						.with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId, "BUSINESS_TARGET")
 				.andExpect(jsonPath("$.reconciliation.target.status").value("PASSED"))
 				.andExpect(jsonPath("$.reconciliation.target.sourceCount").value(7))
 				.andExpect(jsonPath("$.reconciliation.target.details.targetCount").value(7))
@@ -126,10 +123,7 @@ class BusinessTargetReconciliationIntegrationTest {
 				external_id,addr1,city
 				E1,New Street,Salem
 				""");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId)
-						.param("verificationScope", "BUSINESS_TARGET")
-						.with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId, "BUSINESS_TARGET")
 				.andExpect(jsonPath("$.reconciliation.target.status").value("PASSED"))
 				.andExpect(jsonPath("$.reconciliation.target.details.businessTargetVerified").value(true));
 	}
@@ -146,10 +140,7 @@ class BusinessTargetReconciliationIntegrationTest {
 		assertPromotionStatus(runId, PromotionStatus.PARTIALLY_PROMOTED);
 		String runStatus = runStatus(runId);
 		String promotionStatus = promotionStatus(runId);
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId)
-						.param("verificationScope", "BUSINESS_TARGET")
-						.with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId, "BUSINESS_TARGET")
 				.andExpect(jsonPath("$.reconciliation.target.status").value("PASSED"))
 				.andExpect(jsonPath("$.reconciliation.target.sourceCount").value(2))
 				.andExpect(jsonPath("$.reconciliation.target.details.targetCount").value(2))
@@ -171,10 +162,7 @@ class BusinessTargetReconciliationIntegrationTest {
 						"DELETE FROM promo_app.address WHERE external_id = 'E2'")) {
 			statement.executeUpdate();
 		}
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId)
-						.param("verificationScope", "BUSINESS_TARGET")
-						.with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId, "BUSINESS_TARGET")
 				.andExpect(jsonPath("$.reconciliation.target.status").value("FAILED"))
 				.andExpect(jsonPath("$.reconciliation.target.sourceCount").value(2))
 				.andExpect(jsonPath("$.reconciliation.target.details.targetCount").value(1))
@@ -194,10 +182,7 @@ class BusinessTargetReconciliationIntegrationTest {
 						"UPDATE promo_app.address SET city = 'Changed' WHERE external_id = 'E1'")) {
 			statement.executeUpdate();
 		}
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId)
-						.param("verificationScope", "BUSINESS_TARGET")
-						.with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId, "BUSINESS_TARGET")
 				.andExpect(jsonPath("$.reconciliation.target.status").value("FAILED"))
 				.andExpect(jsonPath("$.reconciliation.target.details.errorCode")
 						.value(MigrationErrorCodes.TARGET_VALUE_MISMATCH))
@@ -211,10 +196,7 @@ class BusinessTargetReconciliationIntegrationTest {
 				external_id,addr1,city
 				C1,123 Main St,Salem
 				""");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId)
-						.param("verificationScope", "BUSINESS_TARGET")
-						.with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId, "BUSINESS_TARGET")
 				.andExpect(jsonPath("$.reconciliation.target.status").value("PASSED"))
 				.andExpect(jsonPath("$.reconciliation.target.details.businessTargetVerified").value(true));
 	}
@@ -225,10 +207,7 @@ class BusinessTargetReconciliationIntegrationTest {
 				external_id,addr1,city
 				I1,123 Main St,Salem
 				""");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId)
-						.param("verificationScope", "BUSINESS_TARGET")
-						.with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId, "BUSINESS_TARGET")
 				.andExpect(jsonPath("$.reconciliation.target.status").value("PASSED"))
 				.andExpect(jsonPath("$.reconciliation.target.details.businessTargetVerified").value(true));
 	}
@@ -239,10 +218,7 @@ class BusinessTargetReconciliationIntegrationTest {
 				external_id,addr1,city
 				I2,123 Main St,Salem
 				""");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId)
-						.param("verificationScope", "BUSINESS_TARGET")
-						.with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId, "BUSINESS_TARGET")
 				.andExpect(jsonPath("$.reconciliation.target.status").value("PASSED_WITH_WARNINGS"))
 				.andExpect(jsonPath("$.reconciliation.target.details.businessTargetVerified").value(false))
 				.andExpect(jsonPath("$.reconciliation.target.details.errorCode")
@@ -257,10 +233,7 @@ class BusinessTargetReconciliationIntegrationTest {
 				D1,123 Main St,Salem
 				D1,456 Oak Ave,Knoxville
 				""");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId)
-						.param("verificationScope", "BUSINESS_TARGET")
-						.with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId, "BUSINESS_TARGET")
 				.andExpect(jsonPath("$.reconciliation.target.status").value("FAILED"))
 				.andExpect(jsonPath("$.reconciliation.target.details.errorCode")
 						.value(MigrationErrorCodes.TARGET_IDENTITY_AMBIGUOUS))
@@ -278,10 +251,7 @@ class BusinessTargetReconciliationIntegrationTest {
 						"UPDATE promo_app.address SET created_at = created_at - INTERVAL '1 day' WHERE external_id = 'G1'")) {
 			statement.executeUpdate();
 		}
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId)
-						.param("verificationScope", "BUSINESS_TARGET")
-						.with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId, "BUSINESS_TARGET")
 				.andExpect(jsonPath("$.reconciliation.target.status").value("PASSED"))
 				.andExpect(jsonPath("$.reconciliation.target.details.businessTargetVerified").value(true));
 	}
@@ -314,10 +284,8 @@ class BusinessTargetReconciliationIntegrationTest {
 
 	private String promote(String promotionJson, int batchSize, String csv) throws Exception {
 		String runId = stage(promotionJson, batchSize, csv, true);
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", runId).with(jwt()))
-				.andExpect(status().isOk());
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", runId).with(jwt()))
-				.andExpect(status().isOk());
+		PhaseAwait.prepared(mockMvc, runId);
+		PhaseAwait.promoted(mockMvc, runId);
 		return runId;
 	}
 
@@ -331,7 +299,7 @@ class BusinessTargetReconciliationIntegrationTest {
 		mockMvc.perform(post("/api/v1/migration-runs/{runId}/prepare", runId).with(jwt())).andExpect(status().isOk());
 		processAll(runId);
 		if (reconcile) {
-			mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId).with(jwt())).andExpect(status().isOk());
+			PhaseAwait.reconciled(mockMvc, runId);
 		}
 		return runId;
 	}

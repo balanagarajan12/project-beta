@@ -3,11 +3,11 @@ package com.etp.migration.execution;
 import com.etp.migration.entity.MigrationBatch;
 import com.etp.migration.entity.MigrationError;
 import com.etp.migration.entity.MigrationRun;
+import com.etp.migration.processing.MigrationErrorDetails;
 import com.etp.migration.repository.MigrationBatchRepository;
 import com.etp.migration.repository.MigrationErrorRepository;
 import com.etp.migration.repository.MigrationRunRepository;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -53,24 +53,48 @@ public class EntityFailureRecorder {
 				entity.setSourceRecordKey(sourceKey(failure));
 				entity.setTargetEntityKey(limit(text(failure.details().get("targetEntity")), 500));
 				entity.setFieldName(limit(failure.fieldName(), 500));
-				entity.setErrorMessage(limit(failure.message() == null ? "Entity processing failed" : failure.message(), 2000));
+				entity.setErrorMessage(limit(MigrationErrorDetails.recordMessage(failure.message()), 2000));
 				entity.setErrorDetails(details(failure));
 				entity.setRetryable(failure.retryable());
+				if (alreadyRecorded(runId, batchId, entity)) {
+					continue;
+				}
 				entities.add(entity);
 			}
 			migrationErrorRepository.saveAll(entities);
 		});
 	}
 
+	private boolean alreadyRecorded(java.util.UUID runId, Long batchId, MigrationError entity) {
+		if (batchId == null) {
+			return migrationErrorRepository
+					.existsByMigrationRun_IdAndMigrationBatchIsNullAndSourceRecordKeyAndStageAndErrorCodeAndErrorMessage(
+							runId,
+							entity.getSourceRecordKey(),
+							entity.getStage(),
+							entity.getErrorCode(),
+							entity.getErrorMessage());
+		}
+		return migrationErrorRepository
+				.existsByMigrationRun_IdAndMigrationBatch_IdAndSourceRecordKeyAndStageAndErrorCodeAndErrorMessage(
+						runId,
+						batchId,
+						entity.getSourceRecordKey(),
+						entity.getStage(),
+						entity.getErrorCode(),
+						entity.getErrorMessage());
+	}
+
 	private static Map<String, Object> details(EntityItemFailure failure) {
 		Map<String, Object> details = new LinkedHashMap<>();
+		details.put("category", "RECORD");
 		details.put("entityName", failure.entityName() == null ? "" : failure.entityName());
 		details.put("sourceIdentity", failure.sourceIdentity() == null ? "" : failure.sourceIdentity());
 		details.put("stage", failure.stage().name());
 		if (failure.details() != null) {
 			details.putAll(failure.details());
 		}
-		return new HashMap<>(details);
+		return MigrationErrorDetails.publicDetails(details);
 	}
 
 	private static String sourceKey(EntityItemFailure failure) {

@@ -171,6 +171,35 @@ class LogicalMigrationScopeBuilderTest {
 	}
 
 	@Test
+	void includesAParentOfAnInScopeEntityAndThatParentsOtherChild() {
+		LogicalMigrationScope scope = only(build(
+				mapping(
+						"AddressLocation",
+						entity("AddressLocation", "source_address_id"),
+						entity("GeographicAddress", "source_address_id"),
+						entity("GeographicLocation", "source_address_id"),
+						entity("LocationGeometry", "source_address_id")),
+				List.of(
+						entity("AddressLocation", "1", 1),
+						entity("GeographicAddress", "1", 1),
+						entity("GeographicLocation", "1", 1),
+						entity("LocationGeometry", "1", 1)),
+				List.of(
+						link("AddressLocation", "1", 1, "GeographicAddress", "1", 1),
+						link("GeographicLocation", "1", 1, "GeographicAddress", "1", 1),
+						link("GeographicLocation", "1", 1, "LocationGeometry", "1", 1))));
+
+		assertThat(scope.contains("GeographicLocation", "1")).isTrue();
+		assertThat(scope.contains("LocationGeometry", "1")).isTrue();
+		assertThat(scope.relationships())
+				.extracting(ScopedRelationship::parentEntity, ScopedRelationship::childEntity)
+				.containsExactly(
+						tuple("AddressLocation", "GeographicAddress"),
+						tuple("GeographicLocation", "GeographicAddress"),
+						tuple("GeographicLocation", "LocationGeometry"));
+	}
+
+	@Test
 	void leavesDisconnectedEntitiesOutsideTheRootScope() {
 		LogicalMigrationScope scope = only(build(
 				mapping(

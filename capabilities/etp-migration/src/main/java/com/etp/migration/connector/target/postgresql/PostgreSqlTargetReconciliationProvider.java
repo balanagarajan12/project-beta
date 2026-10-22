@@ -31,13 +31,16 @@ public class PostgreSqlTargetReconciliationProvider implements MigrationTargetRe
 
 	private final PostgreSqlTargetProperties properties;
 	private final DataSource dataSource;
+	private final PostgreSqlConnectionRegistry connections;
 	private final ObjectMapper objectMapper = new ObjectMapper();
 
 	@Autowired
 	public PostgreSqlTargetReconciliationProvider(
 			PostgreSqlTargetProperties properties,
-			@Autowired(required = false) @Qualifier(PostgreSqlTargetClientConfig.DATASOURCE_BEAN) DataSource dataSource) {
+			@Autowired(required = false) @Qualifier(PostgreSqlTargetClientConfig.DATASOURCE_BEAN) DataSource dataSource,
+			@Autowired(required = false) PostgreSqlConnectionRegistry connections) {
 		this.properties = properties;
+		this.connections = connections;
 		this.dataSource = dataSource;
 	}
 
@@ -56,13 +59,14 @@ public class PostgreSqlTargetReconciliationProvider implements MigrationTargetRe
 			UUID migrationRunId,
 			Map<String, Object> definitionConfiguration,
 			Consumer<StagedEntityView> consumer) {
-		if (dataSource == null || consumer == null) {
+		if (consumer == null) {
 			return;
 		}
+		DataSource source = PostgreSqlConnectionRegistry.stagingOf(connections, dataSource, definitionConfiguration);
 		PostgreSqlStagingTarget.Resolved staging = PostgreSqlStagingTarget.resolve(definitionConfiguration, properties);
 		String sql = "SELECT target_payload::text FROM " + PostgreSqlStagingTarget.quoted(staging)
 				+ " WHERE migration_run_id = ?";
-		try (Connection connection = dataSource.getConnection();
+		try (Connection connection = source.getConnection();
 				PreparedStatement statement = connection.prepareStatement(sql)) {
 			statement.setObject(1, migrationRunId);
 			try (ResultSet resultSet = statement.executeQuery()) {
@@ -83,13 +87,9 @@ public class PostgreSqlTargetReconciliationProvider implements MigrationTargetRe
 
 	@Override
 	public TargetVerification verify(UUID migrationRunId, Map<String, Object> definitionConfiguration) {
-		if (dataSource == null) {
-			return TargetVerification.unavailable(
-					"STAGING",
-					"PostgreSQL target datasource is not configured");
-		}
+		DataSource source = PostgreSqlConnectionRegistry.stagingOf(connections, dataSource, definitionConfiguration);
 		PostgreSqlStagingTarget.Resolved staging = PostgreSqlStagingTarget.resolve(definitionConfiguration, properties);
-		long count = countStagingRows(staging, migrationRunId);
+		long count = countStagingRows(source, staging, migrationRunId);
 		Map<String, Object> attributes = new LinkedHashMap<>();
 		attributes.put("targetSchema", staging.schema());
 		attributes.put("targetTable", staging.table());
@@ -143,9 +143,9 @@ public class PostgreSqlTargetReconciliationProvider implements MigrationTargetRe
 		return value == null ? null : value.toString();
 	}
 
-	private long countStagingRows(PostgreSqlStagingTarget.Resolved staging, UUID migrationRunId) {
+	private long countStagingRows(DataSource source, PostgreSqlStagingTarget.Resolved staging, UUID migrationRunId) {
 		String sql = "SELECT COUNT(*) FROM " + PostgreSqlStagingTarget.quoted(staging) + " WHERE migration_run_id = ?";
-		try (Connection connection = dataSource.getConnection();
+		try (Connection connection = source.getConnection();
 				PreparedStatement statement = connection.prepareStatement(sql)) {
 			statement.setObject(1, migrationRunId);
 			try (ResultSet resultSet = statement.executeQuery()) {

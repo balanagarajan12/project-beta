@@ -15,6 +15,7 @@ import com.etp.migration.migration.ControlPlaneSupport;
 import com.etp.migration.migration.MigrationDefinitionNotFoundException;
 import com.etp.migration.migration.dto.PagedResponse;
 import com.etp.migration.processing.MigrationErrorCodes;
+import com.etp.migration.processing.MigrationErrorDetails;
 import com.etp.migration.processing.MigrationLogContext;
 import com.etp.migration.promotion.PromotionException;
 import com.etp.migration.batch.dto.MigrationBatchResponse;
@@ -29,9 +30,7 @@ import com.etp.migration.run.dto.CreateMigrationRunRequest;
 import com.etp.migration.run.dto.MigrationRunResponse;
 import java.time.Instant;
 import java.util.EnumSet;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import org.slf4j.Logger;
@@ -119,6 +118,17 @@ public class MigrationRunService {
 			}
 			throw ex;
 		}
+	}
+
+	@Transactional
+	public void requestBackgroundExecution(UUID runId) {
+		MigrationRun run = migrationRunRepository.findById(runId)
+				.orElseThrow(() -> new MigrationRunNotFoundException(runId));
+		if (MigrationRunTransitions.isTerminal(run.getStatus())) {
+			return;
+		}
+		run.setBackgroundExecution(true);
+		run.setUpdatedAt(Instant.now());
 	}
 
 	@Transactional(readOnly = true)
@@ -287,7 +297,7 @@ public class MigrationRunService {
 	@Transactional(readOnly = true)
 	public PagedResponse<MigrationBatchResponse> listBatches(UUID runId, int page, int size) {
 		requireRun(runId);
-		Page<MigrationBatch> result = migrationBatchRepository.findByMigrationRun_Id(
+		Page<com.etp.migration.batch.MigrationBatchPageRow> result = migrationBatchRepository.pageByRun(
 				runId,
 				ControlPlaneSupport.pageRequest(page, size, Sort.by(Sort.Direction.ASC, "batchNumber")));
 		return new PagedResponse<>(
@@ -346,13 +356,13 @@ public class MigrationRunService {
 				run.getFailedBatches(),
 				run.getRequestedBy(),
 				run.getCreatedAt(),
-				run.getUpdatedAt());
+				run.getUpdatedAt(),
+				run.getControlState(),
+				run.getControlUpdatedAt(),
+				run.getLastControlAction());
 	}
 
 	private MigrationErrorResponse toErrorResponse(MigrationError error) {
-		Map<String, Object> details = error.getErrorDetails() == null
-				? Map.of()
-				: new HashMap<>(error.getErrorDetails());
 		return new MigrationErrorResponse(
 				error.getId(),
 				error.getMigrationRun().getId(),
@@ -360,34 +370,39 @@ public class MigrationRunService {
 				error.getStage() == null ? null : error.getStage().name(),
 				error.getErrorCode(),
 				error.getErrorType(),
-				error.getSourceRecordKey(),
-				error.getFieldName(),
-				error.getErrorMessage(),
-				details,
+				MigrationErrorDetails.publicSourceKey(error.getSourceRecordKey()),
+				MigrationErrorDetails.publicSourceKey(error.getFieldName()),
+				MigrationErrorDetails.publicMessage(error.getErrorMessage()),
+				MigrationErrorDetails.publicDetails(error.getErrorDetails()),
 				error.isRetryable(),
 				error.getCreatedAt());
 	}
 
-	private MigrationBatchResponse toBatchResponse(MigrationBatch batch) {
+	private MigrationBatchResponse toBatchResponse(com.etp.migration.batch.MigrationBatchPageRow batch) {
+		Long duration = null;
+		if (batch.startedAt() != null && batch.completedAt() != null) {
+			duration = Math.max(0L, java.time.Duration.between(batch.startedAt(), batch.completedAt()).toMillis());
+		}
 		return new MigrationBatchResponse(
-				batch.getId(),
-				batch.getMigrationRun().getId(),
-				batch.getBatchNumber(),
-				batch.getStatus(),
-				batch.getRecordCount(),
-				batch.getProcessedCount(),
-				batch.getSuccessCount(),
-				batch.getDuplicateCount(),
-				batch.getValidationFailureCount(),
-				batch.getEnrichmentFailureCount(),
-				batch.getLoadFailureCount(),
-				batch.getRejectedCount(),
-				batch.getAttemptCount(),
-				batch.getWorkerId(),
-				batch.getClaimedAt(),
-				batch.getLeaseUntil(),
-				batch.getStartedAt(),
-				batch.getCompletedAt(),
-				batch.getErrorMessage());
+				batch.id(),
+				batch.migrationRunId(),
+				batch.batchNumber(),
+				batch.status(),
+				batch.recordCount(),
+				batch.processedCount(),
+				batch.successCount(),
+				batch.duplicateCount(),
+				batch.validationFailureCount(),
+				batch.enrichmentFailureCount(),
+				batch.loadFailureCount(),
+				batch.rejectedCount(),
+				batch.attemptCount(),
+				batch.workerId(),
+				batch.claimedAt(),
+				batch.leaseUntil(),
+				batch.startedAt(),
+				batch.completedAt(),
+				MigrationErrorDetails.publicMessage(batch.errorMessage()),
+				duration);
 	}
 }

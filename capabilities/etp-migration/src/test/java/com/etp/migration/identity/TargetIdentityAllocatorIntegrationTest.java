@@ -109,6 +109,23 @@ class TargetIdentityAllocatorIntegrationTest {
 	}
 
 	@Test
+	void jdbcBatchesReuseIdentitiesPastTheBatchBoundary() {
+		UUID runId = UUID.randomUUID();
+		List<String> sources = new java.util.ArrayList<>();
+		for (int index = 0; index < 600; index++) {
+			sources.add("S" + index);
+		}
+		TargetIdentitySpec spec = new TargetIdentitySpec("PREFIX_SEQUENCE", "BATCH-", 9);
+		var assigned = service.assign(runId, "Sample", sources, spec, null, "sample", "id");
+		assertThat(assigned).hasSize(600);
+		assertThat(assigned.get("S0")).isEqualTo("BATCH-000000001");
+		assertThat(assigned.get("S599")).isEqualTo("BATCH-000000600");
+		var retry = service.assign(runId, "Sample", List.of("S599", "S0"), spec, null, "sample", "id");
+		assertThat(retry.get("S0")).isEqualTo("BATCH-000000001");
+		assertThat(retry.get("S599")).isEqualTo("BATCH-000000600");
+	}
+
+	@Test
 	void sameTableDifferentPrefixesStayIndependent() throws Exception {
 		execute("""
 				CREATE TABLE IF NOT EXISTS id_floor.shared_ids (

@@ -87,4 +87,39 @@ class TargetFailureDiagnosticsTest {
 		assertThat(TargetFailureDiagnostics.involvesDatabase(new RuntimeException(new SQLException("x")))).isTrue();
 		assertThat(TargetFailureDiagnostics.describe(null)).isEqualTo("unknown failure");
 	}
+
+	@Test
+	void nullMessageUsesTheApplicationFrameAndDropsTheMessage() {
+		NullPointerException failure = new NullPointerException();
+		failure.setStackTrace(new StackTraceElement[] {
+				new StackTraceElement("java.lang.String", "charAt", "String.java", 2500),
+				new StackTraceElement(
+						"com.etp.migration.connector.target.uam.UamCanonicalRows",
+						"referencedValue",
+						"UamCanonicalRows.java",
+						146)
+		});
+
+		assertThat(TargetFailureDiagnostics.location(failure))
+				.isEqualTo("java.lang.NullPointerException at "
+						+ "com.etp.migration.connector.target.uam.UamCanonicalRows.referencedValue(UamCanonicalRows.java:146)");
+	}
+
+	@Test
+	void missingStackFrameKeepsOnlyTheExceptionClass() {
+		NullPointerException empty = new NullPointerException();
+		empty.setStackTrace(new StackTraceElement[0]);
+		assertThat(TargetFailureDiagnostics.location(empty)).isEqualTo("java.lang.NullPointerException");
+
+		assertThat(TargetFailureDiagnostics.location(new UnavailableStack()))
+				.isEqualTo(UnavailableStack.class.getName());
+		assertThat(TargetFailureDiagnostics.location(null)).isEqualTo("unknown failure");
+	}
+
+	private static final class UnavailableStack extends NullPointerException {
+		@Override
+		public StackTraceElement[] getStackTrace() {
+			return null;
+		}
+	}
 }

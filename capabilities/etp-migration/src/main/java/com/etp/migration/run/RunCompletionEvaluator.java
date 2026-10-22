@@ -47,7 +47,7 @@ public class RunCompletionEvaluator {
 		MigrationRunStatus target;
 		if (failed > 0) {
 			target = MigrationRunStatus.FAILED;
-		} else if (completedWithErrors > 0) {
+		} else if (completedWithErrors > 0 || positive(run.getRejectedRecords())) {
 			target = MigrationRunStatus.COMPLETED_WITH_ERRORS;
 		} else {
 			target = MigrationRunStatus.COMPLETED;
@@ -61,7 +61,18 @@ public class RunCompletionEvaluator {
 		}
 		MigrationRunTransitions.require(run.getStatus(), target);
 		run.setStatus(target);
+		if (target == MigrationRunStatus.FAILED) {
+			run.setErrorMessage("One or more execution batches failed");
+		} else if (target == MigrationRunStatus.COMPLETED_WITH_ERRORS) {
+			run.setErrorMessage("One or more records were not loaded");
+		} else {
+			run.setErrorMessage(null);
+		}
 		run.setCompletedAt(now);
 		run.setUpdatedAt(now);
+	}
+
+	private static boolean positive(Long value) {
+		return value != null && value > 0;
 	}
 }

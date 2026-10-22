@@ -1,10 +1,11 @@
 package com.etp.migration.connector.target.uam;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.etp.migration.connector.target.LoadableTargetRecord;
+import com.etp.migration.connector.target.TargetInfrastructureException;
 import com.etp.migration.processing.TargetRecord;
-import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -13,18 +14,18 @@ import org.junit.jupiter.api.Test;
 class UamCanonicalRowsTest {
 
 	@Test
-	void foreignKeysUseTheConfiguredParentIdentity() {
+	void foreignKeysUseTheParentColumnNamedByTheRelationship() {
 		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration(), List.of(
-				payload("AddressLocation", "LOC-000000001", Map.of("at_type", "geographicAddress", "name", "Address 001"), List.of()),
-				payload("GeographicPointLocation", "GEO-LOC-000000001", Map.of("at_type", "geographicLocation"), List.of()),
-				payload("GeographicLocation", "GEO-000000001", Map.of("geo_json_type", "Point"), List.of(
-						parent("GeographicPointLocation", "GEO-LOC-000000001"))),
-				payload("GeographicAddress", "ADDR-0000000001", Map.of("street_name", "Sample Street", "city", "Melbourne"), List.of(
-						parent("AddressLocation", "LOC-000000001"),
-						parent("GeographicLocation", "GEO-000000001"))),
-				payload("LocationGeometry", "GEOM-000000001", Map.of("geometry_type", "Point", "x", "144.910000", "y", "-37.790000"), List.of(
+				payload("AddressLocation", "location", "LOC-000000001", Map.of("at_type", "geographicAddress", "name", "Address 001"), List.of()),
+				payload("GeographicPointLocation", "location", "GEO-LOC-000000001", Map.of("at_type", "geographicLocation"), List.of()),
+				payload("GeographicLocation", "geographic_location", "GEO-000000001", Map.of("geo_json_type", "Point"), List.of(
+						parent("GeographicPointLocation", "GEO-LOC-000000001", "location_id", "id"))),
+				payload("GeographicAddress", "geographic_address", "ADDR-0000000001", Map.of("street_name", "Sample Street", "city", "Melbourne"), List.of(
+						parent("AddressLocation", "LOC-000000001", "location_id", "id"),
+						parent("GeographicLocation", "GEO-000000001", "geographic_location_id", "id"))),
+				payload("LocationGeometry", "location_geometry", "GEOM-000000001", Map.of("geometry_type", "Point", "x", "144.910000", "y", "-37.790000"), List.of(
 						parent("GeographicPointLocation", "GEO-LOC-000000001"),
-						parent("GeographicLocation", "GEO-000000001")))));
+						parent("GeographicLocation", "GEO-000000001", "location_id", "id")))));
 
 		assertThat(groups).extracting(UamCanonicalRows.InsertGroup::table)
 				.containsExactly("location", "location", "geographic_location", "geographic_address", "location_geometry");
@@ -34,33 +35,20 @@ class UamCanonicalRowsTest {
 		assertThat(value(groups.get(2), "location_id")).isEqualTo("GEO-LOC-000000001");
 		assertThat(value(groups.get(3), "location_id")).isEqualTo("LOC-000000001");
 		assertThat(value(groups.get(3), "geographic_location_id")).isEqualTo("GEO-000000001");
-		assertThat(value(groups.get(4), "x")).isEqualTo(new java.math.BigDecimal("144.910000"));
-		assertThat(value(groups.get(4), "y")).isEqualTo(new java.math.BigDecimal("-37.790000"));
+		assertThat(value(groups.get(4), "x")).isEqualTo("144.910000");
+		assertThat(value(groups.get(4), "y")).isEqualTo("-37.790000");
 		assertThat(value(groups.get(4), "location_id")).isEqualTo("GEO-000000001");
 		assertThat(value(groups.get(4), "location_id")).isNotEqualTo("GEO-LOC-000000001");
-		assertThat(value(groups.get(0), "created_at")).isInstanceOf(OffsetDateTime.class);
-		assertThat(value(groups.get(1), "created_at")).isEqualTo(value(groups.get(0), "created_at"));
+		assertThat(groups.get(0).columns()).doesNotContain("created_at");
 		assertThat(groups.get(3).columns()).doesNotContain("created_at", "state");
 	}
 
 	@Test
-	void derivedOrderWritesTheReferencedParentColumnRatherThanTheParentPrimaryKey() {
-		Map<String, Object> configuration = new LinkedHashMap<>();
-		configuration.put("target", Map.of("mode", "UAM", "schema", "uam"));
-		configuration.put("tables", Map.of(
-				"GeographicAddress", "geographic_address",
-				"GeographicSubAddress", "geographic_sub_address",
-				"Site", "site"));
-		configuration.put("foreignKeys", List.of(Map.of(
-				"entity", "GeographicSubAddress",
-				"parent", "GeographicAddress",
-				"column", "address_id",
-				"referencesColumn", "location_id")));
-
-		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration, List.of(
-				payload("Site", "SITE-1", Map.of("name", "Independent"), List.of()),
-				payload("GeographicSubAddress", "SUB-1", Map.of("sub_unit_number", "12"), List.of(
-						parent("GeographicAddress", "ADDR-1"))),
+	void relationshipCopiesTheNamedParentColumnRatherThanTheParentPrimaryKey() {
+		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration(), List.of(
+				payload("Site", "site", "SITE-1", Map.of("name", "Independent"), List.of()),
+				payload("GeographicSubAddress", "geographic_sub_address", "SUB-1", Map.of("sub_unit_number", "12"), List.of(
+						parent("GeographicAddress", "ADDR-1", "address_id", "location_id"))),
 				address("ADDR-1", "LOC-9")));
 
 		assertThat(groups).extracting(UamCanonicalRows.InsertGroup::table)
@@ -72,33 +60,113 @@ class UamCanonicalRowsTest {
 	}
 
 	@Test
-	void payloadForeignKeysAreUsedWhenLoadOrderIsOmitted() {
-		Map<String, Object> child = new LinkedHashMap<>();
-		child.put("parentEntity", "GeographicAddress");
-		child.put("parentTargetIdentity", "ADDR-1");
-		child.put("targetForeignKey", Map.of("column", "address_id", "referencesColumn", "location_id"));
-		Map<String, Object> configuration = Map.of(
-				"target", Map.of("mode", "UAM", "schema", "uam"),
-				"tables", Map.of(
-						"GeographicAddress", "geographic_address",
-						"GeographicSubAddress", "geographic_sub_address"));
+	void legacyDefinitionFieldsAreNotUsed() {
+		Map<String, Object> configuration = new LinkedHashMap<>();
+		configuration.put("target", Map.of("mode", "UAM", "schema", "uam"));
+		configuration.put("tables", Map.of("GeographicAddress", "ignored_table"));
+		configuration.put("loadOrder", List.of("GeographicSubAddress", "GeographicAddress"));
+		configuration.put("foreignKeys", List.of(Map.of(
+				"entity", "GeographicSubAddress",
+				"parent", "GeographicAddress",
+				"column", "address_id")));
+		configuration.put("loadTimestampColumns", List.of(Map.of("table", "location", "column", "created_at")));
+		configuration.put("columnTypes", List.of(Map.of(
+				"table", "location_geometry", "column", "x", "type", "numeric")));
 
 		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration, List.of(
-				payload("GeographicSubAddress", "SUB-1", Map.of(), List.of(child)),
+				payload("GeographicSubAddress", "geographic_sub_address", "SUB-1", Map.of(), List.of(
+						parent("GeographicAddress", "ADDR-1", "address_id", "location_id"))),
 				address("ADDR-1", "LOC-9")));
 
 		assertThat(groups).extracting(UamCanonicalRows.InsertGroup::table)
 				.containsExactly("geographic_address", "geographic_sub_address");
 		assertThat(value(groups.get(1), "address_id")).isEqualTo("LOC-9");
+		assertThat(groups.get(0).columns()).doesNotContain("created_at");
 	}
 
 	@Test
-	void mappedCreatedAtIsKept() {
+	void cyclicForeignKeysFailWithTheCycle() {
+		assertThatThrownBy(() -> UamCanonicalRows.plan(configuration(), List.of(
+				payload("Left", "left_table", "L-1", Map.of(), List.of(
+						parent("Right", "R-1", "right_id", "id"))),
+				payload("Right", "right_table", "R-1", Map.of(), List.of(
+						parent("Left", "L-1", "left_id", "id"))))))
+				.isInstanceOf(TargetInfrastructureException.class)
+				.hasMessageContaining("Entity relationship graph contains a cycle");
+	}
+
+	@Test
+	void addressLocationIdentityResolvesWhenThatParentRowIsInAnotherBatch() {
 		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration(), List.of(
-				payload("AddressLocation", "LOC-000000001", Map.of(
+				payload("AddressLocation", "location", "LOC-000000002", Map.of("at_type", "geographicAddress"), List.of()),
+				payload("GeographicAddress", "geographic_address", "ADDR-0000000002", Map.of("street_name", "Next"), List.of(
+						parent("AddressLocation", "LOC-000000001", "location_id", "id")))));
+
+		assertThat(groups).extracting(UamCanonicalRows.InsertGroup::table)
+				.containsExactly("location", "geographic_address");
+		assertThat(value(groups.get(1), "location_id")).isEqualTo("LOC-000000001");
+		assertThat(value(groups.get(1), "id")).isEqualTo("ADDR-0000000002");
+	}
+
+	@Test
+	void parentTargetKeyResolvesTheIdentityWhenNoParentRowIsInTheBatch() {
+		Map<String, Object> link = parent("AddressLocation", "LOC-000000001", "location_id", "id");
+		link.put("parentTargetKey", "id");
+		link.put("parentTargetEntity", "location");
+		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration(), List.of(
+				payload("GeographicAddress", "geographic_address", "ADDR-0000000001", Map.of(), List.of(link))));
+
+		assertThat(groups).singleElement().satisfies(group -> {
+			assertThat(group.table()).isEqualTo("geographic_address");
+			assertThat(value(group, "location_id")).isEqualTo("LOC-000000001");
+		});
+		assertThat(UamCanonicalRows.planDetailed(configuration(), List.of(
+				payload("GeographicAddress", "geographic_address", "ADDR-0000000001", Map.of(), List.of(link))))
+				.foreignKeys())
+				.singleElement()
+				.satisfies(binding -> {
+					assertThat(binding.parentTable()).isEqualTo("location");
+					assertThat(binding.referencesColumn()).isEqualTo("id");
+				});
+	}
+
+	@Test
+	void referencedColumnThatIsNotTheParentIdentityStillRequiresTheParentRow() {
+		Map<String, Object> link = parent("GeographicAddress", "ADDR-0000000001", "address_id", "location_id");
+		link.put("parentTargetKey", "id");
+		assertThatThrownBy(() -> UamCanonicalRows.plan(configuration(), List.of(
+				payload("GeographicSubAddress", "geographic_sub_address", "SUB-000000001", Map.of(), List.of(link)))))
+				.isInstanceOf(TargetInfrastructureException.class)
+				.hasMessageContaining("was not resolved");
+	}
+
+	@Test
+	void unresolvedParentFailsBeforeInsertPlanningCompletes() {
+		assertThatThrownBy(() -> UamCanonicalRows.plan(configuration(), List.of(
+				payload("GeographicAddress", "geographic_address", "ADDR-1", Map.of(), List.of(
+						parent("AddressLocation", "LOC-1", "location_id", "id"))))))
+				.isInstanceOf(TargetInfrastructureException.class)
+				.hasMessageContaining("was not resolved");
+	}
+
+	@Test
+	void postgresqlModeUsesTheConfiguredSchema() {
+		Map<String, Object> configuration = new LinkedHashMap<>();
+		configuration.put("target", Map.of("mode", "POSTGRESQL", "schema", "customer"));
+		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration, List.of(
+				payload("Customer", "customer", "CUST-1", Map.of("name", "Ada"), List.of())));
+		assertThat(groups).hasSize(1);
+		assertThat(groups.get(0).schema()).isEqualTo("customer");
+		assertThat(groups.get(0).table()).isEqualTo("customer");
+	}
+
+	@Test
+	void mappedCreatedAtIsKeptAsTheSourceValueUntilCatalogConversion() {
+		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration(), List.of(
+				payload("AddressLocation", "location", "LOC-000000001", Map.of(
 						"at_type", "geographicAddress",
 						"created_at", "2020-01-02T03:04:05Z"), List.of())));
-		assertThat(value(groups.get(0), "created_at")).isEqualTo(OffsetDateTime.parse("2020-01-02T03:04:05Z"));
+		assertThat(value(groups.get(0), "created_at")).isEqualTo("2020-01-02T03:04:05Z");
 	}
 
 	private static Object value(UamCanonicalRows.InsertGroup group, String column) {
@@ -107,11 +175,13 @@ class UamCanonicalRowsTest {
 
 	private static LoadableTargetRecord payload(
 			String entity,
+			String targetEntity,
 			String targetIdentity,
 			Map<String, Object> attributes,
 			List<Map<String, Object>> relationships) {
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("entity", entity);
+		fields.put("targetEntity", targetEntity);
 		fields.put("targetKey", "id");
 		fields.put("targetIdentity", targetIdentity);
 		fields.put("attributes", attributes);
@@ -122,6 +192,7 @@ class UamCanonicalRowsTest {
 	private static LoadableTargetRecord address(String targetIdentity, String locationId) {
 		Map<String, Object> fields = new LinkedHashMap<>();
 		fields.put("entity", "GeographicAddress");
+		fields.put("targetEntity", "geographic_address");
 		fields.put("targetKey", "id");
 		fields.put("targetIdentity", targetIdentity);
 		fields.put("attributes", Map.of("location_id", locationId));
@@ -136,31 +207,17 @@ class UamCanonicalRowsTest {
 		return parent;
 	}
 
+	private static Map<String, Object> parent(
+			String entity,
+			String targetIdentity,
+			String column,
+			String referencesColumn) {
+		Map<String, Object> parent = parent(entity, targetIdentity);
+		parent.put("targetForeignKey", Map.of("column", column, "referencesColumn", referencesColumn));
+		return parent;
+	}
+
 	private static Map<String, Object> configuration() {
-		Map<String, Object> tables = new LinkedHashMap<>();
-		tables.put("AddressLocation", "location");
-		tables.put("GeographicPointLocation", "location");
-		tables.put("GeographicLocation", "geographic_location");
-		tables.put("GeographicAddress", "geographic_address");
-		tables.put("LocationGeometry", "location_geometry");
-		return Map.of(
-				"target", Map.of("mode", "UAM", "schema", "uam"),
-				"tables", tables,
-				"loadOrder", List.of(
-						"AddressLocation",
-						"GeographicPointLocation",
-						"GeographicLocation",
-						"GeographicAddress",
-						"LocationGeometry"),
-				"foreignKeys", List.of(
-						Map.of("entity", "GeographicAddress", "parent", "AddressLocation", "column", "location_id"),
-						Map.of("entity", "GeographicAddress", "parent", "GeographicLocation", "column", "geographic_location_id"),
-						Map.of("entity", "GeographicLocation", "parent", "GeographicPointLocation", "column", "location_id"),
-						Map.of("entity", "LocationGeometry", "parent", "GeographicLocation", "column", "location_id")),
-				"loadTimestampColumns", List.of(Map.of("table", "location", "column", "created_at")),
-				"columnTypes", List.of(
-						Map.of("table", "location", "column", "created_at", "type", "timestamptz"),
-						Map.of("table", "location_geometry", "column", "x", "type", "numeric"),
-						Map.of("table", "location_geometry", "column", "y", "type", "numeric")));
+		return Map.of("target", Map.of("mode", "UAM", "schema", "uam"));
 	}
 }

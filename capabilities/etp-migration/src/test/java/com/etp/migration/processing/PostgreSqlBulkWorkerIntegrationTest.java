@@ -8,6 +8,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.etp.migration.connector.target.postgresql.PostgreSqlTargetClientConfig;
+import com.etp.migration.run.PhaseAwait;
 import com.etp.migration.entity.MigrationConfigStatus;
 import com.etp.migration.entity.MigrationDefinition;
 import com.etp.migration.repository.MigrationDefinitionRepository;
@@ -107,8 +108,7 @@ class PostgreSqlBulkWorkerIntegrationTest {
 	@Test
 	void reconcilesMatchingPostgresqlStagingCounts() throws Exception {
 		String runId = processTwoRowRun();
-		MvcResult first = mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId).with(jwt()))
-				.andExpect(status().isOk())
+		MvcResult first = PhaseAwait.reconciled(mockMvc, runId)
 				.andExpect(jsonPath("$.runId").value(runId))
 				.andExpect(jsonPath("$.reconciliation.count.status").value("PASSED"))
 				.andExpect(jsonPath("$.reconciliation.count.details.verificationScope").value("STAGING"))
@@ -122,8 +122,7 @@ class PostgreSqlBulkWorkerIntegrationTest {
 				.andExpect(jsonPath("$.reconciliation.full.status").value("PASSED_WITH_WARNINGS"))
 				.andReturn();
 		String fullId = com.jayway.jsonpath.JsonPath.read(first.getResponse().getContentAsString(), "$.reconciliation.full.id");
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId)
 				.andExpect(jsonPath("$.reconciliation.full.id").value(fullId));
 		assertThat(reconciliationRepository.countByMigrationRun_IdAndReconciliationType(
 				UUID.fromString(runId), com.etp.migration.entity.ReconciliationType.FULL)).isEqualTo(1);
@@ -144,8 +143,7 @@ class PostgreSqlBulkWorkerIntegrationTest {
 			statement.setObject(1, UUID.fromString(runId));
 			statement.executeUpdate();
 		}
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("FAILED"))
 				.andExpect(jsonPath("$.reconciliation.count.details.errorCode").value("MIGRATION_TARGET_COUNT_MISMATCH"))
 				.andExpect(jsonPath("$.reconciliation.target.status").value("FAILED"));

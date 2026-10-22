@@ -120,7 +120,8 @@
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
 				<configuration>
-					<jvmArguments>-Duser.timezone=UTC</jvmArguments>
+					<!-- Local maven run only. The packaged process stays closed unless profile dev or ETP_MIGRATION_OPENAPI_ENABLED. -->
+					<jvmArguments>-Duser.timezone=UTC -Detp.migration.openapi.enabled=true</jvmArguments>
 				</configuration>
 			</plugin>
 			<plugin>

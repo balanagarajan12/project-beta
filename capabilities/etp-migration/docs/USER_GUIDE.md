@@ -47,7 +47,7 @@ cd capabilities\etp-migration
 docker compose up -d
 ```
 
-The repository contains Flyway V1–V11. Starting the application applies pending scripts to the database in `ETP_MIGRATION_DB_URL`. V4 and V5 are the control-plane identity tables. V11 allows `migration_error.stage` `PROMOTE`. This closure did not query `flyway_schema_history` on the workstation control plane, so it does not claim that database already has V11. The local canonical demonstration uses port **55432** as the target database for staging and schema `uam`. That is a workstation arrangement, not the production UAM deployment.
+The repository contains Flyway V1–V11. Starting the application applies pending scripts to the database in `ETP_MIGRATION_DB_URL`. V4 and V5 are the control-plane identity tables. V11 allows `migration_error.stage` `PROMOTE`. A read-only check of container `etp-migration-postgres` (host port 55446, database `etp_migration`) shows V1–V9 successful and does not show V10 or V11. The application default port 55433 was not inspected. That check did not apply migrations. The local canonical demonstration uses port **55432** as the target database for staging and schema `uam`. That is a workstation arrangement, not the production UAM deployment.
 
 Create staging (identifiers must match definition `configuration.target`):
 

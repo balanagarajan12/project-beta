@@ -63,7 +63,7 @@ final class SftpSourceFailures {
 		if (failure instanceof IllegalArgumentException || isCsvParse(failure)) {
 			return new SftpSourceException(MigrationErrorCodes.CSV_PARSE_FAILED, "CSV parse failed", failure);
 		}
-		if (failure instanceof IOException) {
+		if (failure instanceof IOException || SftpRemoteFile.executorShutdown(failure)) {
 			return new SftpSourceException(MigrationErrorCodes.SFTP_READ_FAILED, "SFTP read failed", failure);
 		}
 		if (failure instanceof RuntimeException runtime) {

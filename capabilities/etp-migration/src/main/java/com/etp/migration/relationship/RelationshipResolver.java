@@ -13,6 +13,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 import org.springframework.stereotype.Component;
 
@@ -42,6 +43,55 @@ public class RelationshipResolver {
 		}
 		session.recordFootprint(indexedParentCount);
 		return new RelationshipResolution(session.relationshipsOut, session.failures, indexedParentCount);
+	}
+
+	/**
+	 * Indexes every parent in one source pass, then resolves every child in a second pass.
+	 * A single-file source would otherwise be opened once per entity name.
+	 */
+	public RelationshipResolution resolveRoles(
+			EntityRelationshipMapping mapping,
+			Supplier<Stream<EntityRecord>> entities) {
+		if (mapping == null) {
+			throw new IllegalArgumentException("mapping is required");
+		}
+		if (entities == null) {
+			throw new IllegalArgumentException("source is required");
+		}
+		mapping.graph();
+		Session session = new Session(mapping);
+		java.util.Set<String> parents = new HashSet<>(involved(mapping, true));
+		java.util.Set<String> children = new HashSet<>(involved(mapping, false));
+		if (!parents.isEmpty()) {
+			consumeAll(entities, record -> {
+				if (parents.contains(record.entityName())) {
+					session.index(record);
+				}
+			});
+		}
+		int indexedParentCount = session.indexedParentCount();
+		if (!children.isEmpty()) {
+			consumeAll(entities, record -> {
+				if (children.contains(record.entityName())) {
+					session.resolve(record);
+				}
+			});
+		}
+		session.recordFootprint(indexedParentCount);
+		return new RelationshipResolution(session.relationshipsOut, session.failures, indexedParentCount);
+	}
+
+	private static void consumeAll(Supplier<Stream<EntityRecord>> entities, java.util.function.Consumer<EntityRecord> consumer) {
+		try (Stream<EntityRecord> records = entities.get()) {
+			if (records == null) {
+				throw new IllegalArgumentException("entity record stream is required");
+			}
+			records.forEach(record -> {
+				if (record != null && record.entityName() != null) {
+					consumer.accept(record);
+				}
+			});
+		}
 	}
 
 	private static void consume(EntityRecordSource source, String entityName, java.util.function.Consumer<EntityRecord> consumer) {

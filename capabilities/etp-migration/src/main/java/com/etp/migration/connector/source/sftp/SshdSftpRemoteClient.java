@@ -4,6 +4,7 @@ import com.etp.migration.connector.source.SftpSourceException;
 import com.etp.migration.processing.MigrationErrorCodes;
 import java.io.IOException;
 import java.io.InputStream;
+import java.time.Duration;
 import org.apache.sshd.client.SshClient;
 import org.apache.sshd.client.session.ClientSession;
 import org.apache.sshd.core.CoreModuleProperties;
@@ -53,7 +54,11 @@ public class SshdSftpRemoteClient implements SftpRemoteClient {
 						"SFTP authentication failed");
 			}
 			sftp = SftpClientFactory.instance().createSftpClient(session);
-			long size = sftp.stat(request.remotePath()).getSize();
+			SftpClient.Attributes attributes = sftp.stat(request.remotePath());
+			long size = attributes.getSize();
+			long modifiedAt = attributes.getModifyTime() == null
+					? SftpRemoteFile.UNKNOWN_MODIFIED_AT
+					: attributes.getModifyTime().toMillis();
 			InputStream raw = sftp.read(request.remotePath());
 			SshClient openClient = client;
 			ClientSession openSession = session;
@@ -61,7 +66,7 @@ public class SshdSftpRemoteClient implements SftpRemoteClient {
 			client = null;
 			session = null;
 			sftp = null;
-			return new SftpRemoteFile(raw, size, () -> closeQuietly(openSftp, openSession, openClient));
+			return new SftpRemoteFile(raw, size, modifiedAt, () -> closeQuietly(openSftp, openSession, openClient));
 		} catch (RuntimeException | IOException ex) {
 			closeQuietly(sftp, session, client);
 			if (hostKeys.rejection() != null) {
@@ -85,8 +90,10 @@ public class SshdSftpRemoteClient implements SftpRemoteClient {
 		}
 		if (session != null) {
 			try {
-				session.close();
-			} catch (IOException ignored) {
+				// Stop the client only after the session close has finished, so a Windows
+				// completion is not handed to an executor that stop() has already shut down.
+				session.close(false).awaitUninterruptibly(Duration.ofSeconds(5));
+			} catch (RuntimeException ignored) {
 				// client stop follows
 			}
 		}

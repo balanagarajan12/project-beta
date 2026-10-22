@@ -17,29 +17,57 @@ import org.springframework.stereotype.Component;
 @Component
 public class PostgreSqlStagingRecordCounter implements StagingRecordCounter {
 
+	/** A stuck count fails the preparation transaction instead of holding the phase worker. */
+	private static final int COUNT_TIMEOUT_SECONDS = 120;
+
 	private final PostgreSqlTargetProperties properties;
 	private final DataSource dataSource;
+	private final PostgreSqlConnectionRegistry connections;
 
 	@Autowired
 	public PostgreSqlStagingRecordCounter(
 			PostgreSqlTargetProperties properties,
-			@Autowired(required = false) @Qualifier(PostgreSqlTargetClientConfig.DATASOURCE_BEAN) DataSource dataSource) {
+			@Autowired(required = false) @Qualifier(PostgreSqlTargetClientConfig.DATASOURCE_BEAN) DataSource dataSource,
+			@Autowired(required = false) PostgreSqlConnectionRegistry connections) {
 		this.properties = properties;
 		this.dataSource = dataSource;
+		this.connections = connections;
+	}
+
+	@Override
+	public Map<Long, Long> countStagedRecordsByBatch(UUID migrationRunId, Map<String, Object> configuration) {
+		DataSource source = PostgreSqlConnectionRegistry.stagingOf(connections, dataSource, configuration);
+		PostgreSqlStagingTarget.Resolved staging = PostgreSqlStagingTarget.resolve(configuration, properties);
+		String sql = "SELECT migration_batch_id, COUNT(*) FROM " + PostgreSqlStagingTarget.quoted(staging)
+				+ " WHERE migration_run_id = ? GROUP BY migration_batch_id";
+		Map<Long, Long> counts = new java.util.HashMap<>();
+		try (Connection connection = source.getConnection();
+				PreparedStatement statement = connection.prepareStatement(sql)) {
+			statement.setQueryTimeout(COUNT_TIMEOUT_SECONDS);
+			statement.setObject(1, migrationRunId);
+			try (ResultSet resultSet = statement.executeQuery()) {
+				while (resultSet.next()) {
+					counts.put(resultSet.getLong(1), resultSet.getLong(2));
+				}
+			}
+			return counts;
+		} catch (SQLException ex) {
+			throw new TargetInfrastructureException(
+					MigrationErrorCodes.TARGET_DATABASE_CONNECTION_ERROR,
+					"PostgreSQL staging count failed",
+					ex);
+		}
 	}
 
 	@Override
 	public long countStagedRecords(UUID migrationRunId, Long migrationBatchId, Map<String, Object> configuration) {
-		if (dataSource == null) {
-			throw new TargetInfrastructureException(
-					MigrationErrorCodes.TARGET_DATABASE_CONNECTION_ERROR,
-					"PostgreSQL target datasource is not configured");
-		}
+		DataSource source = PostgreSqlConnectionRegistry.stagingOf(connections, dataSource, configuration);
 		PostgreSqlStagingTarget.Resolved staging = PostgreSqlStagingTarget.resolve(configuration, properties);
 		String sql = "SELECT COUNT(*) FROM " + PostgreSqlStagingTarget.quoted(staging)
 				+ " WHERE migration_run_id = ? AND migration_batch_id = ?";
-		try (Connection connection = dataSource.getConnection();
+		try (Connection connection = source.getConnection();
 				PreparedStatement statement = connection.prepareStatement(sql)) {
+			statement.setQueryTimeout(COUNT_TIMEOUT_SECONDS);
 			statement.setObject(1, migrationRunId);
 			statement.setLong(2, migrationBatchId);
 			try (ResultSet resultSet = statement.executeQuery()) {

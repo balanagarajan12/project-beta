@@ -8,6 +8,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.etp.migration.entity.LoadMode;
+import com.etp.migration.run.PhaseAwait;
 import com.etp.migration.entity.MigrationConfigStatus;
 import com.etp.migration.entity.MigrationDefinition;
 import com.etp.migration.repository.MigrationDefinitionRepository;
@@ -388,8 +389,7 @@ class MigrationBatchWorkerIntegrationTest {
 		mockMvc.perform(post("/api/v1/migration-runs/{runId}/process-next-batch", runId).with(jwt()))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.status").value("COMPLETED"));
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("PASSED_WITH_WARNINGS"))
 				.andExpect(jsonPath("$.reconciliation.target.status").value("PASSED_WITH_WARNINGS"))
 				.andExpect(jsonPath("$.reconciliation.target.details.targetVerificationAvailable").value(false))
@@ -416,8 +416,7 @@ class MigrationBatchWorkerIntegrationTest {
 		mockMvc.perform(post("/api/v1/migration-runs/{runId}/process-next-batch", runId).with(jwt()))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.status").value("COMPLETED_WITH_ERRORS"));
-		mockMvc.perform(post("/api/v1/migration-runs/{runId}/reconcile", runId).with(jwt()))
-				.andExpect(status().isOk())
+		PhaseAwait.reconciled(mockMvc, runId)
 				.andExpect(jsonPath("$.status").value("PASSED_WITH_WARNINGS"))
 				.andExpect(jsonPath("$.reconciliation.count.details.internallyConsistent").value(true));
 		mockMvc.perform(get("/api/v1/migration-runs/{runId}", runId).with(jwt()))

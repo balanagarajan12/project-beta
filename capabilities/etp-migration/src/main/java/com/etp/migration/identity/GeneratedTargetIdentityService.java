@@ -42,6 +42,19 @@ public class GeneratedTargetIdentityService {
 			String schema,
 			String table,
 			String idColumn) {
+		return assign(migrationRunId, entityName, sourceIdentities, spec, schema, table, idColumn, null);
+	}
+
+	@Transactional(propagation = Propagation.REQUIRES_NEW)
+	public Map<String, String> assign(
+			UUID migrationRunId,
+			String entityName,
+			List<String> sourceIdentities,
+			TargetIdentitySpec spec,
+			String schema,
+			String table,
+			String idColumn,
+			javax.sql.DataSource targetDataSource) {
 		if (migrationRunId == null) {
 			throw new IllegalArgumentException("migration run id is required");
 		}
@@ -80,8 +93,10 @@ public class GeneratedTargetIdentityService {
 				table,
 				idColumn,
 				spec.prefix(),
-				spec.sequenceLength()));
+				spec.sequenceLength(),
+				targetDataSource));
 		long sequence = start;
+		List<MigrationIdentityAllocation> rows = new ArrayList<>(missing.size());
 		for (String sourceIdentity : missing) {
 			String targetIdentity = PrefixSequenceFormatter.format(spec.prefix(), spec.sequenceLength(), sequence);
 			MigrationIdentityAllocation row = new MigrationIdentityAllocation();
@@ -90,11 +105,12 @@ public class GeneratedTargetIdentityService {
 			row.setSourceIdentity(sourceIdentity);
 			row.setTargetIdentity(targetIdentity);
 			row.setSequenceNo(sequence);
-			assignments.save(row);
+			rows.add(row);
 			assigned.put(sourceIdentity, targetIdentity);
 			sequence++;
 		}
-		assignments.flush();
+		com.etp.migration.processing.PipelineTiming.add("identityInserts", rows.size());
+		assignments.insertAll(rows);
 		return assigned;
 	}
 }

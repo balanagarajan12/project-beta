@@ -42,13 +42,16 @@ class PromotionControllerTest {
 	private MockMvc mockMvc;
 
 	@MockitoBean
-	private PromotionPreparationService promotionPreparationService;
-
-	@MockitoBean
-	private PromotionExecutionService promotionExecutionService;
-
-	@MockitoBean
 	private PromotionQueryService promotionQueryService;
+
+	@MockitoBean
+	private com.etp.migration.run.MigrationPhaseSubmissionService phaseSubmissionService;
+
+	@MockitoBean
+	private com.etp.migration.run.ExecutionControlService executionControlService;
+
+	@MockitoBean
+	private com.etp.migration.run.MigrationPhaseCoordinator phaseCoordinator;
 
 	@Test
 	void getPromotionReturnsPersistedState() throws Exception {
@@ -64,8 +67,8 @@ class PromotionControllerTest {
 				.andExpect(jsonPath("$.batches[0].batchId").value(1664))
 				.andExpect(jsonPath("$.batches[0].promotionStatus").value("PROMOTED"));
 
-		verify(promotionPreparationService, never()).prepare(any(), any());
-		verify(promotionExecutionService, never()).promote(any());
+		verify(phaseSubmissionService, never()).submitPreparation(any());
+		verify(phaseSubmissionService, never()).submitPromotion(any());
 	}
 
 	@Test
@@ -89,22 +92,39 @@ class PromotionControllerTest {
 	}
 
 	@Test
-	void prepareStillDelegatesToPreparationService() throws Exception {
-		when(promotionPreparationService.prepare(eq(RUN_ID), any())).thenReturn(prepareResponse());
+	void prepareAcceptsABackgroundJob() throws Exception {
+		when(phaseSubmissionService.submitPreparation(RUN_ID)).thenReturn(accepted("PROMOTION_PREPARATION"));
 
 		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promotion/prepare", RUN_ID)
 						.contentType(MediaType.APPLICATION_JSON))
-				.andExpect(status().isOk())
-				.andExpect(jsonPath("$.status").value("READY"));
+				.andExpect(status().isAccepted())
+				.andExpect(jsonPath("$.status").value("QUEUED"))
+				.andExpect(jsonPath("$.phase").value("PROMOTION_PREPARATION"))
+				.andExpect(jsonPath("$.runId").value(RUN_ID.toString()));
 	}
 
 	@Test
-	void promoteStillDelegatesToExecutionService() throws Exception {
-		when(promotionExecutionService.promote(RUN_ID)).thenReturn(executeResponse(PromotionStatus.PROMOTED));
+	void promoteAcceptsABackgroundJob() throws Exception {
+		when(phaseSubmissionService.submitPromotion(RUN_ID)).thenReturn(accepted("PROMOTION"));
 
 		mockMvc.perform(post("/api/v1/migration-runs/{runId}/promote", RUN_ID))
-				.andExpect(status().isOk())
-				.andExpect(jsonPath("$.status").value("PROMOTED"));
+				.andExpect(status().isAccepted())
+				.andExpect(jsonPath("$.status").value("QUEUED"))
+				.andExpect(jsonPath("$.phase").value("PROMOTION"));
+	}
+
+	private static com.etp.migration.run.dto.PhaseAcceptanceResponse accepted(String phase) {
+		return new com.etp.migration.run.dto.PhaseAcceptanceResponse(
+				PROMOTION_ID,
+				RUN_ID,
+				null,
+				com.etp.migration.run.MigrationPhase.valueOf(phase),
+				com.etp.migration.run.PhaseJobStatus.QUEUED,
+				null,
+				"Phase accepted.",
+				null,
+				null,
+				"/api/v1/migration-runs/" + RUN_ID + "/promotion");
 	}
 
 	private static ExecutePromotionResponse executeResponse(PromotionStatus status) {

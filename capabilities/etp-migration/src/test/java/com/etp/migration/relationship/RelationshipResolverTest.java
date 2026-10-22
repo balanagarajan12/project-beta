@@ -331,6 +331,83 @@ class RelationshipResolverTest {
 				.containsExactly(tuple("A-1", "4"));
 	}
 
+	@Test
+	void resolvesLocationGeometryToTheGeographicLocationFromTheSameSourceRecord() {
+		RelationshipResolution resolution = resolver.resolve(
+				foreignKeyModel("id"),
+				records(Map.of(
+						"GeographicLocation", List.of(row("GeographicLocation", 1, "1")),
+						"LocationGeometry", List.of(row("LocationGeometry", 1, "1", "longitude", "144.91")))));
+
+		assertThat(resolution.failures()).isEmpty();
+		assertThat(resolution.relationships()).singleElement().satisfies(relationship -> {
+			assertThat(relationship.parentEntity()).isEqualTo("GeographicLocation");
+			assertThat(relationship.parentIdentity()).isEqualTo("1");
+			assertThat(relationship.childEntity()).isEqualTo("LocationGeometry");
+			assertThat(relationship.childIdentity()).isEqualTo("1");
+			assertThat(relationship.childSourceRecordNumber()).isEqualTo(1L);
+			assertThat(relationship.relationshipKeys()).isEmpty();
+		});
+	}
+
+	@Test
+	void referencedColumnDoesNotChangeSourceRecordCorrelation() {
+		RelationshipResolution byPrimaryKey = resolver.resolve(
+				foreignKeyModel("id"),
+				records(Map.of(
+						"GeographicLocation", List.of(row("GeographicLocation", 1, "1")),
+						"LocationGeometry", List.of(row("LocationGeometry", 1, "1")))));
+		RelationshipResolution byOtherColumn = resolver.resolve(
+				foreignKeyModel("location_id"),
+				records(Map.of(
+						"GeographicLocation", List.of(row("GeographicLocation", 1, "1")),
+						"LocationGeometry", List.of(row("LocationGeometry", 1, "1")))));
+
+		assertThat(byPrimaryKey.failures()).isEmpty();
+		assertThat(byOtherColumn.failures()).isEmpty();
+		assertThat(byPrimaryKey.relationships())
+				.extracting(ResolvedRelationship::parentIdentity, ResolvedRelationship::childIdentity)
+				.containsExactly(tuple("1", "1"));
+		assertThat(byOtherColumn.relationships())
+				.extracting(ResolvedRelationship::parentIdentity, ResolvedRelationship::childIdentity)
+				.containsExactly(tuple("1", "1"));
+	}
+
+	@Test
+	void reportsAMissingParentForTheSourceRecordRatherThanASourceKey() {
+		RelationshipResolution resolution = resolver.resolve(
+				foreignKeyModel("id"),
+				records(Map.of(
+						"LocationGeometry", List.of(row("LocationGeometry", 1, "1", "longitude", "144.91")))));
+
+		assertThat(resolution.relationships()).isEmpty();
+		assertThat(resolution.failures()).singleElement().satisfies(failure -> {
+			assertThat(failure.kind()).isEqualTo(RelationshipResolutionFailure.Kind.UNRESOLVED_PARENT);
+			assertThat(failure.childEntity()).isEqualTo("LocationGeometry");
+			assertThat(failure.childIdentity()).isEqualTo("1");
+			assertThat(failure.childSourceRecordNumber()).isEqualTo(1L);
+			assertThat(failure.parentEntity()).isEqualTo("GeographicLocation");
+			assertThat(failure.message()).isEqualTo(
+					"Unable to resolve relationship from 'LocationGeometry' '1' (source record 1) "
+							+ "to parent 'GeographicLocation': relationship key source record '1' does not match a parent.");
+		});
+	}
+
+	private static EntityRelationshipMapping foreignKeyModel(String referencesColumn) {
+		RelationshipDefinition relationship = new RelationshipDefinition(
+				"GeographicLocation",
+				"LocationGeometry",
+				RelationshipCardinality.ONE_TO_ONE,
+				List.of(),
+				new TargetForeignKey("location_id", referencesColumn));
+		return mapping(
+				"GeographicLocation",
+				List.of(
+						new EntityDefinition("GeographicLocation", "geographic_location", null, "id"),
+						new EntityDefinition("LocationGeometry", "location_geometry", null, "id")),
+				List.of(relationship));
+	}
+
 	private static EntityRelationshipMapping chain(
 			String parent,
 			String parentKey,

@@ -24,6 +24,7 @@ import com.etp.migration.mapping.EntityRelationshipMapping;
 import com.etp.migration.mapping.RelationshipCardinality;
 import com.etp.migration.mapping.RelationshipDefinition;
 import com.etp.migration.mapping.RelationshipKey;
+import com.etp.migration.mapping.TargetForeignKey;
 import com.etp.migration.planning.ExecutionBatchPlan;
 import com.etp.migration.planning.ExecutionPlanner;
 import com.etp.migration.planning.ExecutionWorkItem;
@@ -63,6 +64,7 @@ class EntityRelationshipExecutionTest {
 		files.initializeRoot();
 		CsvSourceConnector csv = new CsvSourceConnector(new DefaultArtifactStorage(files));
 		EntityCsvAccess csvAccess = new EntityCsvAccess(csv, extractor, new MultiFileEntitySource(csv, extractor));
+		csvAccess.setFileStorage(files);
 		planSource = new EntityRelationshipPlanSource(
 				csvAccess,
 				new RelationshipResolver(),
@@ -258,6 +260,76 @@ class EntityRelationshipExecutionTest {
 		});
 		assertThat(plans.stream().flatMap(plan -> plan.workItems().stream()).map(ExecutionWorkItem::entityName))
 				.contains("Location");
+	}
+
+	@Test
+	void resolvesLocationGeometryToGeographicLocationFromTheSameCsvRow() throws Exception {
+		write("geometry.csv", """
+				street_name,city,longitude,latitude
+				Sample,Melbourne,144.91,-37.79
+				""");
+		EntityRelationshipMapping mapping = geometryModel(null);
+		List<MigrationMappingRule> rules = geometryRules();
+		List<ExecutionBatchPlan> plans = new ArrayList<>();
+		List<EntityItemFailure> failures = new ArrayList<>();
+		planSource.consume(singleConfig("geometry.csv"), mapping, rules, 10, plans::add, failures::add);
+
+		assertThat(failures).isEmpty();
+		ExecutionWorkItem geometry = plans.stream()
+				.flatMap(plan -> plan.workItems().stream())
+				.filter(item -> item.entityName().equals("LocationGeometry"))
+				.findFirst()
+				.orElseThrow();
+		assertThat(geometry.sourceIdentity()).isEqualTo("1");
+		assertThat(geometry.sourceRecordNumber()).isEqualTo(1L);
+		assertThat(geometry.parents()).anySatisfy(parent -> {
+			assertThat(parent.entityName()).isEqualTo("GeographicLocation");
+			assertThat(parent.sourceIdentity()).isEqualTo("1");
+		});
+
+		MapLookup lookup = lookup(Map.of(
+				"AddressLocation", Map.of("1", "LOC-000000001"),
+				"GeographicAddress", Map.of("1", "ADDR-0000000001"),
+				"GeographicLocation", Map.of("1", "GEO-000000001"),
+				"LocationGeometry", Map.of("1", "GEOM-000000001")));
+		EntityCsvAccess access = planSourceCsv();
+		var records = access.open(singleConfig("geometry.csv"), mapping, rules);
+		var payloads = records.matching(wanted(plans.get(0)));
+		try {
+			execute(mapping, rules, plans.get(0), payloads, lookup, 10);
+		} finally {
+			payloads.clear();
+		}
+
+		Map<String, Object> payload = payload("LocationGeometry", "1");
+		assertThat(payload.get("sourceKey")).isNull();
+		assertThat(parentTargets(payload)).containsExactly("GEO-000000001");
+		assertThat(foreignKey(payload, "GeographicLocation"))
+				.containsEntry("column", "location_id")
+				.containsEntry("referencesColumn", "id");
+	}
+
+	@Test
+	void reportsAMissingGeographicLocationWhenTheParentRowWasNotExtracted() throws Exception {
+		write("geometry-missing.csv", """
+				street_name,city,longitude,latitude
+				Sample,Melbourne,144.91,-37.79
+				""");
+		EntityRelationshipMapping mapping = geometryModel("geo_id");
+		List<ExecutionBatchPlan> plans = new ArrayList<>();
+		List<EntityItemFailure> failures = new ArrayList<>();
+		planSource.consume(singleConfig("geometry-missing.csv"), mapping, geometryRules(), 10, plans::add, failures::add);
+
+		assertThat(failures).anySatisfy(failure -> {
+			assertThat(failure.entityName()).isEqualTo("LocationGeometry");
+			assertThat(failure.sourceIdentity()).isEqualTo("1");
+			assertThat(failure.sourceRecordNumber()).isEqualTo(1L);
+			assertThat(failure.errorCode()).isEqualTo(MigrationErrorCodes.RELATIONSHIP_UNRESOLVED);
+			assertThat(failure.message()).contains("relationship key source record '1' does not match a parent.");
+		});
+		assertThat(plans.stream().flatMap(plan -> plan.workItems().stream()).map(ExecutionWorkItem::entityName))
+				.doesNotContain("LocationGeometry")
+				.contains("AddressLocation", "GeographicAddress");
 	}
 
 	@Test
@@ -469,6 +541,40 @@ class EntityRelationshipExecutionTest {
 	}
 
 	@Test
+	void countsLogicalWorkItemsSeparatelyFromPhysicalRows() throws Exception {
+		write("addresses.csv", """
+				address_id,unit
+				A1,
+				A2,
+				A3,U1
+				A4,U2
+				""");
+		EntityRelationshipMapping mapping = mapping(
+				"House",
+				List.of(def("House", "address_id", "house"), def("Unit", null, "unit")),
+				List.of(new RelationshipDefinition(
+						"House",
+						"Unit",
+						RelationshipCardinality.ONE_TO_MANY,
+						List.of())));
+		List<MigrationMappingRule> rules = List.of(
+				rule("Unit", 1, "unit", "name", TransformationType.DIRECT, false));
+		Map<String, Object> source = singleConfig("addresses.csv");
+		assertThat(planSource.physicalRowCount(source, mapping, rules)).hasValue(4L);
+
+		List<ExecutionBatchPlan> plans = new ArrayList<>();
+		planSource.consume(source, mapping, rules, 2, plans::add, failure -> {
+			throw new AssertionError(failure.message());
+		});
+
+		long workItems = plans.stream().mapToLong(plan -> plan.workItems().size()).sum();
+		assertThat(workItems).isEqualTo(6L);
+		assertThat(plans).hasSize(3);
+		assertThat(plans).allSatisfy(plan -> assertThat(plan.workItems()).hasSizeLessThanOrEqualTo(2));
+		assertThat(planSource.physicalRowCount(source, mapping, rules)).hasValue(4L);
+	}
+
+	@Test
 	void leavesFlatMappingsOnTheRecordPipeline() {
 		assertThat(ExecutionMode.entityRelationship(Map.of())).isFalse();
 		assertThat(ExecutionMode.entityRelationship(Map.of(
@@ -632,6 +738,58 @@ class EntityRelationshipExecutionTest {
 
 	private static String label(Map<String, Object> payload) {
 		return payload.get("entity") + ":" + payload.get("sourceIdentity");
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Map<String, Object> foreignKey(Map<String, Object> payload, String parentEntity) {
+		List<Map<String, Object>> relationships = (List<Map<String, Object>>) payload.get("relationships");
+		return relationships.stream()
+				.filter(link -> parentEntity.equals(link.get("parentEntity")))
+				.map(link -> (Map<String, Object>) link.get("targetForeignKey"))
+				.findFirst()
+				.orElseThrow();
+	}
+
+	private static EntityRelationshipMapping geometryModel(String geographicLocationSourceKey) {
+		return mapping(
+				"AddressLocation",
+				List.of(
+						new EntityDefinition("AddressLocation", "location", null, "id"),
+						new EntityDefinition("GeographicAddress", "geographic_address", null, "id"),
+						new EntityDefinition("GeographicLocation", "geographic_location", geographicLocationSourceKey, "id"),
+						new EntityDefinition("LocationGeometry", "location_geometry", null, "id")),
+				List.of(
+						foreignKey("AddressLocation", "GeographicAddress", "location_id", "id"),
+						foreignKey("GeographicLocation", "GeographicAddress", "geographic_location_id", "id"),
+						foreignKey("GeographicLocation", "LocationGeometry", "location_id", "id")));
+	}
+
+	private static RelationshipDefinition foreignKey(
+			String parent,
+			String child,
+			String column,
+			String referencesColumn) {
+		return new RelationshipDefinition(
+				parent,
+				child,
+				RelationshipCardinality.ONE_TO_ONE,
+				List.of(),
+				new TargetForeignKey(column, referencesColumn));
+	}
+
+	private static List<MigrationMappingRule> geometryRules() {
+		MigrationMappingRule street = rule("AddressLocation", 1, "street_name", "name", TransformationType.DIRECT, false);
+		MigrationMappingRule city = rule("GeographicAddress", 2, "city", "city", TransformationType.DIRECT, false);
+		MigrationMappingRule geoType = new MigrationMappingRule();
+		geoType.setEntityName("GeographicLocation");
+		geoType.setSequenceNo(3);
+		geoType.setTargetField("geo_json_type");
+		geoType.setTransformationType(TransformationType.DEFAULT);
+		geoType.setDefaultValue("geoJsonPoint");
+		geoType.setEnabled(true);
+		geoType.setConfiguration(Map.of());
+		MigrationMappingRule longitude = rule("LocationGeometry", 4, "longitude", "x", TransformationType.DIRECT, false);
+		return List.of(street, city, geoType, longitude);
 	}
 
 	private static EntityRelationshipMapping placeModel() {

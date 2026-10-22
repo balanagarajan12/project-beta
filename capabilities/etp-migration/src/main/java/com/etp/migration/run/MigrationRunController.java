@@ -8,7 +8,10 @@ import com.etp.migration.processing.MigrationBatchWorker;
 import com.etp.migration.processing.SourceInspectionService;
 import com.etp.migration.reconciliation.ReconciliationService;
 import com.etp.migration.reconciliation.dto.MigrationReconciliationResponse;
+import com.etp.migration.run.dto.PhaseAcceptanceResponse;
 import com.etp.migration.run.dto.CreateMigrationRunRequest;
+import com.etp.migration.run.dto.ExecutionControlRequest;
+import com.etp.migration.run.dto.ExecutionControlResponse;
 import com.etp.migration.run.dto.MigrationErrorResponse;
 import com.etp.migration.run.dto.MigrationRunResponse;
 import io.swagger.v3.oas.annotations.Operation;
@@ -37,16 +40,25 @@ public class MigrationRunController {
 	private final SourceInspectionService sourceInspectionService;
 	private final MigrationBatchWorker migrationBatchWorker;
 	private final ReconciliationService reconciliationService;
+	private final MigrationPhaseSubmissionService phaseSubmissionService;
+	private final ExecutionControlService executionControlService;
+	private final MigrationExecutionCoordinator executionCoordinator;
 
 	public MigrationRunController(
 			MigrationRunService migrationRunService,
 			SourceInspectionService sourceInspectionService,
 			MigrationBatchWorker migrationBatchWorker,
-			ReconciliationService reconciliationService) {
+			ReconciliationService reconciliationService,
+			MigrationPhaseSubmissionService phaseSubmissionService,
+			ExecutionControlService executionControlService,
+			MigrationExecutionCoordinator executionCoordinator) {
 		this.migrationRunService = migrationRunService;
 		this.sourceInspectionService = sourceInspectionService;
 		this.migrationBatchWorker = migrationBatchWorker;
 		this.reconciliationService = reconciliationService;
+		this.phaseSubmissionService = phaseSubmissionService;
+		this.executionControlService = executionControlService;
+		this.executionCoordinator = executionCoordinator;
 	}
 
 	@Operation(summary = "Create a migration run", description = "Creates a QUEUED run for an ACTIVE definition. Does not process source data.")
@@ -141,21 +153,26 @@ public class MigrationRunController {
 		return migrationBatchWorker.processNextBatchOrConflict(runId);
 	}
 
-	@Operation(summary = "Reconcile a migration run", description = "Verifies source, processing, and target counts after all batches are terminal. Default target scope is STAGING. Pass verificationScope=BUSINESS_TARGET after promotion to verify the application table. Does not change run or promotion status. Safe to repeat; one row is stored per reconciliation type.")
+	@Operation(summary = "Reconcile a migration run", description = "Accepts a reconciliation job after all batches are terminal. Default target scope is STAGING. Pass verificationScope=BUSINESS_TARGET after promotion to verify the application table. Returns before the checks finish. Does not change run or promotion status. Poll GET /api/v1/migration-runs/{runId}/reconciliation. A repeated call while the job is queued or running returns that job. One reconciliation row is stored per type.")
 	@ApiResponses({
-			@ApiResponse(responseCode = "200", description = "Reconciliation completed"),
+			@ApiResponse(responseCode = "202", description = "Reconciliation accepted"),
 			@ApiResponse(responseCode = "404", description = "Run not found"),
-			@ApiResponse(responseCode = "409", description = "Run still has active batches"),
-			@ApiResponse(responseCode = "500", description = "Unexpected reconciliation failure")
+			@ApiResponse(responseCode = "409", description = "Run still has active batches")
 	})
 	@PostMapping(value = "/migration-runs/{runId}/reconcile", produces = MediaType.APPLICATION_JSON_VALUE)
-	public MigrationReconciliationResponse reconcile(
+	public ResponseEntity<PhaseAcceptanceResponse> reconcile(
 			@PathVariable("runId") UUID runId,
 			@RequestParam(name = "verificationScope", required = false) String verificationScope) {
-		if (verificationScope == null || verificationScope.isBlank()) {
-			return reconciliationService.reconcile(runId);
-		}
-		return reconciliationService.reconcile(runId, verificationScope);
+		PhaseAcceptanceResponse body = phaseSubmissionService.submitReconciliation(runId, verificationScope);
+		return ResponseEntity.accepted().location(URI.create(body.statusUrl())).body(body);
+	}
+
+	@Operation(summary = "Get a phase job", description = "Returns the persisted job status. Does not start reconciliation or promotion.")
+	@GetMapping(value = "/migration-runs/{runId}/phase-jobs/{jobId}", produces = MediaType.APPLICATION_JSON_VALUE)
+	public PhaseAcceptanceResponse phaseJob(
+			@PathVariable("runId") UUID runId,
+			@PathVariable("jobId") UUID jobId) {
+		return phaseSubmissionService.get(runId, jobId);
 	}
 
 	@Operation(summary = "Get migration reconciliation", description = "Returns the latest COUNT, CHECKSUM, TARGET, and FULL reconciliation records for the run.")
@@ -188,5 +205,30 @@ public class MigrationRunController {
 			@RequestParam(name = "page", defaultValue = "0") int page,
 			@RequestParam(name = "size", defaultValue = "20") int size) {
 		return migrationRunService.listBatches(runId, page, size);
+	}
+
+	@Operation(
+			summary = "Pause or resume a migration run",
+			description = "PAUSE persists PAUSE_REQUESTED while a worker holds the lease, then PAUSED after the in-flight batch commits. RESUME continues from the persisted batch state and does not repeat successful batches. A paused run is not claimed on startup.")
+	@PostMapping(value = "/migration-runs/{runId}/control", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+	public ExecutionControlResponse control(
+			@PathVariable("runId") UUID runId,
+			@RequestBody ExecutionControlRequest request) {
+		String action = action(request);
+		ExecutionControlResponse body = "PAUSE".equals(action)
+				? executionControlService.pauseRun(runId)
+				: executionControlService.resumeRun(runId);
+		if ("RESUME".equals(action) && body.resumeJobId() != null && body.controlState() == ExecutionControlState.RESUMING) {
+			executionCoordinator.submit(body.resumeJobId());
+		}
+		return body;
+	}
+
+	private static String action(ExecutionControlRequest request) {
+		String action = request == null || request.action() == null ? "" : request.action().trim();
+		if (!"PAUSE".equals(action) && !"RESUME".equals(action)) {
+			throw new IllegalArgumentException("Control action must be PAUSE or RESUME");
+		}
+		return action;
 	}
 }

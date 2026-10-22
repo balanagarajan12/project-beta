@@ -4,11 +4,11 @@ import com.etp.migration.connector.target.TargetFailureDiagnostics;
 import com.etp.migration.connector.target.TargetInfrastructureException;
 import com.etp.migration.connector.target.TargetVerification;
 import com.etp.migration.entity.MigrationPromotion;
-import com.etp.migration.entity.MigrationPromotionBatch;
 import com.etp.migration.entity.PromotionBatchStatus;
 import com.etp.migration.entity.PromotionStatus;
 import com.etp.migration.processing.MigrationErrorCodes;
 import com.etp.migration.promotion.PromotionException;
+import com.etp.migration.promotion.PromotionBatchRef;
 import com.etp.migration.repository.MigrationPromotionBatchRepository;
 import com.etp.migration.repository.MigrationPromotionRepository;
 import java.sql.Connection;
@@ -37,6 +37,7 @@ public class PostgreSqlBusinessTargetVerifier {
 
 	private final PostgreSqlTargetProperties properties;
 	private final DataSource dataSource;
+	private final PostgreSqlConnectionRegistry connections;
 	private final MigrationPromotionRepository promotionRepository;
 	private final MigrationPromotionBatchRepository promotionBatchRepository;
 
@@ -44,19 +45,31 @@ public class PostgreSqlBusinessTargetVerifier {
 	public PostgreSqlBusinessTargetVerifier(
 			PostgreSqlTargetProperties properties,
 			@Autowired(required = false) @Qualifier(PostgreSqlTargetClientConfig.DATASOURCE_BEAN) DataSource dataSource,
+			@Autowired(required = false) PostgreSqlConnectionRegistry connections,
 			MigrationPromotionRepository promotionRepository,
 			MigrationPromotionBatchRepository promotionBatchRepository) {
 		this.properties = properties;
 		this.dataSource = dataSource;
+		this.connections = connections;
 		this.promotionRepository = promotionRepository;
 		this.promotionBatchRepository = promotionBatchRepository;
 	}
 
+	public void assertExecutable(UUID migrationRunId, Map<String, Object> configuration) {
+		requireEnabledPromotion(configuration);
+		MigrationPromotion executed = latestExecuted(migrationRunId);
+		if (promotedBatchIds(executed).isEmpty()) {
+			throw notExecuted("No successfully promoted batches are available to verify");
+		}
+	}
+
 	public TargetVerification verify(UUID migrationRunId, Map<String, Object> configuration) {
-		if (dataSource == null) {
-			return TargetVerification.unavailable(
-					"BUSINESS_TARGET",
-					"PostgreSQL target datasource is not configured");
+		DataSource stagingSource = PostgreSqlConnectionRegistry.stagingOf(connections, dataSource, configuration);
+		DataSource targetSource = PostgreSqlConnectionRegistry.targetOf(connections, dataSource, configuration);
+		if (stagingSource != targetSource) {
+			throw new TargetInfrastructureException(
+					MigrationErrorCodes.TARGET_DATABASE_CONFIGURATION_ERROR,
+					"Business-target verification requires staging and the business target on the same PostgreSQL connection");
 		}
 		PromotionTargetConfiguration promotion = requireEnabledPromotion(configuration);
 		MigrationPromotion executed = latestExecuted(migrationRunId);
@@ -85,7 +98,7 @@ public class PostgreSqlBusinessTargetVerifier {
 		List<Map.Entry<String, String>> valueColumns = promotion.columns().entrySet().stream()
 				.filter(entry -> !promotion.conflictKeys().contains(entry.getValue()))
 				.toList();
-		try (Connection connection = dataSource.getConnection()) {
+		try (Connection connection = stagingSource.getConnection()) {
 			long expected = scalar(
 					connection,
 					PostgreSqlBusinessTargetSql.expectedCount(staging, promotedBatchIds.size()),
@@ -168,11 +181,10 @@ public class PostgreSqlBusinessTargetVerifier {
 
 	private List<Long> promotedBatchIds(MigrationPromotion promotion) {
 		List<Long> ids = new ArrayList<>();
-		for (MigrationPromotionBatch batch : promotionBatchRepository
-				.findByPromotion_IdAndStatusOrderByMigrationBatch_BatchNumberAsc(
-						promotion.getId(), PromotionBatchStatus.PROMOTED)) {
-			if (batch.getMigrationBatch() != null) {
-				ids.add(batch.getMigrationBatch().getId());
+		for (PromotionBatchRef batch : promotionBatchRepository.findRefsByPromotionAndStatus(
+				promotion.getId(), PromotionBatchStatus.PROMOTED)) {
+			if (batch.migrationBatchId() != null) {
+				ids.add(batch.migrationBatchId());
 			}
 		}
 		return ids;

@@ -14,6 +14,8 @@ import com.etp.migration.entity.MigrationRunStatus;
 import com.etp.migration.entity.PromotionBatchStatus;
 import com.etp.migration.entity.PromotionStatus;
 import com.etp.migration.processing.MigrationErrorCodes;
+import com.etp.migration.processing.MigrationErrorDetails;
+import com.etp.migration.processing.OperationErrorRecorder;
 import com.etp.migration.promotion.dto.ExecutePromotionResponse;
 import com.etp.migration.promotion.dto.PromotionBatchExecutionResponse;
 import com.etp.migration.repository.MigrationBatchRepository;
@@ -22,8 +24,10 @@ import com.etp.migration.repository.MigrationPromotionRepository;
 import com.etp.migration.repository.MigrationReconciliationRepository;
 import com.etp.migration.repository.MigrationRunRepository;
 import com.etp.migration.run.MigrationRunNotFoundException;
+import com.etp.migration.run.PhaseOwnershipLostException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.function.BooleanSupplier;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
@@ -34,6 +38,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -58,6 +63,8 @@ public class PromotionExecutionService {
 	private final MigrationPromotionBatchRepository promotionBatchRepository;
 	private final PostgreSqlPromotionWriter promotionWriter;
 	private final UamStagingPromotion uamStagingPromotion;
+	private final com.etp.migration.run.ExecutionControlService controls;
+	private final OperationErrorRecorder operationErrors;
 
 	public PromotionExecutionService(
 			PlatformTransactionManager transactionManager,
@@ -67,7 +74,9 @@ public class PromotionExecutionService {
 			MigrationPromotionRepository promotionRepository,
 			MigrationPromotionBatchRepository promotionBatchRepository,
 			PostgreSqlPromotionWriter promotionWriter,
-			UamStagingPromotion uamStagingPromotion) {
+			UamStagingPromotion uamStagingPromotion,
+			com.etp.migration.run.ExecutionControlService controls,
+			OperationErrorRecorder operationErrors) {
 		this.transactionTemplate = new TransactionTemplate(transactionManager);
 		this.migrationRunRepository = migrationRunRepository;
 		this.migrationBatchRepository = migrationBatchRepository;
@@ -76,15 +85,63 @@ public class PromotionExecutionService {
 		this.promotionBatchRepository = promotionBatchRepository;
 		this.promotionWriter = promotionWriter;
 		this.uamStagingPromotion = uamStagingPromotion;
+		this.controls = controls;
+		this.operationErrors = operationErrors;
 	}
 
 	public ExecutePromotionResponse promote(UUID runId) {
+		return promote(runId, () -> { });
+	}
+
+	public void assertPromotable(UUID runId) {
+		transactionTemplate.executeWithoutResult(status -> loadPromotable(runId));
+	}
+
+	/**
+	 * The promotion {@link #promote} will use: an in-progress row, otherwise a finished one,
+	 * otherwise the prepared row. Null when none of those exist.
+	 */
+	@Transactional(readOnly = true)
+	public UUID associatedPromotionId(UUID runId) {
+		List<MigrationPromotion> existing = promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId);
+		for (PromotionStatus status : List.of(
+				PromotionStatus.PROMOTING,
+				PromotionStatus.PROMOTED,
+				PromotionStatus.READY)) {
+			for (MigrationPromotion promotion : existing) {
+				if (promotion.getStatus() == status) {
+					return promotion.getId();
+				}
+			}
+		}
+		return null;
+	}
+
+	public ExecutePromotionResponse promote(UUID runId, Runnable progress) {
+		return promote(runId, progress, () -> true);
+	}
+
+	public ExecutePromotionResponse promote(UUID runId, Runnable progress, BooleanSupplier stillOwner) {
+		Runnable report = progress == null ? () -> { } : progress;
+		BooleanSupplier owner = stillOwner == null ? () -> true : stillOwner;
 		StartedPromotion started = transactionTemplate.execute(status -> begin(runId));
+		report.run();
 		if (started.alreadyComplete()) {
 			return transactionTemplate.execute(status -> toResponse(started.promotionId()));
 		}
 		for (EligibleBatch batch : started.eligibleBatches()) {
+			if (controls.shouldPausePromotion(started.promotionId())) {
+				controls.markPromotionPaused(started.promotionId());
+				log.info("Promotion paused at a batch boundary runId={}", runId);
+				throw new PromotionPausedException(runId);
+			}
+			if (!owner.getAsBoolean()) {
+				log.warn("Promotion stopped because this worker no longer owns the phase job runId={}", runId);
+				throw new PhaseOwnershipLostException(runId);
+			}
+			report.run();
 			promoteBatch(started, batch);
+			report.run();
 		}
 		return transactionTemplate.execute(status -> complete(started.promotionId()));
 	}
@@ -104,10 +161,12 @@ public class PromotionExecutionService {
 		requireReconciliation(runId);
 
 		List<MigrationPromotion> existing = promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId);
-		if (existing.stream().anyMatch(promotion -> promotion.getStatus() == PromotionStatus.PROMOTING)) {
-			throw conflict(
-					MigrationErrorCodes.PROMOTION_ALREADY_IN_PROGRESS,
-					"A promotion is already in progress for this run");
+		MigrationPromotion promoting = existing.stream()
+				.filter(promotion -> promotion.getStatus() == PromotionStatus.PROMOTING)
+				.findFirst()
+				.orElse(null);
+		if (promoting != null) {
+			return resume(promoting, runId, configuration, mappingConfiguration, promotionConfig);
 		}
 		MigrationPromotion promoted = existing.stream()
 				.filter(promotion -> promotion.getStatus() == PromotionStatus.PROMOTED)
@@ -133,17 +192,56 @@ public class PromotionExecutionService {
 		}
 		ready.setErrorCode(null);
 		ready.setErrorMessage(null);
-		List<EligibleBatch> eligible = new ArrayList<>();
-		for (MigrationPromotionBatch batch : promotionBatchRepository
-				.findByPromotion_IdAndStatusOrderByMigrationBatch_BatchNumberAsc(
-						ready.getId(), PromotionBatchStatus.ELIGIBLE)) {
-			eligible.add(new EligibleBatch(
-					batch.getId(),
-					batch.getMigrationBatch().getId(),
-					nz(batch.getEligibleRecordCount())));
-		}
+		List<EligibleBatch> eligible = eligible(ready.getId(), PromotionBatchStatus.ELIGIBLE);
 		return new StartedPromotion(
 				ready.getId(), runId, configuration, mappingConfiguration, promotionConfig, eligible, false);
+	}
+
+	private void loadPromotable(UUID runId) {
+		MigrationRun run = migrationRunRepository.findById(runId)
+				.orElseThrow(() -> new MigrationRunNotFoundException(runId));
+		MigrationDefinition definition = run.getMigrationDefinition();
+		Map<String, Object> configuration = definition.getConfiguration() == null
+				? Map.of()
+				: definition.getConfiguration();
+		requirePostgresqlTarget(definition.getTargetType());
+		PromotionConfigurationGate.requireEnabled(configuration);
+		requireExecutionComplete(run);
+		requireNoActiveBatches(runId);
+		requireReconciliation(runId);
+		boolean ready = promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId).stream()
+				.anyMatch(promotion -> promotion.getStatus() == PromotionStatus.READY
+						|| promotion.getStatus() == PromotionStatus.PROMOTING
+						|| promotion.getStatus() == PromotionStatus.PROMOTED);
+		if (!ready) {
+			throw conflict(
+					MigrationErrorCodes.PROMOTION_NOT_READY,
+					"Prepare a promotion before executing promote");
+		}
+	}
+
+	private StartedPromotion resume(
+			MigrationPromotion promoting,
+			UUID runId,
+			Map<String, Object> configuration,
+			Map<String, Object> mappingConfiguration,
+			PromotionTargetConfiguration promotionConfig) {
+		List<EligibleBatch> eligible = new ArrayList<>();
+		eligible.addAll(eligible(promoting.getId(), PromotionBatchStatus.ELIGIBLE));
+		eligible.addAll(eligible(promoting.getId(), PromotionBatchStatus.PROMOTING));
+		return new StartedPromotion(
+				promoting.getId(), runId, configuration, mappingConfiguration, promotionConfig, eligible, false);
+	}
+
+	private List<EligibleBatch> eligible(UUID promotionId, PromotionBatchStatus status) {
+		List<EligibleBatch> eligible = new ArrayList<>();
+		for (PromotionBatchRef ref : promotionBatchRepository.findRefsByPromotionAndStatus(promotionId, status)) {
+			eligible.add(new EligibleBatch(
+					ref.promotionBatchId(),
+					ref.migrationBatchId(),
+					nz(ref.eligibleRecordCount())));
+		}
+		return eligible;
 	}
 
 	private static Map<String, Object> mappingConfiguration(MigrationDefinition definition) {
@@ -155,6 +253,7 @@ public class PromotionExecutionService {
 
 	private void promoteBatch(StartedPromotion started, EligibleBatch eligible) {
 		transactionTemplate.executeWithoutResult(status -> markBatchPromoting(eligible.promotionBatchId()));
+		com.etp.migration.processing.PipelineTiming.open(() -> {
 		try {
 			if (UamStagingPromotion.configured(started.configuration())) {
 				uamStagingPromotion.promoteBatch(
@@ -173,6 +272,7 @@ public class PromotionExecutionService {
 		} catch (RuntimeException ex) {
 			transactionTemplate.executeWithoutResult(status -> markBatchFailed(eligible, ex));
 		}
+		});
 	}
 
 	private void markBatchPromoting(Long promotionBatchId) {
@@ -196,22 +296,45 @@ public class PromotionExecutionService {
 
 	private void markBatchFailed(EligibleBatch eligible, RuntimeException ex) {
 		MigrationPromotionBatch batch = promotionBatchRepository.findById(eligible.promotionBatchId()).orElseThrow();
-		Instant now = Instant.now();
-		batch.setStatus(PromotionBatchStatus.FAILED);
-		batch.setPromotedRecordCount(0L);
-		batch.setFailedRecordCount(eligible.eligibleRecordCount());
-		batch.setCompletedAt(now);
-		batch.setErrorCode(MigrationErrorCodes.PROMOTION_BATCH_FAILED);
-		batch.setErrorMessage(truncate(failureMessage(ex)));
-		log.warn("Promotion batch failed promotionBatchId={} migrationBatchId={} cause={}",
-				eligible.promotionBatchId(), eligible.migrationBatchId(), TargetFailureDiagnostics.describe(ex));
+		recordBatchFailure(batch, eligible.eligibleRecordCount(), ex);
 	}
 
-	private static String failureMessage(RuntimeException ex) {
-		if (!(ex instanceof TargetInfrastructureException) && TargetFailureDiagnostics.involvesDatabase(ex)) {
-			return "Promotion batch failed: " + TargetFailureDiagnostics.describe(ex);
+	void recordBatchFailure(MigrationPromotionBatch batch, long eligibleRecordCount, RuntimeException failure) {
+		recordFailure(batch, eligibleRecordCount, failure);
+		logBatchFailure(batch.getId(), batch.getMigrationBatchId(), failure);
+		operationErrors.recordPromotionBatch(batch, failure);
+	}
+
+	static void recordFailure(MigrationPromotionBatch batch, long eligibleRecordCount, RuntimeException failure) {
+		batch.setStatus(PromotionBatchStatus.FAILED);
+		batch.setPromotedRecordCount(0L);
+		batch.setFailedRecordCount(eligibleRecordCount);
+		batch.setCompletedAt(Instant.now());
+		batch.setErrorCode(MigrationErrorCodes.PROMOTION_BATCH_FAILED);
+		batch.setErrorMessage(truncate(failureMessage(failure)));
+	}
+
+	static void logBatchFailure(Long promotionBatchId, Long migrationBatchId, RuntimeException failure) {
+		String described = TargetFailureDiagnostics.describe(failure);
+		if (attachThrowable(failure)) {
+			log.warn("Promotion batch failed promotionBatchId={} migrationBatchId={} cause={}",
+					promotionBatchId, migrationBatchId, described, failure);
+		} else {
+			log.warn("Promotion batch failed promotionBatchId={} migrationBatchId={} cause={}",
+					promotionBatchId, migrationBatchId, described);
 		}
-		return ex.getMessage() == null ? "Promotion batch failed" : ex.getMessage();
+	}
+
+	static String failureMessage(RuntimeException ex) {
+		return MigrationErrorDetails.summary(ex);
+	}
+
+	private static boolean attachThrowable(Throwable failure) {
+		if (failure == null) {
+			return false;
+		}
+		String message = failure.getMessage();
+		return message == null || message.isBlank() || !MigrationErrorDetails.sensitive(message);
 	}
 
 	private ExecutePromotionResponse complete(UUID promotionId) {
@@ -245,10 +368,7 @@ public class PromotionExecutionService {
 		promotion.setPromotedRecords(promotedRecords);
 		promotion.setFailedRecords(failedRecords);
 		promotion.setCompletedAt(now);
-		if (status == PromotionStatus.PROMOTION_FAILED && failedBatches > 0) {
-			promotion.setErrorCode(MigrationErrorCodes.PROMOTION_BATCH_FAILED);
-			promotion.setErrorMessage("One or more promotion batches failed");
-		}
+		assignTerminalError(promotion, status, failedBatches);
 		return toResponse(promotion, batches);
 	}
 
@@ -257,12 +377,27 @@ public class PromotionExecutionService {
 		return toResponse(promotion, promotionBatchRepository.findByPromotion_Id(promotionId));
 	}
 
+	static void assignTerminalError(MigrationPromotion promotion, PromotionStatus status, int failedBatches) {
+		if (status == PromotionStatus.PROMOTION_FAILED && failedBatches > 0) {
+			promotion.setErrorCode(MigrationErrorCodes.PROMOTION_BATCH_FAILED);
+			promotion.setErrorMessage("One or more promotion batches failed");
+		} else if (status == PromotionStatus.PARTIALLY_PROMOTED) {
+			promotion.setErrorCode(MigrationErrorCodes.PROMOTION_PARTIAL_FAILURE);
+			promotion.setErrorMessage("Promotion completed with one or more failed batches");
+		} else {
+			promotion.setErrorCode(null);
+			promotion.setErrorMessage(null);
+		}
+	}
+
 	private static ExecutePromotionResponse toResponse(
 			MigrationPromotion promotion,
 			List<MigrationPromotionBatch> batches) {
 		List<PromotionBatchExecutionResponse> details = new ArrayList<>();
 		for (MigrationPromotionBatch batch : batches) {
-			Long batchId = batch.getMigrationBatch() == null ? null : batch.getMigrationBatch().getId();
+			Long batchId = batch.getMigrationBatchId() != null
+					? batch.getMigrationBatchId()
+					: batch.getMigrationBatch() == null ? null : batch.getMigrationBatch().getId();
 			details.add(new PromotionBatchExecutionResponse(
 					batchId,
 					batch.getStatus(),
@@ -270,7 +405,7 @@ public class PromotionExecutionService {
 					nz(batch.getPromotedRecordCount()),
 					nz(batch.getFailedRecordCount()),
 					batch.getErrorCode(),
-					batch.getErrorMessage()));
+					MigrationErrorDetails.publicMessage(batch.getErrorMessage())));
 		}
 		return new ExecutePromotionResponse(
 				promotion.getId(),
@@ -285,7 +420,9 @@ public class PromotionExecutionService {
 				nz(promotion.getPromotedRecords()),
 				nz(promotion.getFailedRecords()),
 				nz(promotion.getSkippedRecords()),
-				List.copyOf(details));
+				List.copyOf(details),
+				promotion.getErrorCode(),
+				MigrationErrorDetails.publicMessage(promotion.getErrorMessage()));
 	}
 
 	private static void requirePostgresqlTarget(String targetType) {

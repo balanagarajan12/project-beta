@@ -1,6 +1,7 @@
 package com.etp.migration.migration.dto;
 
 import com.etp.migration.entity.LoadMode;
+import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Positive;
 import java.util.Map;
@@ -28,6 +29,7 @@ public record CompositeDefinitionRequest(
 
 		LoadMode loadMode,
 
+		@Schema(description = "Only target and promotion. Target tables, relationships, load order, column types, and timestamps are not stored here.")
 		Map<String, Object> configuration
 ) {
 	public CreateMigrationDefinitionRequest toCreateRequest(UUID mappingId) {

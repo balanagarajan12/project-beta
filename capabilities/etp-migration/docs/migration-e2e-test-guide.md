@@ -30,7 +30,7 @@ Source connector
 | Spring Boot | 4.1.0 |
 | Maven | No wrapper and no pinned Maven version. Use a Maven release that can build the Spring Boot 4.1.0 parent. |
 | Automated database | Testcontainers 1.21.4, image `postgres:17`. The 2026-10-17 run reported PostgreSQL **17.10**. Database name `etp_migration_test`. Docker is required. |
-| Local control plane | `capabilities/etp-migration/docker-compose.yml` starts `postgres:17` as `etp-migration-postgres`, host port **55433**, database `etp_migration`. `ETP_MIGRATION_DB_PASSWORD` is required. The repository contains Flyway V1–V11. Startup applies pending versions. This guide does not claim the workstation database already has V11. |
+| Local control plane | `capabilities/etp-migration/docker-compose.yml` starts `postgres:17` as `etp-migration-postgres`, host port **55433**, database `etp_migration`. `ETP_MIGRATION_DB_PASSWORD` is required. The repository contains Flyway V1–V11. Startup applies pending versions. Container `etp-migration-postgres` on host port 55446 has V1–V9 successful and does not have V10 or V11. Port 55433 was not inspected. |
 | Local target | Not created by that compose file. The workstation notes use `localhost:55432`, database `etp_migration`, staging `migration_staging.uam_entity_stage`, schema `uam`. That split is a local arrangement. |
 | Storage | `etp.migration.storage.root`, default `./data/migration` |
 | HTTP | `ETP_MIGRATION_SERVER_PORT` default **8082** |

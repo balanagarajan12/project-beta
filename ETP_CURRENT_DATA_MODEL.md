@@ -4,7 +4,7 @@ Repository snapshot of **actual** database schemas, JPA entities, and persistenc
 
 **Canonical data-model document** for this repository. It lives only at the repository root.
 
-**Last derived from:** Flyway V1–V14 in `etp-platform-service`, Flyway V1–V2 in `capabilities/etp-iam`, Flyway V1–V11 in `capabilities/etp-migration` (files in the repository; application to a running control plane is whatever Flyway has already recorded there), and the export service (no database).
+**Last derived from:** Flyway V1–V14 in `etp-platform-service`, Flyway V1–V2 in `capabilities/etp-iam`, Flyway V1–V11 in `capabilities/etp-migration`, and the export service (no database). A read-only check of container `etp-migration-postgres` (host port 55446, database `etp_migration`) shows migration V1–V9 successful. V10 and V11 are in the repository and are not in that history. Port 55433 was not inspected.
 
 ---
 

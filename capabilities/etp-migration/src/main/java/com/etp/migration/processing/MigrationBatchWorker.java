@@ -24,6 +24,7 @@ import com.etp.migration.connector.target.TargetLoadResult;
 import com.etp.migration.connector.target.TargetRecordError;
 import com.etp.migration.connector.target.UnsupportedTargetTypeException;
 import com.etp.migration.entity.LoadMode;
+import com.etp.migration.execution.EntityBatchLocator;
 import com.etp.migration.execution.EntityBatchOutcome;
 import com.etp.migration.execution.EntityFailureRecorder;
 import com.etp.migration.execution.EntityRelationshipBatchProcessor;
@@ -138,12 +139,13 @@ public class MigrationBatchWorker {
 		try (MigrationLogContext ignored = MigrationLogContext.forBatch(runId, batchId)) {
 			try {
 				transactionTemplate.executeWithoutResult(status -> migrationBatchQueueService.beginProcessing(claim));
+				long started = System.nanoTime();
 				log.info("Batch processing started runId={} batchId={} attempt={} workerId={}",
 						runId, batchId, claim.attempt(), claim.workerId());
 				ProcessBatchResponse response = processOwnedBatch(claim, runId);
-				log.info("Batch processing finished runId={} batchId={} status={} processedCount={} successCount={} failedCount={}",
+				log.info("Batch processing finished runId={} batchId={} status={} processedCount={} successCount={} failedCount={} durationMs={}",
 						runId, batchId, response.status(), response.totalRecords(), response.successRecords(),
-						response.failedRecords());
+						response.failedRecords(), (System.nanoTime() - started) / 1_000_000L);
 				return response;
 			} catch (BatchClaimLostException ex) {
 				log.warn("Batch claim lost runId={} batchId={} attempt={} workerId={}; the batch belongs to a newer "
@@ -171,11 +173,19 @@ public class MigrationBatchWorker {
 			throw ex;
 		} catch (RuntimeException ex) {
 			String code = errorCode(ex);
-			// Exception messages can quote source values, so only the code and type are logged; the message is
-			// stored on the batch and in migration_error.
-			log.warn("Batch processing failed runId={} batchId={} attempt={} errorCode={} exceptionType={} cause={}",
-					runId, batchId, claim.attempt(), code, ex.getClass().getName(), TargetFailureDiagnostics.describe(ex));
-			String message = truncate(ex.getMessage() == null ? "Batch processing failed" : ex.getMessage());
+			// A message can quote a source value, so the formatted line keeps only the code and type.
+			// A blank message is logged with the original throwable. The stored text is a safe diagnostic.
+			String raw = ex.getMessage();
+			if (raw == null || raw.isBlank()) {
+				log.warn("Batch processing failed runId={} batchId={} attempt={} errorCode={} exceptionType={} cause={}",
+						runId, batchId, claim.attempt(), code, ex.getClass().getName(),
+						TargetFailureDiagnostics.describe(ex), ex);
+			} else {
+				log.warn("Batch processing failed runId={} batchId={} attempt={} errorCode={} exceptionType={} cause={}",
+						runId, batchId, claim.attempt(), code, ex.getClass().getName(),
+						TargetFailureDiagnostics.describe(ex));
+			}
+			String message = truncate(MigrationErrorDetails.diagnostic(ex));
 			return transactionTemplate.execute(status -> {
 				MigrationBatch failed = migrationBatchQueueService.failBatch(claim, message);
 				persistBatchError(batchId, code, message, ex);
@@ -348,7 +358,23 @@ public class MigrationBatchWorker {
 				work.loadMode(),
 				work.targetConfiguration()));
 		entityFailureRecorder.save(work.run().getId(), work.batch().getId(), outcome.failures());
-		return outcome.counters();
+		return includePreparedRelationshipFailures(
+				outcome.counters(),
+				EntityBatchLocator.relationshipFailureCount(work.batch().getSourceLocator()));
+	}
+
+	static BatchCompletionCounters includePreparedRelationshipFailures(BatchCompletionCounters counters, int prepared) {
+		if (prepared <= 0) {
+			return counters;
+		}
+		return new BatchCompletionCounters(
+				counters.processedCount(),
+				counters.successCount(),
+				counters.duplicateCount(),
+				counters.validationFailureCount(),
+				counters.enrichmentFailureCount(),
+				counters.loadFailureCount(),
+				counters.rejectedCount() + prepared);
 	}
 
 	private TargetLoadResult loadTargets(BatchWork work, List<LoadableTargetRecord> loadable) {
@@ -395,11 +421,23 @@ public class MigrationBatchWorker {
 				entity.setErrorType(pending.error().errorType());
 				entity.setSourceRecordKey(String.valueOf(pending.sourceRecordNumber()));
 				entity.setFieldName(pending.error().fieldName());
-				entity.setErrorMessage(truncate(pending.error().message()));
-				entity.setErrorDetails(pending.error().details() == null
+				entity.setErrorMessage(truncate(MigrationErrorDetails.recordMessage(pending.error().message())));
+				Map<String, Object> details = pending.error().details() == null
 						? new HashMap<>()
-						: new HashMap<>(pending.error().details()));
+						: new HashMap<>(pending.error().details());
+				details.putIfAbsent("category", "RECORD");
+				entity.setErrorDetails(MigrationErrorDetails.publicDetails(details));
 				entity.setRetryable(pending.error().retryable());
+				if (migrationErrorRepository
+						.existsByMigrationRun_IdAndMigrationBatch_IdAndSourceRecordKeyAndStageAndErrorCodeAndErrorMessage(
+								run.getId(),
+								batch.getId(),
+								entity.getSourceRecordKey(),
+								entity.getStage(),
+								entity.getErrorCode(),
+								entity.getErrorMessage())) {
+					continue;
+				}
 				entities.add(entity);
 			}
 			migrationErrorRepository.saveAll(entities);
@@ -440,6 +478,11 @@ public class MigrationBatchWorker {
 		MigrationStage stage = code != null && code.startsWith("MIGRATION_TARGET")
 				? MigrationStage.LOAD
 				: MigrationStage.EXTRACT;
+		if (migrationErrorRepository
+				.existsByMigrationRun_IdAndMigrationBatch_IdAndStageAndErrorCodeAndErrorMessageAndSourceRecordKeyIsNull(
+						run.getId(), batchId, stage, code, message)) {
+			return;
+		}
 		MigrationError entity = new MigrationError();
 		entity.setMigrationRun(run);
 		entity.setMigrationBatch(batch);
@@ -447,8 +490,11 @@ public class MigrationBatchWorker {
 		entity.setErrorCode(code);
 		entity.setErrorType("BATCH_FAILED");
 		entity.setErrorMessage(truncate(message));
-		entity.setErrorDetails(MigrationErrorDetails.collect(
-				failure, code, stage.name(), run.getId(), batchId, targetEntity, true));
+		Map<String, Object> details = MigrationErrorDetails.collect(
+				failure, code, stage.name(), run.getId(), batchId, targetEntity, true);
+		details.put("category", "BATCH");
+		details.put("location", TargetFailureDiagnostics.location(failure));
+		entity.setErrorDetails(MigrationErrorDetails.publicDetails(details));
 		entity.setRetryable(true);
 		migrationErrorRepository.save(entity);
 	}

@@ -59,11 +59,15 @@ public class EntityRelationshipBatchProcessor {
 					"Entity batch record count does not match the stored work items");
 		}
 		Set<EntityIdentity> wanted = new LinkedHashSet<>();
+		long[] sourceRecords = new long[plan.workItems().size()];
+		int index = 0;
 		for (ExecutionWorkItem item : plan.workItems()) {
 			wanted.add(new EntityIdentity(item.entityName(), item.sourceIdentity()));
+			sourceRecords[index++] = item.sourceRecordNumber();
 		}
+		com.etp.migration.processing.PipelineTiming.set("batchRecords", plan.workItems().size());
 		EntityCsvRecords records = csvAccess.open(batch.sourceConfiguration(), mapping, batch.rules());
-		Map<EntityIdentity, com.etp.migration.extraction.EntityRecord> payloads = records.matching(wanted);
+		Map<EntityIdentity, com.etp.migration.extraction.EntityRecord> payloads = records.matching(wanted, sourceRecords);
 		try {
 			MigrationTargetConnector target = targetConnectorRegistry.require(batch.targetType());
 			TargetIdentityLookup lookup = identityLookups.getIfAvailable(this::unresolvedLookup);

@@ -15,10 +15,12 @@ import com.etp.migration.entity.PromotionBatchStatus;
 import com.etp.migration.entity.PromotionStatus;
 import com.etp.migration.promotion.dto.ExecutePromotionResponse;
 import com.etp.migration.repository.MigrationPromotionBatchRepository;
+import com.etp.migration.repository.MigrationPromotionBatchRepository.PromotionBatchStatusCount;
 import com.etp.migration.repository.MigrationPromotionRepository;
 import com.etp.migration.repository.MigrationRunRepository;
 import com.etp.migration.run.MigrationRunNotFoundException;
 import java.lang.reflect.Field;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -26,6 +28,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.domain.PageImpl;
 
 @ExtendWith(MockitoExtension.class)
 class PromotionQueryServiceTest {
@@ -43,7 +46,7 @@ class PromotionQueryServiceTest {
 
 	@BeforeEach
 	void setUp() {
-		service = new PromotionQueryService(migrationRunRepository, promotionRepository, promotionBatchRepository);
+		service = new PromotionQueryService(migrationRunRepository, promotionRepository, promotionBatchRepository, null);
 		runId = UUID.fromString("87492c12-d598-434d-b0ea-58da2e2e0b44");
 		promotionId = UUID.fromString("89b012a6-a857-41b0-be96-168e4de139da");
 	}
@@ -58,7 +61,7 @@ class PromotionQueryServiceTest {
 		MigrationPromotionBatch batch = promotionBatch(batch(1664L, 1), PromotionBatchStatus.ELIGIBLE, 3, 0, 0);
 		when(migrationRunRepository.existsById(runId)).thenReturn(true);
 		when(promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId)).thenReturn(List.of(promotion));
-		when(promotionBatchRepository.findByPromotion_Id(promotionId)).thenReturn(List.of(batch));
+		when(promotionBatchRepository.summarize(promotionId)).thenReturn(List.of(count(PromotionBatchStatus.ELIGIBLE, 1, 3)));
 
 		ExecutePromotionResponse response = service.get(runId);
 
@@ -67,12 +70,10 @@ class PromotionQueryServiceTest {
 		assertThat(response.status()).isEqualTo(PromotionStatus.READY);
 		assertThat(response.eligibleBatches()).isEqualTo(1);
 		assertThat(response.promotedBatches()).isZero();
-		assertThat(response.batches()).singleElement().satisfies(item -> {
-			assertThat(item.batchId()).isEqualTo(1664L);
-			assertThat(item.promotionStatus()).isEqualTo(PromotionBatchStatus.ELIGIBLE);
-			assertThat(item.eligibleRecordCount()).isEqualTo(3L);
-			assertThat(item.promotedRecordCount()).isZero();
-		});
+		assertThat(response.eligibleRecords()).isEqualTo(3L);
+		assertThat(response.batchCounts()).containsEntry("ELIGIBLE", 1L);
+		assertThat(response.batches()).isEmpty();
+		verify(promotionBatchRepository, never()).findByPromotion_Id(any());
 		assertNoWrites();
 	}
 
@@ -88,13 +89,14 @@ class PromotionQueryServiceTest {
 		MigrationPromotionBatch batch = promotionBatch(batch(1664L, 1), PromotionBatchStatus.PROMOTED, 3, 3, 0);
 		when(migrationRunRepository.existsById(runId)).thenReturn(true);
 		when(promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId)).thenReturn(List.of(promotion));
-		when(promotionBatchRepository.findByPromotion_Id(promotionId)).thenReturn(List.of(batch));
+		when(promotionBatchRepository.summarize(promotionId)).thenReturn(List.of(count(PromotionBatchStatus.PROMOTED, 1, 3)));
 
 		ExecutePromotionResponse response = service.get(runId);
 
 		assertThat(response.status()).isEqualTo(PromotionStatus.PROMOTED);
 		assertThat(response.promotedRecords()).isEqualTo(3L);
-		assertThat(response.batches().getFirst().promotionStatus()).isEqualTo(PromotionBatchStatus.PROMOTED);
+		assertThat(response.batchCounts()).containsEntry("PROMOTED", 1L);
+		assertThat(response.batches()).isEmpty();
 		assertNoWrites();
 	}
 
@@ -108,21 +110,27 @@ class PromotionQueryServiceTest {
 		promotion.setFailedBatches(1);
 		promotion.setPromotedRecords(1L);
 		promotion.setFailedRecords(1L);
+		promotion.setErrorCode("MIGRATION_PROMOTION_PARTIAL_FAILURE");
+		promotion.setErrorMessage("Promotion completed with one or more failed batches");
 		MigrationPromotionBatch later = promotionBatch(batch(200L, 2), PromotionBatchStatus.FAILED, 1, 0, 1);
 		later.setErrorCode("PROMOTION_BATCH_FAILED");
 		later.setErrorMessage("unique violation");
 		MigrationPromotionBatch earlier = promotionBatch(batch(100L, 1), PromotionBatchStatus.PROMOTED, 1, 1, 0);
 		when(migrationRunRepository.existsById(runId)).thenReturn(true);
 		when(promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId)).thenReturn(List.of(promotion));
-		when(promotionBatchRepository.findByPromotion_Id(promotionId)).thenReturn(List.of(later, earlier));
+		when(promotionBatchRepository.summarize(promotionId)).thenReturn(List.of(
+				count(PromotionBatchStatus.PROMOTED, 1, 1),
+				count(PromotionBatchStatus.FAILED, 1, 1)));
 
 		ExecutePromotionResponse response = service.get(runId);
 
 		assertThat(response.status()).isEqualTo(PromotionStatus.PARTIALLY_PROMOTED);
+		assertThat(response.errorCode()).isEqualTo("MIGRATION_PROMOTION_PARTIAL_FAILURE");
+		assertThat(response.errorMessage()).isEqualTo("Promotion completed with one or more failed batches");
 		assertThat(response.failedBatches()).isEqualTo(1);
-		assertThat(response.batches()).extracting(item -> item.batchId()).containsExactly(100L, 200L);
-		assertThat(response.batches().get(1).promotionStatus()).isEqualTo(PromotionBatchStatus.FAILED);
-		assertThat(response.batches().get(1).errorCode()).isEqualTo("PROMOTION_BATCH_FAILED");
+		assertThat(response.promotedBatches()).isEqualTo(1);
+		assertThat(response.batchCounts()).containsEntry("FAILED", 1L).containsEntry("PROMOTED", 1L);
+		assertThat(response.batches()).isEmpty();
 		assertNoWrites();
 	}
 
@@ -134,7 +142,7 @@ class PromotionQueryServiceTest {
 		MigrationPromotion newest = promotion(run, PromotionStatus.PROMOTED);
 		when(migrationRunRepository.existsById(runId)).thenReturn(true);
 		when(promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId)).thenReturn(List.of(newest, older));
-		when(promotionBatchRepository.findByPromotion_Id(promotionId)).thenReturn(List.of());
+		when(promotionBatchRepository.summarize(promotionId)).thenReturn(List.of());
 
 		ExecutePromotionResponse response = service.get(runId);
 
@@ -151,6 +159,32 @@ class PromotionQueryServiceTest {
 				.isInstanceOf(PromotionNotFoundException.class)
 				.hasMessage("Promotion not found for migration run " + runId);
 		assertNoWrites();
+	}
+
+	@Test
+	void listBatchesReportsTheLatestAttemptDuration() {
+		MigrationRun run = run();
+		MigrationPromotion promotion = promotion(run, PromotionStatus.PROMOTING);
+		Instant started = Instant.parse("2026-10-22T01:00:00Z");
+		Instant completed = Instant.parse("2026-10-22T01:00:03Z");
+		PromotionBatchRow finished = new PromotionBatchRow(
+				1664L, 1, PromotionBatchStatus.FAILED, 3L, 0L, 3L, 0L,
+				started, completed, "MIGRATION_PROMOTION_BATCH_FAILED", "parent missing");
+		PromotionBatchRow active = new PromotionBatchRow(
+				1665L, 2, PromotionBatchStatus.PROMOTING, 3L, 0L, 0L, 0L,
+				started, null, null, null);
+		when(migrationRunRepository.existsById(runId)).thenReturn(true);
+		when(promotionRepository.findByMigrationRun_IdOrderByCreatedAtDesc(runId)).thenReturn(List.of(promotion));
+		when(promotionBatchRepository.pageByRun(org.mockito.ArgumentMatchers.eq(runId), org.mockito.ArgumentMatchers.any()))
+				.thenReturn(new PageImpl<>(List.of(finished, active)));
+
+		var page = service.listBatches(runId, 0, 20, " ");
+
+		assertThat(page.content().get(0).durationMillis()).isEqualTo(3_000L);
+		assertThat(page.content().get(0).completedAt()).isEqualTo(completed);
+		assertThat(page.content().get(0).errorMessage()).isEqualTo("parent missing");
+		assertThat(page.content().get(1).completedAt()).isNull();
+		assertThat(page.content().get(1).durationMillis()).isNull();
 	}
 
 	@Test
@@ -181,6 +215,25 @@ class PromotionQueryServiceTest {
 		promotion.setMigrationRun(run);
 		promotion.setStatus(status);
 		return promotion;
+	}
+
+	private static PromotionBatchStatusCount count(PromotionBatchStatus status, long batches, long eligibleRecords) {
+		return new PromotionBatchStatusCount() {
+			@Override
+			public PromotionBatchStatus getStatus() {
+				return status;
+			}
+
+			@Override
+			public long getBatches() {
+				return batches;
+			}
+
+			@Override
+			public long getEligibleRecords() {
+				return eligibleRecords;
+			}
+		};
 	}
 
 	private static MigrationPromotionBatch promotionBatch(

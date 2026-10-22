@@ -97,9 +97,7 @@ class SourceInspectionIntegrationTest {
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.totalElements").value(3));
 
-		var batches = migrationBatchRepository.findByMigrationRun_Id(
-				runUuid,
-				org.springframework.data.domain.PageRequest.of(0, 20)).getContent();
+		var batches = migrationBatchRepository.findByMigrationRun_IdOrderByBatchNumberAsc(runUuid);
 		assertThat(batches.get(0).getSourceLocator().get("type")).isEqualTo("CSV_ROW_RANGE");
 		assertThat(batches.get(0).getSourceLocator().get("objectKey")).isEqualTo(objectKey);
 		assertThat(((Number) batches.get(0).getSourceLocator().get("startRecord")).longValue()).isEqualTo(1L);

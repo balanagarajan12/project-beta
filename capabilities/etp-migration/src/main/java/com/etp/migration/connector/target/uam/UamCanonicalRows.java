@@ -5,31 +5,27 @@ import com.etp.migration.connector.target.TargetInfrastructureException;
 import com.etp.migration.mapping.EntityLoadOrder;
 import com.etp.migration.mapping.InvalidEntityRelationshipConfigurationException;
 import com.etp.migration.processing.MigrationErrorCodes;
-import java.math.BigDecimal;
-import java.time.DateTimeException;
-import java.time.Instant;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Turns entity payloads into ordered canonical inserts.
  *
- * Column names come from the payload and from this connector's configuration:
- * the id column is the payload {@code targetKey}, attributes are the mapped target fields,
- * foreign keys are {@code foreignKeys}, and {@code loadTimestampColumns} fills a blank column
- * with one load timestamp for the batch. {@code columnTypes} is a planning fallback for numeric
- * and timestamptz values. A live canonical load replaces that with the target table's catalog types.
- * Parent ids are the configured parent target identities.
+ * The physical table is the payload {@code targetEntity}. The id column is {@code targetKey}.
+ * Attributes are the mapped target fields. Foreign keys come from each staged relationship
+ * {@code targetForeignKey}. Load order is the relationship graph, parents before children.
+ * Column types and required timestamps are applied later from the target catalog.
  */
 final class UamCanonicalRows {
 
 	static final String MODE = "UAM";
+	private static final Logger log = LoggerFactory.getLogger(UamCanonicalRows.class);
 	private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
 
 	private UamCanonicalRows() {
@@ -40,25 +36,29 @@ final class UamCanonicalRows {
 	}
 
 	static PlannedLoad planDetailed(Map<String, Object> configuration, List<LoadableTargetRecord> records) {
-		Settings settings = settings(configuration);
-		OffsetDateTime loadedAt = OffsetDateTime.now(ZoneOffset.UTC);
+		String schema = schema(configuration);
 		List<MutableRow> rows = new ArrayList<>();
+		Map<String, String> tables = new LinkedHashMap<>();
 		if (records != null) {
 			for (LoadableTargetRecord record : records) {
-				rows.add(baseRow(settings, record));
+				MutableRow row = baseRow(record);
+				String existing = tables.putIfAbsent(row.entityName(), row.table());
+				if (existing != null && !existing.equals(row.table())) {
+					throw configurationError(
+							"Entity '" + row.entityName() + "' maps to more than one target table");
+				}
+				rows.add(row);
 			}
 		}
-		List<ForeignKey> foreignKeys = settings.foreignKeys().isEmpty()
-				? foreignKeysFromRecords(records)
-				: settings.foreignKeys();
-		List<String> loadOrder = settings.loadOrder().isEmpty()
-				? derivedOrder(rows, foreignKeys)
-				: settings.loadOrder();
+		List<ForeignKey> foreignKeys = foreignKeysFromRecords(records);
+		List<String> loadOrder = derivedOrder(rows, foreignKeys);
 		Map<String, MutableRow> byIdentity = new LinkedHashMap<>();
 		Map<String, List<MutableRow>> byEntity = new LinkedHashMap<>();
+		Map<String, String> targetKeys = new LinkedHashMap<>();
 		for (MutableRow row : rows) {
 			byIdentity.put(row.entityName() + "\u0000" + row.targetIdentity(), row);
 			byEntity.computeIfAbsent(row.entityName(), ignored -> new ArrayList<>()).add(row);
+			targetKeys.putIfAbsent(row.entityName(), row.targetKey());
 		}
 		List<InsertGroup> groups = new ArrayList<>();
 		for (String entityName : loadOrder) {
@@ -68,17 +68,15 @@ final class UamCanonicalRows {
 			}
 			List<PreparedRow> prepared = new ArrayList<>();
 			for (MutableRow row : entityRows) {
-				applyForeignKeys(row, foreignKeys, byIdentity);
-				applyTimestamps(settings, row, loadedAt);
-				applyColumnTypes(settings, row);
+				applyForeignKeys(row, foreignKeys, byIdentity, targetKeys);
 				prepared.add(new PreparedRow(row.entityName(), row.table(), row.values()));
 			}
-			groups.addAll(group(settings.schema(), prepared));
+			groups.addAll(group(schema, prepared));
 		}
 		if (!byEntity.isEmpty()) {
-			throw configurationError("Canonical loadOrder does not include every entity in the batch");
+			throw configurationError("Canonical load order does not include every entity in the batch");
 		}
-		return new PlannedLoad(List.copyOf(groups), bindings(settings, foreignKeys));
+		return new PlannedLoad(List.copyOf(groups), bindings(schema, tables, foreignKeys));
 	}
 
 	private static List<InsertGroup> group(String schema, List<PreparedRow> rows) {
@@ -95,16 +93,14 @@ final class UamCanonicalRows {
 		return List.copyOf(groups.values());
 	}
 
-	private static MutableRow baseRow(Settings settings, LoadableTargetRecord record) {
+	private static MutableRow baseRow(LoadableTargetRecord record) {
 		if (record == null || record.targetRecord() == null || record.targetRecord().fields() == null) {
 			throw configurationError("Canonical target payload is required");
 		}
 		Map<String, Object> payload = record.targetRecord().fields();
 		String entityName = requiredText(payload.get("entity"), "Canonical payload entity is required");
-		String table = settings.tables().get(entityName);
-		if (table == null) {
-			throw configurationError("Canonical table is not configured for entity '" + entityName + "'");
-		}
+		String table = requiredText(payload.get("targetEntity"), "Canonical payload targetEntity is required");
+		requireIdentifier(table, "Canonical target entity is invalid");
 		String idColumn = requiredText(payload.get("targetKey"), "Canonical payload targetKey is required");
 		requireIdentifier(idColumn, "Canonical target key is invalid");
 		String targetIdentity = requiredText(payload.get("targetIdentity"), "Canonical payload targetIdentity is required");
@@ -130,27 +126,33 @@ final class UamCanonicalRows {
 	private static void applyForeignKeys(
 			MutableRow row,
 			List<ForeignKey> foreignKeys,
-			Map<String, MutableRow> byIdentity) {
+			Map<String, MutableRow> byIdentity,
+			Map<String, String> targetKeys) {
 		for (ForeignKey foreignKey : foreignKeys) {
 			if (!row.entityName().equals(foreignKey.entity())) {
 				continue;
 			}
-			row.values().put(
-					foreignKey.column(),
-					referencedValue(row, foreignKey, byIdentity));
+			row.values().put(foreignKey.column(), referencedValue(row, foreignKey, byIdentity, targetKeys));
 		}
 	}
 
 	private static Object referencedValue(
 			MutableRow row,
 			ForeignKey foreignKey,
-			Map<String, MutableRow> byIdentity) {
+			Map<String, MutableRow> byIdentity,
+			Map<String, String> targetKeys) {
 		String parentIdentity = parentTarget(row.payload(), row.entityName(), foreignKey.parent());
-		if (foreignKey.referencesColumn() == null) {
-			return parentIdentity;
-		}
 		MutableRow parent = byIdentity.get(foreignKey.parent() + "\u0000" + parentIdentity);
 		if (parent == null) {
+			String identityColumn = firstText(foreignKey.parentTargetKey(), targetKeys.get(foreignKey.parent()));
+			if (identityColumn != null && identityColumn.equals(foreignKey.referencesColumn())) {
+				log.warn(
+						"Canonical parent '{}' for entity '{}' is not in this batch; copying identity column '{}'",
+						foreignKey.parent(),
+						row.entityName(),
+						foreignKey.referencesColumn());
+				return parentIdentity;
+			}
 			throw configurationError(
 					"Canonical foreign key parent '" + foreignKey.parent()
 							+ "' was not resolved for entity '" + row.entityName() + "'");
@@ -167,27 +169,6 @@ final class UamCanonicalRows {
 							+ "' has no value on parent '" + foreignKey.parent() + "'");
 		}
 		return value;
-	}
-
-	private static void applyTimestamps(Settings settings, MutableRow row, OffsetDateTime loadedAt) {
-		for (LoadTimestamp loadTimestamp : settings.loadTimestamps()) {
-			if (!row.table().equals(loadTimestamp.table())) {
-				continue;
-			}
-			Object current = row.values().get(loadTimestamp.column());
-			if (current == null || (current instanceof String text && text.isBlank())) {
-				row.values().put(loadTimestamp.column(), loadedAt);
-			}
-		}
-	}
-
-	private static void applyColumnTypes(Settings settings, MutableRow row) {
-		for (ColumnType columnType : settings.columnTypes()) {
-			if (!row.table().equals(columnType.table()) || !row.values().containsKey(columnType.column())) {
-				continue;
-			}
-			row.values().put(columnType.column(), typed(columnType.type(), row.values().get(columnType.column())));
-		}
 	}
 
 	private static List<String> derivedOrder(List<MutableRow> rows, List<ForeignKey> foreignKeys) {
@@ -208,14 +189,14 @@ final class UamCanonicalRows {
 		}
 	}
 
-	private static List<ForeignKeyBinding> bindings(Settings settings, List<ForeignKey> foreignKeys) {
+	private static List<ForeignKeyBinding> bindings(
+			String schema,
+			Map<String, String> tables,
+			List<ForeignKey> foreignKeys) {
 		List<ForeignKeyBinding> bindings = new ArrayList<>();
 		for (ForeignKey foreignKey : foreignKeys) {
-			if (foreignKey.referencesColumn() == null) {
-				continue;
-			}
-			String childTable = settings.tables().get(foreignKey.entity());
-			String parentTable = settings.tables().get(foreignKey.parent());
+			String childTable = tables.get(foreignKey.entity());
+			String parentTable = firstText(tables.get(foreignKey.parent()), foreignKey.parentTable());
 			if (childTable == null) {
 				throw configurationError("Canonical table is not configured for entity '" + foreignKey.entity() + "'");
 			}
@@ -223,7 +204,7 @@ final class UamCanonicalRows {
 				throw configurationError("Canonical table is not configured for entity '" + foreignKey.parent() + "'");
 			}
 			bindings.add(new ForeignKeyBinding(
-					settings.schema(),
+					schema,
 					childTable,
 					foreignKey.column(),
 					parentTable,
@@ -261,47 +242,22 @@ final class UamCanonicalRows {
 						"Canonical foreign key referencesColumn is required");
 				requireIdentifier(column, "Canonical foreign key column is invalid");
 				requireIdentifier(referencesColumn, "Canonical foreign key referencesColumn is invalid");
+				String parentTargetKey = text(relationship.get("parentTargetKey"));
+				if (parentTargetKey != null) {
+					requireIdentifier(parentTargetKey, "Canonical parent target key is invalid");
+				}
 				foreignKeys.putIfAbsent(
 						entityName + "\u0000" + parent + "\u0000" + column,
-						new ForeignKey(entityName, parent, column, referencesColumn));
+						new ForeignKey(
+								entityName,
+								parent,
+								column,
+								referencesColumn,
+								parentTargetKey,
+								text(relationship.get("parentTargetEntity"))));
 			}
 		}
 		return List.copyOf(foreignKeys.values());
-	}
-
-	private static Object typed(String type, Object value) {
-		if (value == null) {
-			return null;
-		}
-		if ("numeric".equals(type)) {
-			if (value instanceof BigDecimal decimal) {
-				return decimal;
-			}
-			try {
-				return new BigDecimal(value.toString().trim());
-			} catch (NumberFormatException ex) {
-				throw configurationError("Canonical numeric value is invalid");
-			}
-		}
-		if ("timestamptz".equals(type)) {
-			if (value instanceof OffsetDateTime timestamp) {
-				return timestamp;
-			}
-			if (value instanceof Instant instant) {
-				return instant.atOffset(ZoneOffset.UTC);
-			}
-			String text = value.toString().trim();
-			try {
-				return OffsetDateTime.parse(text);
-			} catch (DateTimeException ignored) {
-				try {
-					return Instant.parse(text).atOffset(ZoneOffset.UTC);
-				} catch (DateTimeException ex) {
-					throw configurationError("Canonical timestamp value is invalid");
-				}
-			}
-		}
-		throw configurationError("Canonical column type is invalid");
 	}
 
 	private static String parentTarget(Map<String, Object> payload, String entityName, String parentEntity) {
@@ -324,7 +280,7 @@ final class UamCanonicalRows {
 				"Canonical foreign key parent '" + parentEntity + "' was not resolved for entity '" + entityName + "'");
 	}
 
-	private static Settings settings(Map<String, Object> configuration) {
+	private static String schema(Map<String, Object> configuration) {
 		if (configuration == null) {
 			throw configurationError("Canonical target configuration is required");
 		}
@@ -332,134 +288,13 @@ final class UamCanonicalRows {
 		if (!(targetValue instanceof Map<?, ?> target)) {
 			throw configurationError("Canonical target configuration is required");
 		}
-		if (!MODE.equals(text(target.get("mode")))) {
-			throw configurationError("Canonical target mode must be UAM");
+		String mode = text(target.get("mode"));
+		if (!MODE.equals(mode) && !"POSTGRESQL".equals(mode)) {
+			throw configurationError("Canonical target mode must be UAM or POSTGRESQL");
 		}
 		String schema = requiredText(target.get("schema"), "Canonical target schema is required");
 		requireIdentifier(schema, "Canonical target schema is invalid");
-		Map<String, String> tables = identifiers(targetMap(configuration.get("tables")), "Canonical table");
-		if (tables.isEmpty()) {
-			throw configurationError("Canonical tables are required");
-		}
-		List<String> loadOrder = stringList(configuration.get("loadOrder"));
-		return new Settings(
-				schema,
-				tables,
-				loadOrder,
-				foreignKeys(configuration.get("foreignKeys")),
-				loadTimestamps(configuration.get("loadTimestampColumns")),
-				columnTypes(configuration.get("columnTypes")));
-	}
-
-	private static List<ColumnType> columnTypes(Object value) {
-		if (value == null) {
-			return List.of();
-		}
-		if (!(value instanceof List<?> list)) {
-			throw configurationError("Canonical columnTypes must be a list");
-		}
-		List<ColumnType> types = new ArrayList<>();
-		for (Object item : list) {
-			if (!(item instanceof Map<?, ?> raw)) {
-				throw configurationError("Canonical column type must be an object");
-			}
-			String table = requiredText(raw.get("table"), "Canonical column type table is required");
-			String column = requiredText(raw.get("column"), "Canonical column type column is required");
-			String type = requiredText(raw.get("type"), "Canonical column type is required");
-			requireIdentifier(table, "Canonical column type table is invalid");
-			requireIdentifier(column, "Canonical column type column is invalid");
-			if (!"numeric".equals(type) && !"timestamptz".equals(type)) {
-				throw configurationError("Canonical column type is invalid");
-			}
-			types.add(new ColumnType(table, column, type));
-		}
-		return List.copyOf(types);
-	}
-
-	private static List<LoadTimestamp> loadTimestamps(Object value) {
-		if (value == null) {
-			return List.of();
-		}
-		if (!(value instanceof List<?> list)) {
-			throw configurationError("Canonical loadTimestampColumns must be a list");
-		}
-		List<LoadTimestamp> timestamps = new ArrayList<>();
-		for (Object item : list) {
-			if (!(item instanceof Map<?, ?> raw)) {
-				throw configurationError("Canonical load timestamp must be an object");
-			}
-			String table = requiredText(raw.get("table"), "Canonical load timestamp table is required");
-			String column = requiredText(raw.get("column"), "Canonical load timestamp column is required");
-			requireIdentifier(table, "Canonical load timestamp table is invalid");
-			requireIdentifier(column, "Canonical load timestamp column is invalid");
-			timestamps.add(new LoadTimestamp(table, column));
-		}
-		return List.copyOf(timestamps);
-	}
-
-	private static List<ForeignKey> foreignKeys(Object value) {
-		if (value == null) {
-			return List.of();
-		}
-		if (!(value instanceof List<?> list)) {
-			throw configurationError("Canonical foreignKeys must be a list");
-		}
-		List<ForeignKey> foreignKeys = new ArrayList<>();
-		for (Object item : list) {
-			if (!(item instanceof Map<?, ?> raw)) {
-				throw configurationError("Canonical foreign key must be an object");
-			}
-			String entity = requiredText(raw.get("entity"), "Canonical foreign key entity is required");
-			String parent = requiredText(raw.get("parent"), "Canonical foreign key parent is required");
-			String column = requiredText(raw.get("column"), "Canonical foreign key column is required");
-			requireIdentifier(column, "Canonical foreign key column is invalid");
-			String referencesColumn = text(raw.get("referencesColumn"));
-			if (referencesColumn != null) {
-				requireIdentifier(referencesColumn, "Canonical foreign key referencesColumn is invalid");
-			}
-			foreignKeys.add(new ForeignKey(entity, parent, column, referencesColumn));
-		}
-		return List.copyOf(foreignKeys);
-	}
-
-	private static Map<String, String> identifiers(Map<String, String> values, String label) {
-		Map<String, String> checked = new LinkedHashMap<>();
-		for (Map.Entry<String, String> entry : values.entrySet()) {
-			requireIdentifier(entry.getValue(), label + " is invalid");
-			checked.put(entry.getKey(), entry.getValue());
-		}
-		return Map.copyOf(checked);
-	}
-
-	private static Map<String, String> targetMap(Object value) {
-		if (!(value instanceof Map<?, ?> raw)) {
-			return Map.of();
-		}
-		Map<String, String> tables = new LinkedHashMap<>();
-		for (Map.Entry<?, ?> entry : raw.entrySet()) {
-			if (entry.getKey() == null || entry.getValue() == null) {
-				continue;
-			}
-			String entity = entry.getKey().toString().trim();
-			String table = entry.getValue().toString().trim();
-			if (!entity.isEmpty() && !table.isEmpty()) {
-				tables.put(entity, table);
-			}
-		}
-		return tables;
-	}
-
-	private static List<String> stringList(Object value) {
-		if (!(value instanceof List<?> list)) {
-			return List.of();
-		}
-		List<String> values = new ArrayList<>();
-		for (Object item : list) {
-			if (item != null && !item.toString().isBlank()) {
-				values.add(item.toString().trim());
-			}
-		}
-		return List.copyOf(values);
+		return schema;
 	}
 
 	private static void requireIdentifier(String value, String message) {
@@ -481,6 +316,10 @@ final class UamCanonicalRows {
 			return null;
 		}
 		return value.toString().trim();
+	}
+
+	private static String firstText(String preferred, String fallback) {
+		return preferred != null ? preferred : fallback;
 	}
 
 	private static TargetInfrastructureException configurationError(String message) {
@@ -513,21 +352,12 @@ final class UamCanonicalRows {
 			Map<String, Object> values) {
 	}
 
-	private record Settings(
-			String schema,
-			Map<String, String> tables,
-			List<String> loadOrder,
-			List<ForeignKey> foreignKeys,
-			List<LoadTimestamp> loadTimestamps,
-			List<ColumnType> columnTypes) {
-	}
-
-	private record ForeignKey(String entity, String parent, String column, String referencesColumn) {
-	}
-
-	private record LoadTimestamp(String table, String column) {
-	}
-
-	private record ColumnType(String table, String column, String type) {
+	private record ForeignKey(
+			String entity,
+			String parent,
+			String column,
+			String referencesColumn,
+			String parentTargetKey,
+			String parentTable) {
 	}
 }

@@ -1,6 +1,7 @@
 package com.etp.migration.run;
 
 import com.etp.migration.run.dto.CreateMigrationRunRequest;
+import com.etp.migration.run.dto.MigrationExecutionResponse;
 import com.etp.migration.run.dto.MigrationRunResponse;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -30,9 +31,9 @@ public class MigrationExecutionController {
 
 	@Operation(
 			summary = "Execute a migration",
-			description = "Creates a QUEUED run for an ACTIVE definition, prepares the source, and processes all eligible batches synchronously. Does not activate the definition, promote, or reconcile.")
+			description = "Creates a QUEUED run for an ACTIVE definition and accepts it for background preparation and batch processing. Returns before that work finishes. Does not activate the definition, promote, or reconcile. Poll GET /api/v1/migration-runs/{runId} for progress.")
 	@ApiResponses({
-			@ApiResponse(responseCode = "201", description = "Run created and processed; body is the final MigrationRunResponse"),
+			@ApiResponse(responseCode = "202", description = "Run accepted. Body is the acceptance snapshot, not the finished run."),
 			@ApiResponse(responseCode = "404", description = "Migration definition not found"),
 			@ApiResponse(responseCode = "409", description = "Definition is not ACTIVE")
 	})
@@ -40,12 +41,13 @@ public class MigrationExecutionController {
 			value = "/{migrationId}/execute",
 			consumes = MediaType.APPLICATION_JSON_VALUE,
 			produces = MediaType.APPLICATION_JSON_VALUE)
-	public ResponseEntity<MigrationRunResponse> execute(
+	public ResponseEntity<MigrationExecutionResponse> execute(
 			@PathVariable("migrationId") UUID migrationId,
 			@Valid @RequestBody(required = false) CreateMigrationRunRequest request) {
-		MigrationRunResponse completed = migrationExecutionService.execute(migrationId, request);
-		return ResponseEntity
-				.created(URI.create("/api/v1/migration-runs/" + completed.id()))
-				.body(completed);
+		MigrationRunResponse accepted = migrationExecutionService.execute(migrationId, request);
+		MigrationExecutionResponse body = MigrationExecutionResponse.from(accepted);
+		return ResponseEntity.accepted()
+				.location(URI.create(body.statusUrl()))
+				.body(body);
 	}
 }

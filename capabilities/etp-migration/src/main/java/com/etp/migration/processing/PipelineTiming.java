@@ -75,6 +75,14 @@ public final class PipelineTiming {
 		timing.nanos.merge(stage, elapsedNanos, Long::sum);
 	}
 
+	public static void add(String counter, long delta) {
+		PipelineTiming timing = CURRENT.get();
+		if (timing == null || counter == null || delta == 0L) {
+			return;
+		}
+		timing.counters.merge(counter, delta, Long::sum);
+	}
+
 	public static void increment(String counter) {
 		PipelineTiming timing = CURRENT.get();
 		if (timing == null || counter == null) {
@@ -126,6 +134,7 @@ public final class PipelineTiming {
 		MAPPING("mappingMs"),
 		VALIDATION("validationMs"),
 		TARGET_LOAD("targetLoadMs"),
+		STAGING_READ("stagingReadMs"),
 		RECONCILIATION("reconciliationMs");
 
 		private final String jsonName;

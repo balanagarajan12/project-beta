@@ -60,6 +60,7 @@ class PreparationFailureRecorderTest {
 		recorder.record(runId, new IllegalStateException("source file is missing"));
 
 		assertThat(run.getStatus()).isEqualTo(MigrationRunStatus.FAILED);
+		assertThat(run.getErrorMessage()).isEqualTo("source file is missing");
 		assertThat(run.getStartedAt()).isNotNull();
 		assertThat(run.getCompletedAt()).isNotNull();
 		ArgumentCaptor<MigrationError> saved = ArgumentCaptor.forClass(MigrationError.class);
@@ -74,6 +75,39 @@ class PreparationFailureRecorderTest {
 	}
 
 	@Test
+	void repeatedPreparationFailureDoesNotInsertASecondError() {
+		UUID runId = UUID.randomUUID();
+		MigrationRun run = queuedRun(runId, Map.of());
+		when(migrationRunRepository.findById(runId)).thenReturn(Optional.of(run));
+		when(migrationBatchRepository.countByMigrationRun_IdAndStatusIn(eq(runId), any())).thenReturn(0L);
+		when(migrationErrorRepository
+				.existsByMigrationRun_IdAndMigrationBatchIsNullAndStageAndErrorCodeAndErrorMessageAndSourceRecordKeyIsNull(
+						eq(runId), any(), any(), any()))
+				.thenReturn(true);
+
+		recorder.record(runId, new IllegalStateException("source file is missing"));
+
+		assertThat(run.getStatus()).isEqualTo(MigrationRunStatus.FAILED);
+		assertThat(run.getErrorMessage()).isEqualTo("source file is missing");
+		verify(migrationErrorRepository, never()).save(any());
+	}
+
+	@Test
+	void runningUnpreparedRunIsFailed() {
+		UUID runId = UUID.randomUUID();
+		MigrationRun run = queuedRun(runId, Map.of());
+		run.setStatus(MigrationRunStatus.RUNNING);
+		when(migrationRunRepository.findById(runId)).thenReturn(Optional.of(run));
+		when(migrationBatchRepository.countByMigrationRun_IdAndStatusIn(eq(runId), any())).thenReturn(0L);
+
+		recorder.record(runId, new IllegalStateException("source count timed out"));
+
+		assertThat(run.getStatus()).isEqualTo(MigrationRunStatus.FAILED);
+		assertThat(run.getCompletedAt()).isNotNull();
+		verify(migrationErrorRepository).save(any(MigrationError.class));
+	}
+
+	@Test
 	void inFlightBatchesKeepTheRunQueued() {
 		UUID runId = UUID.randomUUID();
 		MigrationRun run = queuedRun(runId, Map.of());
@@ -83,6 +117,7 @@ class PreparationFailureRecorderTest {
 		recorder.record(runId, new IllegalStateException("planning failed"));
 
 		assertThat(run.getStatus()).isEqualTo(MigrationRunStatus.QUEUED);
+		assertThat(run.getErrorMessage()).isNull();
 		verify(migrationErrorRepository).save(any(MigrationError.class));
 	}
 

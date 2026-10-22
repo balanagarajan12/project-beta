@@ -1,5 +1,6 @@
 package com.etp.migration.execution;
 
+import com.etp.migration.connector.source.csv.SourceByteProgress;
 import com.etp.migration.entity.MigrationMappingRule;
 import com.etp.migration.entity.MigrationStage;
 import com.etp.migration.extraction.EntityExtractionFailure;
@@ -17,6 +18,7 @@ import com.etp.migration.scope.LogicalMigrationScopeBuilder;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 import org.springframework.stereotype.Component;
@@ -42,6 +44,24 @@ public class EntityRelationshipPlanSource {
 		this.relationshipResolver = relationshipResolver;
 		this.scopeBuilder = scopeBuilder;
 		this.executionPlanner = executionPlanner;
+	}
+
+	/**
+	 * Physical data rows when the source is one positioned CSV. This is not the work-item count.
+	 */
+	public OptionalLong physicalRowCount(
+			Map<String, Object> sourceConfiguration,
+			EntityRelationshipMapping mapping,
+			List<MigrationMappingRule> rules) {
+		return physicalRowCount(sourceConfiguration, mapping, rules, null);
+	}
+
+	public OptionalLong physicalRowCount(
+			Map<String, Object> sourceConfiguration,
+			EntityRelationshipMapping mapping,
+			List<MigrationMappingRule> rules,
+			SourceByteProgress progress) {
+		return csvAccess.open(sourceConfiguration, mapping, rules, progress).physicalRowCount();
 	}
 
 	public void consume(
@@ -78,7 +98,9 @@ public class EntityRelationshipPlanSource {
 			EntityCsvRecords csvRecords) {
 		RelationshipResolution resolution = com.etp.migration.processing.PipelineTiming.time(
 				com.etp.migration.processing.PipelineTiming.Stage.RELATIONSHIP_RESOLUTION,
-				() -> relationshipResolver.resolve(mapping, source));
+				() -> csvRecords != null && csvRecords.isSingleFile()
+						? relationshipResolver.resolveRoles(mapping, csvRecords::all)
+						: relationshipResolver.resolve(mapping, source));
 		Stream<LogicalMigrationScope> scopes = com.etp.migration.processing.PipelineTiming.time(
 				com.etp.migration.processing.PipelineTiming.Stage.SCOPE_BUILD,
 				() -> scopeBuilder.build(mapping, entities.get(), resolution.relationships().stream()));

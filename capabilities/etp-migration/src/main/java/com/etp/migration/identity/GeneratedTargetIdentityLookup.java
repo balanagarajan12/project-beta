@@ -21,18 +21,21 @@ public final class GeneratedTargetIdentityLookup implements TargetIdentityLookup
 	private final EntityRelationshipMapping mapping;
 	private final String schema;
 	private final TargetIdentityLookup delegate;
+	private final javax.sql.DataSource targetDataSource;
 
 	private GeneratedTargetIdentityLookup(
 			GeneratedTargetIdentityService service,
 			UUID migrationRunId,
 			EntityRelationshipMapping mapping,
 			String schema,
-			TargetIdentityLookup delegate) {
+			TargetIdentityLookup delegate,
+			javax.sql.DataSource targetDataSource) {
 		this.service = service;
 		this.migrationRunId = migrationRunId;
 		this.mapping = mapping;
 		this.schema = schema;
 		this.delegate = delegate;
+		this.targetDataSource = targetDataSource;
 	}
 
 	public static TargetIdentityLookup decorate(
@@ -41,6 +44,16 @@ public final class GeneratedTargetIdentityLookup implements TargetIdentityLookup
 			EntityRelationshipMapping mapping,
 			Map<String, Object> targetConfiguration,
 			TargetIdentityLookup delegate) {
+		return decorate(service, migrationRunId, mapping, targetConfiguration, delegate, null);
+	}
+
+	public static TargetIdentityLookup decorate(
+			GeneratedTargetIdentityService service,
+			UUID migrationRunId,
+			EntityRelationshipMapping mapping,
+			Map<String, Object> targetConfiguration,
+			TargetIdentityLookup delegate,
+			javax.sql.DataSource targetDataSource) {
 		if (!generates(mapping)) {
 			return delegate == null ? (entityName, sourceIdentities) -> Map.of() : delegate;
 		}
@@ -53,7 +66,8 @@ public final class GeneratedTargetIdentityLookup implements TargetIdentityLookup
 		TargetIdentityLookup fallback = delegate == null
 				? (entityName, sourceIdentities) -> Map.of()
 				: delegate;
-		return new GeneratedTargetIdentityLookup(service, migrationRunId, mapping, schema(targetConfiguration), fallback);
+		return new GeneratedTargetIdentityLookup(
+				service, migrationRunId, mapping, schema(targetConfiguration), fallback, targetDataSource);
 	}
 
 	@Override
@@ -87,7 +101,8 @@ public final class GeneratedTargetIdentityLookup implements TargetIdentityLookup
 					spec,
 					schema,
 					definition.targetEntity(),
-					definition.targetKey()));
+					definition.targetKey(),
+					targetDataSource));
 		}
 		for (Map.Entry<String, String> entry : existing.entrySet()) {
 			if (entry.getValue() != null && !entry.getValue().isBlank()) {

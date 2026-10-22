@@ -44,18 +44,35 @@ class MigrationExecutionControllerTest {
 	private JwtDecoder jwtDecoder;
 
 	@Test
-	void executeReturnsCreatedWithLocationAndRunBody() throws Exception {
+	void executeReturnsAcceptedWithTheQueuedRun() throws Exception {
+		when(migrationExecutionService.execute(eq(DEFINITION_ID), any()))
+				.thenReturn(sampleRun(MigrationRunStatus.QUEUED));
+
+		mockMvc.perform(post("/api/v1/migrations/{migrationId}/execute", DEFINITION_ID)
+						.with(jwt())
+						.contentType(MediaType.APPLICATION_JSON)
+						.content("{}"))
+				.andExpect(status().isAccepted())
+				.andExpect(header().string("Location", "/api/v1/migration-runs/" + RUN_ID))
+				.andExpect(jsonPath("$.id").value(RUN_ID.toString()))
+				.andExpect(jsonPath("$.runId").value(RUN_ID.toString()))
+				.andExpect(jsonPath("$.status").value("QUEUED"))
+				.andExpect(jsonPath("$.message").value("Migration execution accepted."))
+				.andExpect(jsonPath("$.statusUrl").value("/api/v1/migration-runs/" + RUN_ID));
+	}
+
+	@Test
+	void finishedIdempotentRunIsAcceptedWithoutClaimingCompletion() throws Exception {
 		when(migrationExecutionService.execute(eq(DEFINITION_ID), any()))
 				.thenReturn(sampleRun(MigrationRunStatus.COMPLETED));
 
 		mockMvc.perform(post("/api/v1/migrations/{migrationId}/execute", DEFINITION_ID)
 						.with(jwt())
 						.contentType(MediaType.APPLICATION_JSON)
-						.content("{}"))
-				.andExpect(status().isCreated())
-				.andExpect(header().string("Location", "/api/v1/migration-runs/" + RUN_ID))
-				.andExpect(jsonPath("$.id").value(RUN_ID.toString()))
-				.andExpect(jsonPath("$.status").value("COMPLETED"));
+						.content("{\"idempotencyKey\":\"same-key\"}"))
+				.andExpect(status().isAccepted())
+				.andExpect(jsonPath("$.status").value("COMPLETED"))
+				.andExpect(jsonPath("$.message").value("Migration run already exists."));
 	}
 
 	@Test

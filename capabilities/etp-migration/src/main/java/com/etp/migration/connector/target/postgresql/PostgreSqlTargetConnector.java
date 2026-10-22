@@ -57,18 +57,29 @@ public class PostgreSqlTargetConnector implements MigrationTargetConnector {
 	private final PostgreSqlTargetProperties properties;
 	private final DataSource dataSource;
 	private final ObjectMapper objectMapper;
+	private final PostgreSqlConnectionRegistry connections;
 
 	@Autowired
 	public PostgreSqlTargetConnector(
 			PostgreSqlTargetProperties properties,
-			@Autowired(required = false) @Qualifier(PostgreSqlTargetClientConfig.DATASOURCE_BEAN) DataSource dataSource) {
-		this(properties, dataSource, new ObjectMapper());
+			@Autowired(required = false) @Qualifier(PostgreSqlTargetClientConfig.DATASOURCE_BEAN) DataSource dataSource,
+			@Autowired(required = false) PostgreSqlConnectionRegistry connections) {
+		this(properties, dataSource, new ObjectMapper(), connections);
 	}
 
 	public PostgreSqlTargetConnector(PostgreSqlTargetProperties properties, DataSource dataSource, ObjectMapper objectMapper) {
+		this(properties, dataSource, objectMapper, null);
+	}
+
+	public PostgreSqlTargetConnector(
+			PostgreSqlTargetProperties properties,
+			DataSource dataSource,
+			ObjectMapper objectMapper,
+			PostgreSqlConnectionRegistry connections) {
 		this.properties = properties;
 		this.dataSource = dataSource;
 		this.objectMapper = objectMapper;
+		this.connections = connections;
 	}
 
 	@Override
@@ -87,11 +98,7 @@ public class PostgreSqlTargetConnector implements MigrationTargetConnector {
 		if (!supportsLoadMode(loadMode)) {
 			throw new TargetLoadModeNotSupportedException(TARGET_TYPE, loadMode);
 		}
-		if (dataSource == null) {
-			throw new TargetInfrastructureException(
-					MigrationErrorCodes.TARGET_DATABASE_CONFIGURATION_ERROR,
-					"PostgreSQL target datasource is not configured");
-		}
+		DataSource source = PostgreSqlConnectionRegistry.stagingOf(connections, dataSource, context.configuration());
 		PostgreSqlStagingTarget.Resolved staging = PostgreSqlStagingTarget.resolve(context, properties);
 		int submitted = records == null ? 0 : records.size();
 		if (submitted == 0) {
@@ -100,7 +107,7 @@ public class PostgreSqlTargetConnector implements MigrationTargetConnector {
 		Instant started = Instant.now();
 		long copied;
 		try {
-			copied = copyBatch(context, staging, records);
+			copied = copyBatch(source, context, staging, records);
 		} catch (TargetInfrastructureException ex) {
 			throw ex;
 		} catch (SQLException ex) {
@@ -126,10 +133,11 @@ public class PostgreSqlTargetConnector implements MigrationTargetConnector {
 	}
 
 	private long copyBatch(
+			DataSource source,
 			MigrationTargetContext context,
 			PostgreSqlStagingTarget.Resolved staging,
 			List<LoadableTargetRecord> records) throws SQLException {
-		try (Connection connection = dataSource.getConnection()) {
+		try (Connection connection = source.getConnection()) {
 			boolean previousAutoCommit = connection.getAutoCommit();
 			connection.setAutoCommit(false);
 			try {

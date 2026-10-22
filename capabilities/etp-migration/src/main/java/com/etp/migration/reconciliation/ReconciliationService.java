@@ -19,11 +19,15 @@ import com.etp.migration.mapping.RelationshipDefinition;
 import com.etp.migration.reconciliation.dto.MigrationReconciliationResponse;
 import com.etp.migration.reconciliation.dto.ReconciliationBundleResponse;
 import com.etp.migration.reconciliation.dto.ReconciliationItemResponse;
+import com.etp.migration.entity.MigrationPhaseJob;
 import com.etp.migration.repository.MigrationBatchRepository;
+import com.etp.migration.repository.MigrationPhaseJobRepository;
+import com.etp.migration.run.MigrationPhase;
 import com.etp.migration.repository.MigrationErrorRepository;
 import com.etp.migration.repository.MigrationReconciliationRepository;
 import com.etp.migration.repository.MigrationRunRepository;
 import com.etp.migration.processing.MigrationErrorCodes;
+import com.etp.migration.processing.MigrationErrorDetails;
 import com.etp.migration.promotion.PromotionException;
 import com.etp.migration.run.MigrationRunNotFoundException;
 import jakarta.persistence.EntityManager;
@@ -40,12 +44,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
-import org.springframework.http.HttpStatus;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -69,6 +67,7 @@ public class ReconciliationService {
 	private final ReconciliationEngine reconciliationEngine;
 	private final MigrationTargetReconciliationProviderRegistry targetReconciliationRegistry;
 	private final PostgreSqlBusinessTargetVerifier businessTargetVerifier;
+	private final MigrationPhaseJobRepository phaseJobRepository;
 
 	@PersistenceContext
 	private EntityManager entityManager;
@@ -81,7 +80,8 @@ public class ReconciliationService {
 			MigrationErrorRepository migrationErrorRepository,
 			ReconciliationEngine reconciliationEngine,
 			MigrationTargetReconciliationProviderRegistry targetReconciliationRegistry,
-			PostgreSqlBusinessTargetVerifier businessTargetVerifier) {
+			PostgreSqlBusinessTargetVerifier businessTargetVerifier,
+			MigrationPhaseJobRepository phaseJobRepository) {
 		this.transactionTemplate = new TransactionTemplate(transactionManager);
 		this.migrationRunRepository = migrationRunRepository;
 		this.migrationBatchRepository = migrationBatchRepository;
@@ -90,6 +90,7 @@ public class ReconciliationService {
 		this.reconciliationEngine = reconciliationEngine;
 		this.targetReconciliationRegistry = targetReconciliationRegistry;
 		this.businessTargetVerifier = businessTargetVerifier;
+		this.phaseJobRepository = phaseJobRepository;
 	}
 
 	public MigrationReconciliationResponse reconcile(UUID runId) {
@@ -97,11 +98,38 @@ public class ReconciliationService {
 	}
 
 	public MigrationReconciliationResponse reconcile(UUID runId, String verificationScope) {
+		return reconcile(runId, verificationScope, () -> { });
+	}
+
+	public void assertSubmittable(UUID runId, String verificationScope) {
+		transactionTemplate.executeWithoutResult(status -> {
+			MigrationRun run = migrationRunRepository.findById(runId)
+					.orElseThrow(() -> new MigrationRunNotFoundException(runId));
+			long active = migrationBatchRepository.countByMigrationRun_IdAndStatusIn(runId, ACTIVE_BATCHES);
+			if (active > 0) {
+				throw new ReconciliationNotReadyException("Migration run still has active batches");
+			}
+			if (isBusinessTarget(verificationScope)) {
+				if (run.getMigrationDefinition().getTargetType() == null
+						|| !"POSTGRESQL".equalsIgnoreCase(run.getMigrationDefinition().getTargetType())) {
+					throw new PromotionException(
+							HttpStatus.BAD_REQUEST.value(),
+							MigrationErrorCodes.PROMOTION_UNSUPPORTED_TARGET,
+							"Business-target verification is only supported for PostgreSQL targets");
+				}
+				Map<String, Object> configuration = run.getMigrationDefinition().getConfiguration();
+				businessTargetVerifier.assertExecutable(runId, configuration == null ? Map.of() : configuration);
+			}
+		});
+	}
+
+	public MigrationReconciliationResponse reconcile(UUID runId, String verificationScope, Runnable progress) {
+		Runnable report = progress == null ? () -> { } : progress;
 		MigrationReconciliationResponse[] response = new MigrationReconciliationResponse[1];
 		com.etp.migration.processing.PipelineTiming.open(() -> {
 			long started = com.etp.migration.processing.PipelineTiming.start();
 			try {
-				response[0] = reconcileMeasured(runId, verificationScope);
+				response[0] = reconcileMeasured(runId, verificationScope, report);
 			} finally {
 				com.etp.migration.processing.PipelineTiming.stop(
 						com.etp.migration.processing.PipelineTiming.Stage.RECONCILIATION,
@@ -111,12 +139,18 @@ public class ReconciliationService {
 		return response[0];
 	}
 
-	private MigrationReconciliationResponse reconcileMeasured(UUID runId, String verificationScope) {
+	private MigrationReconciliationResponse reconcileMeasured(
+			UUID runId,
+			String verificationScope,
+			Runnable progress) {
 		boolean businessTarget = isBusinessTarget(verificationScope);
+		progress.run();
 		PreparedRun prepared = transactionTemplate.execute(status -> prepare(runId));
+		progress.run();
 		TargetVerification verification = businessTarget
 				? verifyBusinessTarget(prepared)
 				: verifyTarget(prepared);
+		progress.run();
 		if (prepared.entityReconciliation() != null) {
 			applyTargetFacts(prepared, verification);
 		}
@@ -139,10 +173,19 @@ public class ReconciliationService {
 				throw new MigrationRunNotFoundException(runId);
 			}
 			List<MigrationReconciliation> rows = reconciliationRepository.findByMigrationRun_Id(runId);
-			if (rows.isEmpty()) {
+			MigrationPhaseJob job = phaseJobRepository
+					.findFirstByMigrationRunIdAndPhaseOrderByCreatedAtDesc(runId, MigrationPhase.RECONCILIATION)
+					.orElse(null);
+			if (rows.isEmpty() && job == null) {
 				throw new ReconciliationNotFoundException(runId);
 			}
-			return toResponse(runId, rows);
+			MigrationReconciliationResponse response = rows.isEmpty()
+					? new MigrationReconciliationResponse(runId, null, new ReconciliationBundleResponse(null, null, null, null))
+					: toResponse(runId, rows);
+			if (job == null) {
+				return response;
+			}
+			return response.withJob(job.getId(), job.getStatus().name());
 		});
 	}
 
@@ -294,7 +337,7 @@ public class ReconciliationService {
 				new ReconciliationBundleResponse(count, checksum, target, full));
 	}
 
-	private static ReconciliationItemResponse toItem(MigrationReconciliation row) {
+	static ReconciliationItemResponse toItem(MigrationReconciliation row) {
 		return new ReconciliationItemResponse(
 				row.getId(),
 				row.getReconciliationType(),
@@ -306,7 +349,7 @@ public class ReconciliationService {
 				row.getDuplicateCount(),
 				row.getFailureCount(),
 				row.getDifferenceCount(),
-				row.getDetails() == null ? Map.of() : new HashMap<>(row.getDetails()),
+				MigrationErrorDetails.publicReconciliationDetails(row.getDetails()),
 				row.getStartedAt(),
 				row.getCompletedAt());
 	}

@@ -57,11 +57,13 @@ class SequenceIdentityTest {
 							.filter(row -> entityName.equals(row.getEntityName()) && sources.contains(row.getSourceIdentity()))
 							.toList();
 				});
-		lenient().when(repository.save(any())).thenAnswer(invocation -> {
-			MigrationIdentityAllocation row = invocation.getArgument(0);
-			stored.add(row);
-			return row;
-		});
+		lenient().doAnswer(invocation -> {
+			Iterable<MigrationIdentityAllocation> rows = invocation.getArgument(0);
+			for (MigrationIdentityAllocation row : rows) {
+				stored.add(row);
+			}
+			return null;
+		}).when(repository).insertAll(any());
 		service = new GeneratedTargetIdentityService(repository, allocator, (schema, table, column, prefix, length) -> 0L);
 	}
 

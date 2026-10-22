@@ -2,6 +2,7 @@ package com.etp.migration.processing;
 
 import com.etp.migration.batch.BatchPlanner;
 import com.etp.migration.connector.source.InvalidSourceConfigurationException;
+import com.etp.migration.connector.source.csv.SourceByteProgress;
 import com.etp.migration.entity.MigrationMappingRule;
 import com.etp.migration.execution.EntityBatchLocator;
 import com.etp.migration.execution.EntityFailureRecorder;
@@ -9,6 +10,8 @@ import com.etp.migration.execution.EntityItemFailure;
 import com.etp.migration.execution.EntityRelationshipPlanSource;
 import com.etp.migration.execution.ExecutionMode;
 import com.etp.migration.mapping.EntityRelationshipConfiguration;
+import com.etp.migration.planning.ExecutionBatchPlan;
+import com.etp.migration.planning.ExecutionWorkItem;
 import com.etp.migration.repository.MigrationMappingRuleRepository;
 import com.etp.migration.connector.source.MigrationSourceConnector;
 import com.etp.migration.connector.source.MigrationSourceConnectorRegistry;
@@ -29,15 +32,22 @@ import com.etp.migration.repository.MigrationBatchRepository;
 import com.etp.migration.repository.MigrationRunRepository;
 import com.etp.migration.repository.MigrationSourceRepository;
 import com.etp.migration.run.InvalidStateTransitionException;
+import com.etp.migration.run.MigrationExecutionProgress;
 import com.etp.migration.run.MigrationRunNotFoundException;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.OptionalLong;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -45,6 +55,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 @Service
 public class SourceInspectionService {
 
+	private static final Logger log = LoggerFactory.getLogger(SourceInspectionService.class);
 	static final String STATUS_SOURCE_INSPECTED = "SOURCE_INSPECTED";
 	private static final String CHECKSUM_ALGORITHM = "SHA-256";
 
@@ -59,6 +70,7 @@ public class SourceInspectionService {
 	private final EntityRelationshipPlanSource entityPlanSource;
 	private final EntityFailureRecorder entityFailureRecorder;
 	private final PreparationFailureRecorder preparationFailureRecorder;
+	private final MigrationExecutionProgress progress;
 
 	@PersistenceContext
 	private EntityManager entityManager;
@@ -74,7 +86,8 @@ public class SourceInspectionService {
 			MigrationMappingRuleRepository mappingRuleRepository,
 			EntityRelationshipPlanSource entityPlanSource,
 			EntityFailureRecorder entityFailureRecorder,
-			PreparationFailureRecorder preparationFailureRecorder) {
+			PreparationFailureRecorder preparationFailureRecorder,
+			MigrationExecutionProgress progress) {
 		this.transactionTemplate = new TransactionTemplate(transactionManager);
 		this.migrationRunRepository = migrationRunRepository;
 		this.migrationSourceRepository = migrationSourceRepository;
@@ -86,6 +99,7 @@ public class SourceInspectionService {
 		this.entityPlanSource = entityPlanSource;
 		this.entityFailureRecorder = entityFailureRecorder;
 		this.preparationFailureRecorder = preparationFailureRecorder;
+		this.progress = progress;
 	}
 
 	public PrepareMigrationRunResponse prepare(UUID runId) {
@@ -103,11 +117,17 @@ public class SourceInspectionService {
 			return work.existing();
 		}
 		if (work.entityMappingConfiguration() != null) {
-			PrepareMigrationRunResponse[] response = new PrepareMigrationRunResponse[1];
-			PipelineTiming.open(() -> response[0] = transactionTemplate.execute(status -> persistEntityPreparation(runId, work)));
-			return response[0];
+			EntityPlan[] plan = new EntityPlan[1];
+			PipelineTiming.open(() -> plan[0] = scanEntitySource(runId, work));
+			return transactionTemplate.execute(status -> persistEntityPreparation(runId, work, plan[0]));
 		}
+		progress.mark(runId);
+		long started = System.nanoTime();
+		log.info("Source inspection started runId={}", runId);
 		SourceInspection inspection = work.connector().inspect(work.source(), work.run());
+		progress.mark(runId);
+		log.info("Source inspection completed runId={} recordCount={} durationMs={}",
+				runId, inspection.recordCount(), elapsedMillis(started));
 		return transactionTemplate.execute(status -> persistPreparation(runId, work.sourceId(), inspection, work.batchSize()));
 	}
 
@@ -117,10 +137,7 @@ public class SourceInspectionService {
 		if (isPrepared(run)) {
 			return InspectionWork.prepared(toResponse(run));
 		}
-		if (run.getStatus() != MigrationRunStatus.QUEUED) {
-			throw new InvalidStateTransitionException(
-					"Cannot prepare migration run in status " + run.getStatus());
-		}
+		requirePreparable(run);
 		MigrationSource source = resolveSource(run);
 		int batchSize = run.getMigrationDefinition().getBatchSize() == null
 				? 10_000
@@ -134,16 +151,58 @@ public class SourceInspectionService {
 		return InspectionWork.pending(run, source, connector, batchSize);
 	}
 
-	private PrepareMigrationRunResponse persistEntityPreparation(UUID runId, InspectionWork work) {
+	private EntityPlan scanEntitySource(UUID runId, InspectionWork work) {
+		List<MigrationMappingRule> rules = transactionTemplate.execute(status -> loadRules(runId));
+		var model = EntityRelationshipConfiguration.parse(work.entityMappingConfiguration());
+		long countStarted = System.nanoTime();
+		log.info("Source count started runId={}", runId);
+		OptionalLong sourceRows = entityPlanSource.physicalRowCount(
+				work.source().getConfiguration(),
+				model,
+				rules,
+				(stage, bytesRead, indexedRows) -> {
+					progress.mark(runId);
+					if (stage == SourceByteProgress.Stage.TRANSFER) {
+						log.info("Source transfer progress runId={} bytesRead={}", runId, bytesRead);
+					} else {
+						log.info("Source index progress runId={} bytesRead={} rowsIndexed={}",
+								runId, bytesRead, indexedRows);
+					}
+				});
+		progress.mark(runId);
+		log.info("Source count completed runId={} sourceRowCount={} durationMs={}",
+				runId, sourceRows.isPresent() ? sourceRows.getAsLong() : null, elapsedMillis(countStarted));
+		rejectDeclaredRowCount(work.source().getConfiguration(), sourceRows);
+		long planningStarted = System.nanoTime();
+		log.info("Entity planning started runId={}", runId);
+		List<EntityItemFailure> structural = new ArrayList<>();
+		List<PlannedEntityBatch> batches = new ArrayList<>();
+		long[] counts = new long[2];
+		entityPlanSource.consume(
+				work.source().getConfiguration(),
+				model,
+				rules,
+				work.batchSize(),
+				plan -> {
+					progress.mark(runId);
+					batches.add(new PlannedEntityBatch(
+							plan.batchNumber(),
+							plan.workItems().size(),
+							EntityBatchLocator.write(plan),
+							sourceRecords(plan)));
+					counts[0]++;
+					counts[1] += plan.workItems().size();
+				},
+				structural::add);
+		progress.mark(runId);
+		log.info("Entity planning completed runId={} batches={} workItems={} durationMs={}",
+				runId, counts[0], counts[1], elapsedMillis(planningStarted));
+		return new EntityPlan(sourceRows, structural, batches, counts[0], counts[1]);
+	}
+
+	private List<MigrationMappingRule> loadRules(UUID runId) {
 		MigrationRun run = migrationRunRepository.findById(runId)
 				.orElseThrow(() -> new MigrationRunNotFoundException(runId));
-		if (isPrepared(run)) {
-			return toResponse(run);
-		}
-		if (run.getStatus() != MigrationRunStatus.QUEUED) {
-			throw new InvalidStateTransitionException(
-					"Cannot prepare migration run in status " + run.getStatus());
-		}
 		var mapping = run.getMigrationDefinition().getMapping();
 		List<MigrationMappingRule> rules = mappingRuleRepository
 				.findByMapping_IdAndEnabledTrueOrderBySequenceNoAsc(mapping.getId());
@@ -151,52 +210,124 @@ public class SourceInspectionService {
 			rule.getEntityName();
 			rule.getConfiguration();
 		});
-		var model = EntityRelationshipConfiguration.parse(work.entityMappingConfiguration());
-		List<EntityItemFailure> structural = new ArrayList<>();
-		int[] counts = new int[2];
-		Instant now = Instant.now();
-		entityPlanSource.consume(
-				work.source().getConfiguration(),
-				model,
-				rules,
-				work.batchSize(),
-				plan -> {
-					MigrationBatch batch = new MigrationBatch();
-					batch.setMigrationRun(run);
-					batch.setBatchNumber(plan.batchNumber());
-					batch.setStatus(MigrationBatchStatus.PENDING);
-					batch.setRecordCount(plan.workItems().size());
-					batch.setSourceLocator(EntityBatchLocator.write(plan));
-					batch.setCreatedAt(now);
-					batch.setUpdatedAt(now);
-					migrationBatchRepository.save(batch);
-					entityManager.flush();
-					entityManager.detach(batch);
-					counts[0]++;
-					counts[1] += plan.workItems().size();
-				},
-				structural::add);
-		run.setSourceSnapshot(entitySnapshot(work.sourceId(), counts[1]));
-		run.setTotalRecords((long) counts[1]);
-		run.setTotalBatches(counts[0]);
-		run.setUpdatedAt(now);
-		if (!structural.isEmpty()) {
-			entityFailureRecorder.save(runId, null, structural);
+		return rules;
+	}
+
+	private PrepareMigrationRunResponse persistEntityPreparation(UUID runId, InspectionWork work, EntityPlan plan) {
+		long started = System.nanoTime();
+		MigrationRun run = migrationRunRepository.findByIdForUpdate(runId)
+				.orElseThrow(() -> new MigrationRunNotFoundException(runId));
+		if (isPrepared(run)) {
+			return toResponse(run);
 		}
+		requirePreparable(run);
+		Instant now = Instant.now();
+		List<MigrationBatch> batches = new ArrayList<>();
+		Map<Integer, Set<Long>> sourceRecordsByBatch = new LinkedHashMap<>();
+		for (PlannedEntityBatch planned : plan.batches()) {
+			MigrationBatch batch = new MigrationBatch();
+			batch.setMigrationRun(run);
+			batch.setBatchNumber(planned.batchNumber());
+			batch.setStatus(MigrationBatchStatus.PENDING);
+			batch.setRecordCount(planned.recordCount());
+			batch.setSourceLocator(planned.sourceLocator());
+			batch.setCreatedAt(now);
+			batch.setUpdatedAt(now);
+			migrationBatchRepository.save(batch);
+			entityManager.flush();
+			entityManager.detach(batch);
+			batches.add(batch);
+			sourceRecordsByBatch.put(planned.batchNumber(), planned.sourceRecords());
+		}
+		if (!plan.structural().isEmpty()) {
+			entityFailureRecorder.save(runId, null, plan.structural());
+			RelationshipFailurePlacement placement = placeRelationshipFailures(
+					sourceRecordsByBatch,
+					plan.structural().stream().map(EntityItemFailure::sourceRecordNumber).toList());
+			for (MigrationBatch batch : batches) {
+				int failures = placement.countsByBatchNumber().getOrDefault(batch.getBatchNumber(), 0);
+				if (failures <= 0) {
+					continue;
+				}
+				batch.setSourceLocator(EntityBatchLocator.withRelationshipFailures(batch.getSourceLocator(), failures));
+				batch.setUpdatedAt(now);
+				migrationBatchRepository.save(batch);
+			}
+			if (placement.unmatched() > 0) {
+				long rejected = run.getRejectedRecords() == null ? 0L : run.getRejectedRecords();
+				run.setRejectedRecords(rejected + placement.unmatched());
+			}
+		}
+		run.setSourceSnapshot(entitySnapshot(work.sourceId(), plan.workItems(), plan.sourceRows()));
+		run.setTotalRecords(plan.workItems());
+		run.setTotalBatches(Math.toIntExact(plan.batchCount()));
+		run.setUpdatedAt(now);
+		progress.mark(runId);
+		log.info("Preparation persisted runId={} batches={} workItems={} durationMs={}",
+				runId, plan.batchCount(), plan.workItems(), elapsedMillis(started));
 		return toResponse(run);
 	}
 
-	private static Map<String, Object> entitySnapshot(UUID sourceId, int workItemCount) {
+	private static long elapsedMillis(long startedNanos) {
+		return Math.max(0L, (System.nanoTime() - startedNanos) / 1_000_000L);
+	}
+
+	private record PlannedEntityBatch(
+			int batchNumber,
+			int recordCount,
+			Map<String, Object> sourceLocator,
+			Set<Long> sourceRecords
+	) {
+	}
+
+	private record EntityPlan(
+			OptionalLong sourceRows,
+			List<EntityItemFailure> structural,
+			List<PlannedEntityBatch> batches,
+			long batchCount,
+			long workItems
+	) {
+	}
+
+	/**
+	 * {@code recordCount} and {@code workItemCount} are logical execution work items.
+	 * {@code sourceRowCount} is the physical CSV data-row count when a single positioned file supplied it.
+	 * Reconciliation reads {@code recordCount}, so that field stays the work-item workload.
+	 */
+	static Map<String, Object> entitySnapshot(UUID sourceId, long workItemCount, OptionalLong sourceRows) {
 		Map<String, Object> source = new LinkedHashMap<>();
 		source.put("sourceId", sourceId);
 		source.put("sourceType", "FILE");
 		source.put("format", "CSV");
 		source.put("recordCount", workItemCount);
+		source.put("workItemCount", workItemCount);
+		if (sourceRows != null && sourceRows.isPresent()) {
+			source.put("sourceRowCount", sourceRows.getAsLong());
+		}
 		Map<String, Object> snapshot = new LinkedHashMap<>();
 		snapshot.put("statusMessage", STATUS_SOURCE_INSPECTED);
 		snapshot.put("source", source);
 		snapshot.put("executionMode", "ENTITY_RELATIONSHIP");
 		return snapshot;
+	}
+
+	/**
+	 * A {@code recordCount} on the source configuration is a declared physical row count.
+	 * It is compared with the file. It does not replace the work-item workload.
+	 */
+	static void rejectDeclaredRowCount(Map<String, Object> configuration, OptionalLong sourceRows) {
+		if (configuration == null || !configuration.containsKey("recordCount") || configuration.get("recordCount") == null) {
+			return;
+		}
+		Object value = configuration.get("recordCount");
+		if (!(value instanceof Number number) || number.doubleValue() != number.longValue()) {
+			throw new InvalidSourceConfigurationException("Source recordCount must be a whole number of data rows");
+		}
+		if (sourceRows != null && sourceRows.isPresent() && number.longValue() != sourceRows.getAsLong()) {
+			throw new InvalidSourceConfigurationException(
+					"Source recordCount " + number.longValue()
+							+ " does not match the " + sourceRows.getAsLong() + " data rows in the source file");
+		}
 	}
 
 	private static Map<String, Object> mappingConfiguration(MigrationRun run) {
@@ -212,15 +343,12 @@ public class SourceInspectionService {
 			UUID sourceId,
 			SourceInspection inspection,
 			int batchSize) {
-		MigrationRun run = migrationRunRepository.findById(runId)
+		MigrationRun run = migrationRunRepository.findByIdForUpdate(runId)
 				.orElseThrow(() -> new MigrationRunNotFoundException(runId));
 		if (isPrepared(run)) {
 			return toResponse(run);
 		}
-		if (run.getStatus() != MigrationRunStatus.QUEUED) {
-			throw new InvalidStateTransitionException(
-					"Cannot prepare migration run in status " + run.getStatus());
-		}
+		requirePreparable(run);
 		Instant now = Instant.now();
 		String objectKey = stringValue(inspection.metadata(), "objectKey");
 		run.setSourceSnapshot(toSourceSnapshot(sourceId, inspection));
@@ -306,6 +434,58 @@ public class SourceInspectionService {
 			return UUID.fromString(direct.toString());
 		} catch (RuntimeException ex) {
 			throw new InvalidSourceConfigurationException("sourceId is not a valid UUID");
+		}
+	}
+
+	static RelationshipFailurePlacement placeRelationshipFailures(
+			Map<Integer, Set<Long>> sourceRecordsByBatch,
+			List<Long> failureSourceRecords) {
+		Map<Long, Integer> batchByRecord = new HashMap<>();
+		if (sourceRecordsByBatch != null) {
+			for (Map.Entry<Integer, Set<Long>> entry : sourceRecordsByBatch.entrySet()) {
+				if (entry.getValue() == null) {
+					continue;
+				}
+				for (Long sourceRecord : entry.getValue()) {
+					batchByRecord.putIfAbsent(sourceRecord, entry.getKey());
+				}
+			}
+		}
+		Map<Integer, Integer> counts = new LinkedHashMap<>();
+		int unmatched = 0;
+		if (failureSourceRecords != null) {
+			for (Long sourceRecord : failureSourceRecords) {
+				Integer batchNumber = batchByRecord.get(sourceRecord);
+				if (batchNumber == null) {
+					unmatched++;
+				} else {
+					counts.merge(batchNumber, 1, Integer::sum);
+				}
+			}
+		}
+		return new RelationshipFailurePlacement(Map.copyOf(counts), unmatched);
+	}
+
+	private static Set<Long> sourceRecords(ExecutionBatchPlan plan) {
+		Set<Long> records = new LinkedHashSet<>();
+		if (plan == null || plan.workItems() == null) {
+			return records;
+		}
+		for (ExecutionWorkItem item : plan.workItems()) {
+			if (item != null) {
+				records.add(item.sourceRecordNumber());
+			}
+		}
+		return records;
+	}
+
+	record RelationshipFailurePlacement(Map<Integer, Integer> countsByBatchNumber, int unmatched) {
+	}
+
+	private static void requirePreparable(MigrationRun run) {
+		if (run.getStatus() != MigrationRunStatus.QUEUED && run.getStatus() != MigrationRunStatus.RUNNING) {
+			throw new InvalidStateTransitionException(
+					"Cannot prepare migration run in status " + run.getStatus());
 		}
 	}
 

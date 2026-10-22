@@ -73,6 +73,43 @@ public final class TargetFailureDiagnostics {
 	}
 
 	/**
+	 * Exception class and the first application stack frame. The exception message is omitted because it can quote
+	 * row values or SQL parameters.
+	 */
+	public static String location(Throwable failure) {
+		if (failure == null) {
+			return "unknown failure";
+		}
+		String type = failure.getClass().getName();
+		StackTraceElement frame = applicationFrame(failure.getStackTrace());
+		if (frame == null) {
+			return type;
+		}
+		return type + " at " + frame;
+	}
+
+	private static StackTraceElement applicationFrame(StackTraceElement[] frames) {
+		if (frames == null) {
+			return null;
+		}
+		for (StackTraceElement frame : frames) {
+			if (frame == null) {
+				continue;
+			}
+			String className = frame.getClassName();
+			if (className == null || className.isBlank()
+					|| className.startsWith("java.")
+					|| className.startsWith("javax.")
+					|| className.startsWith("jdk.")
+					|| className.startsWith("sun.")) {
+				continue;
+			}
+			return frame;
+		}
+		return null;
+	}
+
+	/**
 	 * Structural PostgreSQL fields only. The server detail and hint are omitted because they can quote row values.
 	 * {@code relation} is set only when the primary server message is {@code relation "name" does not exist}.
 	 */

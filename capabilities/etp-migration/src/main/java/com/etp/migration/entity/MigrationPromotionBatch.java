@@ -43,6 +43,10 @@ public class MigrationPromotionBatch {
 	@JoinColumn(name = "migration_batch_id", nullable = false)
 	private MigrationBatch migrationBatch;
 
+	/** Same column as the association. Reading it does not deserialize {@code source_locator}. */
+	@Column(name = "migration_batch_id", insertable = false, updatable = false)
+	private Long migrationBatchId;
+
 	@Enumerated(EnumType.STRING)
 	@Column(name = "status", nullable = false, length = 30)
 	private PromotionBatchStatus status = PromotionBatchStatus.NOT_ELIGIBLE;
@@ -122,6 +126,13 @@ public class MigrationPromotionBatch {
 
 	public void setMigrationBatch(MigrationBatch migrationBatch) {
 		this.migrationBatch = migrationBatch;
+		if (migrationBatch != null && migrationBatch.getId() != null) {
+			this.migrationBatchId = migrationBatch.getId();
+		}
+	}
+
+	public Long getMigrationBatchId() {
+		return migrationBatchId;
 	}
 
 	public PromotionBatchStatus getStatus() {
