@@ -7,6 +7,7 @@ import com.etp.migration.mapping.RelationshipDefinition;
 import com.etp.migration.mapping.RelationshipKey;
 import com.etp.migration.processing.SourceRecord;
 import com.etp.migration.transformation.MappingEngine;
+import com.etp.migration.transformation.RuleSourceFields;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -107,18 +108,12 @@ public class EntityExtractor {
 		Set<String> fields = new LinkedHashSet<>();
 		add(fields, entity.sourceKey());
 		for (MigrationMappingRule rule : rules) {
-			add(fields, rule.getSourceField());
+			for (String column : RuleSourceFields.columns(rule)) {
+				add(fields, column);
+			}
 			Map<String, Object> configuration = rule.getConfiguration();
 			if (configuration == null) {
 				continue;
-			}
-			Object listed = configuration.get("sourceFields");
-			if (listed instanceof List<?> values) {
-				for (Object value : values) {
-					if (value instanceof String text) {
-						add(fields, text);
-					}
-				}
 			}
 			Object condition = configuration.get("condition");
 			if (condition instanceof Map<?, ?> conditionMap) {
@@ -156,22 +151,7 @@ public class EntityExtractor {
 	}
 
 	private static boolean readsSource(MigrationMappingRule rule) {
-		if (rule.getSourceField() != null && !rule.getSourceField().isBlank()) {
-			return true;
-		}
-		Map<String, Object> configuration = rule.getConfiguration();
-		if (configuration == null) {
-			return false;
-		}
-		Object listed = configuration.get("sourceFields");
-		if (listed instanceof List<?> values) {
-			for (Object value : values) {
-				if (value instanceof String text && !text.isBlank()) {
-					return true;
-				}
-			}
-		}
-		return false;
+		return !RuleSourceFields.columns(rule).isEmpty();
 	}
 
 	private static boolean hasOtherValues(Map<String, Object> physical, Set<String> sourceFields, String sourceKey) {

@@ -1,6 +1,6 @@
 # ETP Migration — AI / Claude context
 
-Compact handoff for assistants. Inspect code before changing it. Details: [ARCHITECTURE.md](ARCHITECTURE.md), [API_GUIDE.md](API_GUIDE.md), [DATABASE_MODEL.md](DATABASE_MODEL.md), [USER_GUIDE.md](USER_GUIDE.md), [migration-e2e-test-guide.md](migration-e2e-test-guide.md), [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md).
+Compact handoff for assistants. Inspect code before changing it. Details: [ARCHITECTURE.md](ARCHITECTURE.md), [API_GUIDE.md](API_GUIDE.md), [DATABASE_MODEL.md](DATABASE_MODEL.md), [STATUS_LIFECYCLE.md](STATUS_LIFECYCLE.md), [USER_GUIDE.md](USER_GUIDE.md), [TRANSFORMATIONS.md](TRANSFORMATIONS.md), [migration-e2e-test-guide.md](migration-e2e-test-guide.md), [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md).
 
 ---
 
@@ -30,7 +30,7 @@ Java 21, Spring Boot 4.1.0, Spring Web MVC, Data JPA, Security OAuth2 resource s
 capabilities/etp-migration/
   pom.xml
   src/main/java/com/etp/migration/   # application
-  src/main/resources/db/migration/   # V1–V5
+  src/main/resources/db/migration/   # V1–V11
   src/test/java/                     # Surefire *Test.java
   docs/                              # this documentation set
 ```
@@ -94,7 +94,7 @@ See [API_GUIDE.md](API_GUIDE.md). Product path:
 - `GET /api/v1/migration-runs/{runId}/errors` — paginated `migration_error`, redacted on read
 - `GET /api/v1/migration-runs/{runId}/phase-jobs/{jobId}`
 
-Also: mappings/rules, sources, runs list/create, prepare, process-next-batch, cancel, retry, batches, actuator health.
+Also: mappings/rules, sources, runs list/create, prepare, process-next-batch, cancel, retry, `POST /api/v1/migration-runs/{runId}/control` (`PAUSE` or `RESUME`), promotion control, batches, actuator health. Status transitions are [STATUS_LIFECYCLE.md](STATUS_LIFECYCLE.md).
 
 ---
 
@@ -127,7 +127,7 @@ JSONB on definition accepts only `target` (`mode`, `schema`, `stagingSchema`, `s
 
 ## 14. Mapping / validation
 
-`TransformationEngine` implements DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, REGEX, CONDITIONAL, DATE_FORMAT. LOOKUP/CUSTOM throw. Validation = mandatory target fields non-blank.
+`TransformationEngine` implements DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, REGEX, CONDITIONAL, DATE_FORMAT. LOOKUP/CUSTOM throw. Validation = mandatory target fields non-blank. Rule shape and expressions: [TRANSFORMATIONS.md](TRANSFORMATIONS.md).
 
 ---
 
@@ -145,7 +145,13 @@ Prepare and promote each return HTTP 202. Prepare sets READY from staging counts
 
 ## 17. Execution lifecycle
 
-DRAFT → ACTIVE → execute → inspect → plan → SKIP LOCKED claim → transform/validate → COPY → batch complete → run complete. Then optional recon → prepare → promote → business recon.
+DRAFT → ACTIVE → execute → inspect → plan → SKIP LOCKED claim → transform/validate → COPY → batch complete → run complete. Then optional recon → prepare → promote → business recon. Per-entity transitions are [STATUS_LIFECYCLE.md](STATUS_LIFECYCLE.md).
+
+Cancel is `POST /api/v1/migration-runs/{runId}/cancel` with no body. `QUEUED` and `RUNNING` become `CANCEL_REQUESTED`. `PENDING` and `RETRY_PENDING` batches become `CANCELLED`. A `CLAIMED` or `PROCESSING` batch finishes its own transaction; the run becomes `CANCELLED` only after that batch leaves those statuses. Recovery does not claim `CANCEL_REQUESTED`. `CANCELLED` is terminal: retry, resume, and a repeated execute with the same idempotency key do not start it again. Committed staging rows stay under that run id. Do not promote the cancelled run.
+
+Pause is `control_state` (`PAUSE_REQUESTED`, then `PAUSED` at the next batch boundary), not `MigrationRunStatus.PAUSED`. That lifecycle value is never written and has no outgoing transition. Resume continues the same run or promotion job and does not repeat successful batches.
+
+`batchSize` is read from the definition when batches are planned. An existing run is not replanned. There is no definition update endpoint. A different batch size is a new definition version. Activating it sets every other `ACTIVE` version of the same name to `INACTIVE`.
 
 ---
 
@@ -179,10 +185,11 @@ Enrichment, record deduplication, Kafka, an external scheduler, and a migration 
 - Generic migration engine. Staging SQL is generic. Canonical promotion is configured tables, keys, and `targetIdentity`, not an entity-specific Java branch per business entity. The demonstrated GeographicSubAddress case stayed on that configuration path.
 - Staging separated from business-target promotion.
 - Promotion explicit; reconciliation explicit.
-- DRAFT → ACTIVE exists; **ACTIVE is lifecycle/certification, not environment security**. No PROD/DEV checks in migration logic. Deployment/release owns environment governance (who is allowed to activate in which environment).
+- DRAFT → ACTIVE exists; **ACTIVE is lifecycle/certification, not environment security**. No PROD/DEV checks in migration logic. Deployment/release owns environment governance (who is allowed to activate in which environment). Activating one version sets other `ACTIVE` versions of the same name to `INACTIVE`. There is no deactivate endpoint and no definition update.
+- Default batch size is 10000. Prepare of a new run reads the definition. It does not resize batches already stored on an existing run.
+- Operator pause and cancel are separate. Pause uses `control_state`. Cancel uses `migration_run.status`. Do not document `MigrationRunStatus.PAUSED` as the pause API.
 - APIs still require ACTIVE to start a run (409 if DRAFT). Lower environments are expected to activate, then execute — not a special DRAFT-execute code path.
 - Execute is **not** one database transaction.
-- Default batch size 10000 unless definition overrides.
 
 ---
 

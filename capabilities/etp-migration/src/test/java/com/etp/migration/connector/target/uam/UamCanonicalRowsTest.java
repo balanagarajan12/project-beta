@@ -9,6 +9,7 @@ import com.etp.migration.processing.TargetRecord;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class UamCanonicalRowsTest {
@@ -161,6 +162,73 @@ class UamCanonicalRowsTest {
 	}
 
 	@Test
+	void nullAttributeValuesStayInTheSameInsertGroup() {
+		Map<String, Object> withNulls = subAddressAttributes("Tower", "12", null, null, null, null);
+		Map<String, Object> populated = subAddressAttributes("Annex", "2", "Floor", "3", "Unit", "West");
+
+		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration(), List.of(
+				address("ADDR-1", "LOC-9"),
+				payload("GeographicSubAddress", "geographic_sub_address", "SUB-1", withNulls, List.of(
+						parent("GeographicAddress", "ADDR-1", "address_id", "id"))),
+				payload("GeographicSubAddress", "geographic_sub_address", "SUB-2", populated, List.of(
+						parent("GeographicAddress", "ADDR-1", "address_id", "id")))));
+
+		assertThat(groups).extracting(UamCanonicalRows.InsertGroup::table)
+				.containsExactly("geographic_address", "geographic_sub_address");
+		UamCanonicalRows.InsertGroup subAddresses = groups.get(1);
+		assertThat(subAddresses.parameters()).hasSize(2);
+		assertThat(subAddresses.columns()).contains(
+				"id", "building_name", "level_type", "level_number", "sub_unit_type", "sub_unit_name", "address_id");
+		assertThat(subAddresses.columns()).doesNotContain("created_at");
+		assertThat(value(subAddresses, 0, "id")).isEqualTo("SUB-1");
+		assertThat(value(subAddresses, 0, "building_name")).isEqualTo("Tower");
+		assertThat(value(subAddresses, 0, "sub_unit_number")).isEqualTo("12");
+		assertThat(value(subAddresses, 0, "level_type")).isNull();
+		assertThat(value(subAddresses, 0, "level_number")).isNull();
+		assertThat(value(subAddresses, 0, "sub_unit_type")).isNull();
+		assertThat(value(subAddresses, 0, "sub_unit_name")).isNull();
+		assertThat(value(subAddresses, 0, "address_id")).isEqualTo("ADDR-1");
+		assertThat(value(subAddresses, 1, "id")).isEqualTo("SUB-2");
+		assertThat(value(subAddresses, 1, "level_type")).isEqualTo("Floor");
+		assertThat(value(subAddresses, 1, "address_id")).isEqualTo("ADDR-1");
+		assertThat(value(groups.get(0), "id")).isEqualTo("ADDR-1");
+		assertThat(value(groups.get(0), "location_id")).isEqualTo("LOC-9");
+	}
+
+	@Test
+	void nullableNullAttributeBindsAsSqlNull() {
+		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration(), List.of(
+				payload("GeographicSubAddress", "geographic_sub_address", "SUB-1",
+						subAddressAttributes("Tower", "12", null, null, null, null), List.of())));
+
+		List<UamCanonicalRows.InsertGroup> bound = UamTargetColumns.bind(
+				groups.get(0),
+				catalog(groups.get(0), Set.of("id")));
+
+		assertThat(bound).hasSize(1);
+		assertThat(value(bound.get(0), "id")).isEqualTo("SUB-1");
+		assertThat(value(bound.get(0), "building_name")).isEqualTo("Tower");
+		assertThat(value(bound.get(0), "level_type")).isNull();
+		assertThat(value(bound.get(0), "level_number")).isNull();
+		assertThat(value(bound.get(0), "sub_unit_type")).isNull();
+		assertThat(value(bound.get(0), "sub_unit_name")).isNull();
+		assertThat(bound.get(0).columns()).contains("level_type", "level_number", "sub_unit_type", "sub_unit_name");
+	}
+
+	@Test
+	void nullOnARequiredColumnFailsAtCatalogBinding() {
+		Map<String, Object> attributes = new LinkedHashMap<>();
+		attributes.put("at_type", null);
+		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration(), List.of(
+				payload("AddressLocation", "location", "LOC-1", attributes, List.of())));
+
+		assertThat(value(groups.get(0), "at_type")).isNull();
+		assertThatThrownBy(() -> UamTargetColumns.bind(groups.get(0), catalog(groups.get(0), Set.of("id", "at_type"))))
+				.isInstanceOf(TargetInfrastructureException.class)
+				.hasMessage("Column 'at_type' on 'location' is required");
+	}
+
+	@Test
 	void mappedCreatedAtIsKeptAsTheSourceValueUntilCatalogConversion() {
 		List<UamCanonicalRows.InsertGroup> groups = UamCanonicalRows.plan(configuration(), List.of(
 				payload("AddressLocation", "location", "LOC-000000001", Map.of(
@@ -170,7 +238,47 @@ class UamCanonicalRowsTest {
 	}
 
 	private static Object value(UamCanonicalRows.InsertGroup group, String column) {
-		return group.parameters().get(0).get(group.columns().indexOf(column));
+		return value(group, 0, column);
+	}
+
+	private static Object value(UamCanonicalRows.InsertGroup group, int row, String column) {
+		return group.parameters().get(row).get(group.columns().indexOf(column));
+	}
+
+	private static Map<String, Object> subAddressAttributes(
+			String buildingName,
+			String subUnitNumber,
+			String levelType,
+			String levelNumber,
+			String subUnitType,
+			String subUnitName) {
+		Map<String, Object> attributes = new LinkedHashMap<>();
+		attributes.put("building_name", buildingName);
+		attributes.put("sub_unit_number", subUnitNumber);
+		attributes.put("level_type", levelType);
+		attributes.put("level_number", levelNumber);
+		attributes.put("sub_unit_type", subUnitType);
+		attributes.put("sub_unit_name", subUnitName);
+		return attributes;
+	}
+
+	private static Map<String, UamTargetColumns.Column> catalog(
+			UamCanonicalRows.InsertGroup group,
+			Set<String> required) {
+		Map<String, UamTargetColumns.Column> columns = new LinkedHashMap<>();
+		for (String name : group.columns()) {
+			columns.put(name, new UamTargetColumns.Column(
+					group.schema(),
+					group.table(),
+					name,
+					"varchar",
+					!required.contains(name),
+					null,
+					false,
+					null,
+					null));
+		}
+		return columns;
 	}
 
 	private static LoadableTargetRecord payload(

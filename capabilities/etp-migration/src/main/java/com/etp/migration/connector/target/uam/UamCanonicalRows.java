@@ -88,7 +88,8 @@ final class UamCanonicalRows {
 				group = new InsertGroup(schema, row.table(), List.copyOf(row.values().keySet()), new ArrayList<>());
 				groups.put(signature, group);
 			}
-			group.parameters().add(List.copyOf(row.values().values()));
+			// List.copyOf rejects null elements. A null attribute is a legitimate SQL NULL.
+			group.parameters().add(new ArrayList<>(row.values().values()));
 		}
 		return List.copyOf(groups.values());
 	}

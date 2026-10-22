@@ -68,7 +68,7 @@ All timestamps are `TIMESTAMP WITH TIME ZONE` unless noted. JSON documents are `
 | source_field | VARCHAR(500) | NULL | |
 | target_field | VARCHAR(500) | NOT NULL | |
 | transformation_type | VARCHAR(50) | NOT NULL | See check constraint |
-| transformation_expression | TEXT | NULL | Stored; not executed as a script |
+| transformation_expression | TEXT | NULL | CONCAT evaluates `field + 'literal' + field`. Other text is stored and is not executed as a script |
 | default_value | TEXT | NULL | |
 | configuration | JSONB | NOT NULL default `{}` | Transform-specific |
 | mandatory | BOOLEAN | NOT NULL default FALSE | |

@@ -56,11 +56,15 @@ public class TransformationEngine {
 	}
 
 	private void applyConcat(MigrationMappingRule rule, SourceRecord source, Map<String, Object> target) {
-		Map<String, Object> config = config(rule);
-		List<String> sourceFields = stringList(config, "sourceFields");
-		if (sourceFields.isEmpty() && rule.getSourceField() != null && !rule.getSourceField().isBlank()) {
-			sourceFields = List.of(rule.getSourceField());
+		String expression = rule.getTransformationExpression();
+		if (expression != null && !expression.isBlank()) {
+			target.put(
+					rule.getTargetField(),
+					ConcatExpression.render(expression, field -> sourceValue(source, field), rule.getTargetField()));
+			return;
 		}
+		Map<String, Object> config = config(rule);
+		List<String> sourceFields = RuleSourceFields.columns(rule);
 		if (sourceFields.isEmpty()) {
 			throw new TransformationException(
 					MigrationErrorCodes.TRANSFORMATION_ERROR,

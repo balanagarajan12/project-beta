@@ -4,7 +4,7 @@ Audience: migration/integration developers, operators, and local demo users.
 
 **Implementation status:** Commands below match the current HTTP APIs. The current local end-to-end demonstration is recorded in [ARCHITECTURE.md](ARCHITECTURE.md) §28. The flat `uam_migration_test.address` example later in this guide is an older illustration. Neither is a production UAM deployment.
 
-Related: [API_GUIDE.md](API_GUIDE.md), [ARCHITECTURE.md](ARCHITECTURE.md), [migration-e2e-test-guide.md](migration-e2e-test-guide.md).
+Related: [API_GUIDE.md](API_GUIDE.md), [ARCHITECTURE.md](ARCHITECTURE.md), [STATUS_LIFECYCLE.md](STATUS_LIFECYCLE.md), [migration-e2e-test-guide.md](migration-e2e-test-guide.md).
 
 ---
 
@@ -324,7 +324,7 @@ Create the source through the API, activate, execute, reconcile, prepare promoti
 
 `POST /api/v1/mappings/{mappingId}/rules`
 
-Implemented types: DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, REGEX, CONDITIONAL, DATE_FORMAT. LOOKUP and CUSTOM persist but **fail at process time**.
+Implemented types: DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, REGEX, CONDITIONAL, DATE_FORMAT. LOOKUP and CUSTOM persist but **fail at process time**. Configuration examples are in [TRANSFORMATIONS.md](TRANSFORMATIONS.md).
 
 Mapping `status` may remain DRAFT; the worker uses enabled rules.
 

@@ -2,7 +2,7 @@
 
 **Module:** `capabilities/etp-migration` (`com.etp:etp-migration:0.0.1-SNAPSHOT`)
 **Implementation status:** Phases **0–10** are complete. Canonical target loading adds Flyway **V4** (per-run identity assignment) and **V5** (numeric range allocator). The repository continues through **V11**. Startup applies pending versions. Container `etp-migration-postgres` on host port 55446 has V1–V9 recorded as successful and does not yet have V10 or V11. Port 55433 was not inspected. Spring Boot **4.1.0**, Java **21**. The earlier full-suite figure of 542 tests is not restated here. The catalog-load tests re-run for this documentation pass are recorded in [migration-e2e-test-guide.md](migration-e2e-test-guide.md). See [DATABASE_MODEL.md](DATABASE_MODEL.md).
-**Related docs:** [DATABASE_MODEL.md](DATABASE_MODEL.md), [USER_GUIDE.md](USER_GUIDE.md), [API_GUIDE.md](API_GUIDE.md), [migration-e2e-test-guide.md](migration-e2e-test-guide.md), [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md), [CLAUDE_CONTEXT.md](CLAUDE_CONTEXT.md)
+**Related docs:** [DATABASE_MODEL.md](DATABASE_MODEL.md), [USER_GUIDE.md](USER_GUIDE.md), [API_GUIDE.md](API_GUIDE.md), [STATUS_LIFECYCLE.md](STATUS_LIFECYCLE.md), [TRANSFORMATIONS.md](TRANSFORMATIONS.md), [migration-e2e-test-guide.md](migration-e2e-test-guide.md), [BENCHMARK_TESTING.md](BENCHMARK_TESTING.md), [CLAUDE_CONTEXT.md](CLAUDE_CONTEXT.md)
 
 This document describes the **implemented** architecture. Items that exist only as schema placeholders, unused enums, or extension points are labeled **not implemented**.
 
@@ -597,18 +597,18 @@ Target-connector responsibilities are part of §8 Connector Architecture. Stagin
 
 ## 10. Mapping and transformation architecture
 
-Rules run in `sequence_no` order (`MappingEngine`). Disabled rules are skipped.
+Rules run in `sequence_no` order (`MappingEngine`). Disabled rules are skipped. Payloads, expressions, and expected outputs are in [TRANSFORMATIONS.md](TRANSFORMATIONS.md).
 
 | `TransformationType` | Runtime |
 |----------------------|---------|
 | DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, REGEX, CONDITIONAL, DATE_FORMAT | Implemented in `TransformationEngine` |
 | LOOKUP, CUSTOM | Allowed in DB check constraint; **throw** `UNSUPPORTED_TRANSFORMATION` at process time |
 
-CONCAT uses `configuration.sourceFields` + `separator`. SPLIT uses `delimiter` + `targetFields`. REGEX uses `pattern` / `replacement`. CONDITIONAL uses `condition.operator` / `sourceField` / `value` and `thenValue`/`elseValue`. DATE_FORMAT uses configured pattern keys in the rule `configuration` map.
+CONCAT uses `configuration.sourceFields` and `separator` when `transformationExpression` is empty. A CONCAT expression such as `street_name + ' - ' + city` copies each field and each quoted literal, including spaces inside the quotes. `configuration.sourceFields` still names the columns when that list is present. When it is absent, a comma-separated `sourceField` such as `street_name,city` is the column list. Extraction uses those columns when deciding whether a null `sourceKey` entity belongs to the row. SPLIT uses `delimiter` + `targetFields`. REGEX uses `pattern` / `replacement`. CONDITIONAL uses `condition.operator` / `sourceField` / `value` and `thenValue`/`elseValue`. DATE_FORMAT uses configured pattern keys in the rule `configuration` map.
 
 **Validation:** for each enabled **mandatory** rule, target field must be non-null and non-blank. Empty `DEMO-004` address after TRIM fails validation; the row is not COPY’d.
 
-`transformation_expression` is stored; the engine does not evaluate arbitrary expressions.
+`transformation_expression` is a CONCAT field-and-literal expression. It is not a general script.
 
 ---
 
@@ -682,6 +682,8 @@ There is **no** `GET /api/v1/promotions/{promotionId}`.
 
 ## 13. Lifecycle / state model
 
+Per-entity transitions, including batch, phase job, reconciliation, promotion, and execution control, are in [STATUS_LIFECYCLE.md](STATUS_LIFECYCLE.md). The diagrams in this section are the short form.
+
 ### Migration definition (`MigrationConfigStatus`)
 
 ```mermaid
@@ -689,11 +691,10 @@ stateDiagram-v2
   [*] --> DRAFT: create
   DRAFT --> ACTIVE: activate
   ACTIVE --> ACTIVE: activate idempotent
-  DRAFT --> INACTIVE: unused API
-  ACTIVE --> INACTIVE: unused API
+  ACTIVE --> INACTIVE: another version of the same name is activated
 ```
 
-INACTIVE exists in DB/enum. **No HTTP API** sets INACTIVE.
+There is no deactivate endpoint. Activating one version sets every other `ACTIVE` version of the same name to `INACTIVE`. An `INACTIVE` definition cannot be activated.
 
 **ACTIVE is not an environment firewall.** It is a migration-definition lifecycle / certification flag required before `POST .../runs` and `POST .../execute`. Deployment/release governance (who may activate in which environment) is **outside** this capability. There are no PROD/DEV branches in migration business logic.
 
@@ -1428,7 +1429,7 @@ Validation and transformation run in the batch worker before staging. Reconcilia
 `UamCanonicalRows.planDetailed` builds insert groups from the staged entity payload:
 
 - The physical table is the payload `targetEntity`. The first column is the payload `targetKey`. UAM fixtures use `id`.
-- Attributes become the remaining columns.
+- Attributes become the remaining columns. A null attribute value is kept in the insert parameters. Planning does not drop the row or replace the null. Catalog binding then applies the null, blank, and required-column rules.
 - Foreign keys are the staged relationship `targetForeignKey`. `referencesColumn` is copied from the parent row in the same batch. When that parent row was already emitted in an earlier batch and `referencesColumn` is the parent identity column (`targetKey`), the resolved parent target identity is copied instead. A referenced column that is not the identity column still requires the parent row. Definition configuration does not supply a second foreign-key list.
 - `EntityLoadOrder.parentsFirst` orders parents before children. Independent entities are ordered by name. A cycle fails with `Entity relationship graph contains a cycle: ...`.
 - Column types are not converted during planning. `UamTargetColumns` converts them from the catalog when a connection is open.

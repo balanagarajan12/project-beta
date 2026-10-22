@@ -1,0 +1,91 @@
+{
+  "definition": {
+    "name": "geographic-address-sftp-single",
+    "version": "1",
+    "sourceType": "FILE",
+    "targetType": "POSTGRESQL",
+    "targetEntity": "location",
+    "batchSize": 1000,
+    "loadMode": "BULK",
+    "configuration": {
+      "target": {
+        "mode": "UAM",
+        "connectionRef": "uam-db",
+        "stagingConnectionRef": "uam-db",
+        "schema": "uam",
+        "stagingSchema": "migration_staging",
+        "stagingTable": "uam_entity_stage",
+        "mergeStrategy": "NONE"
+      },
+      "promotion": {
+        "enabled": true
+      }
+    }
+  },
+  "entityMappings": {
+    "name": "geographic-address-sftp-single-mapping",
+    "version": "1",
+    "sourceType": "FILE",
+    "targetType": "UAM_POSTGRESQL",
+    "configuration": {
+      "modelType": "ENTITY_RELATIONSHIP",
+      "rootEntity": "AddressLocation",
+      "entities": [
+        {"entity": "AddressLocation", "targetEntity": "location", "sourceKey": "source_address_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "LOC-", "sequenceLength": 9}},
+        {"entity": "GeographicPointLocation", "targetEntity": "location", "sourceKey": "source_address_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "GEO-LOC-", "sequenceLength": 9}},
+        {"entity": "GeographicAddress", "targetEntity": "geographic_address", "sourceKey": "source_address_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "ADDR-", "sequenceLength": 10}},
+        {"entity": "GeographicLocation", "targetEntity": "geographic_location", "sourceKey": "source_address_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "GEO-", "sequenceLength": 9}},
+        {"entity": "LocationGeometry", "targetEntity": "location_geometry", "sourceKey": "source_address_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "GEOM-", "sequenceLength": 9}},
+        {"entity": "GeographicSubAddress", "targetEntity": "geographic_sub_address", "sourceKey": "source_sub_address_id", "targetKey": "id", "targetIdentity": {"strategy": "PREFIX_SEQUENCE", "prefix": "SUB-", "sequenceLength": 9}}
+      ],
+      "relationships": [
+        {"parent": "AddressLocation", "child": "GeographicAddress", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}], "targetForeignKey": {"column": "location_id", "referencesColumn": "id"}},
+        {"parent": "AddressLocation", "child": "GeographicPointLocation", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}]},
+        {"parent": "GeographicPointLocation", "child": "GeographicLocation", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}], "targetForeignKey": {"column": "location_id", "referencesColumn": "id"}},
+        {"parent": "GeographicPointLocation", "child": "LocationGeometry", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}]},
+        {"parent": "GeographicLocation", "child": "GeographicAddress", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}], "targetForeignKey": {"column": "geographic_location_id", "referencesColumn": "id"}},
+        {"parent": "GeographicLocation", "child": "LocationGeometry", "cardinality": "ONE_TO_ONE", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}], "targetForeignKey": {"column": "location_id", "referencesColumn": "id"}},
+        {"parent": "GeographicAddress", "child": "GeographicSubAddress", "cardinality": "ONE_TO_MANY", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}], "targetForeignKey": {"column": "address_id", "referencesColumn": "id"}},
+        {"parent": "GeographicLocation", "child": "GeographicSubAddress", "cardinality": "ONE_TO_MANY", "keys": [{"parentField": "source_address_id", "childField": "source_address_id"}], "targetForeignKey": {"column": "geographic_location_id", "referencesColumn": "id"}}
+      ]
+    }
+  },
+  "fieldMappings": [
+    {"sequenceNo": 1, "entity": "AddressLocation", "targetField": "at_type", "transformationType": "DEFAULT", "defaultValue": "geographicAddress", "mandatory": true, "enabled": true},
+    {"sequenceNo": 2, "entity": "AddressLocation", "sourceField": "created_at", "targetField": "created_at", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 3, "entity": "GeographicPointLocation", "targetField": "at_type", "transformationType": "DEFAULT", "defaultValue": "geographicLocation", "mandatory": true, "enabled": true},
+    {"sequenceNo": 4, "entity": "GeographicPointLocation", "sourceField": "created_at", "targetField": "created_at", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 5, "entity": "GeographicAddress", "sourceField": "street_number", "targetField": "street_number", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 6, "entity": "GeographicAddress", "sourceField": "street_name", "targetField": "street_name", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 7, "entity": "GeographicAddress", "sourceField": "street_type", "targetField": "street_type", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 8, "entity": "GeographicAddress", "sourceField": "city", "targetField": "city", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 9, "entity": "GeographicAddress", "sourceField": "state_or_province", "targetField": "state_or_province", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 10, "entity": "GeographicAddress", "sourceField": "postcode", "targetField": "postcode", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 11, "entity": "GeographicAddress", "sourceField": "country", "targetField": "country", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 12, "entity": "GeographicAddress", "sourceField": "address_type", "targetField": "address_type", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 13, "entity": "GeographicAddress", "sourceField": "validation_status", "targetField": "validation_status", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 14, "entity": "GeographicLocation", "targetField": "geo_json_type", "transformationType": "DEFAULT", "defaultValue": "Point", "mandatory": true, "enabled": true},
+    {"sequenceNo": 15, "entity": "LocationGeometry", "targetField": "geometry_type", "transformationType": "DEFAULT", "defaultValue": "Point", "mandatory": true, "enabled": true},
+    {"sequenceNo": 16, "entity": "LocationGeometry", "sourceField": "longitude", "targetField": "x", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 17, "entity": "LocationGeometry", "sourceField": "latitude", "targetField": "y", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 18, "entity": "GeographicSubAddress", "sourceField": "building_name", "targetField": "building_name", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 19, "entity": "GeographicSubAddress", "sourceField": "unit_number", "targetField": "sub_unit_number", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 20, "entity": "GeographicSubAddress", "sourceField": "private_street_number", "targetField": "private_street_number", "transformationType": "DIRECT", "enabled": true},
+    {"sequenceNo": 21, "entity": "GeographicSubAddress", "sourceField": "private_street_name", "targetField": "private_street_name", "transformationType": "DIRECT", "enabled": true}
+  ],
+  "source": {
+    "name": "geographic-address-sftp-single-source",
+    "sourceType": "FILE",
+    "enabled": true,
+    "configuration": {
+      "provider": "SFTP",
+      "fileFormat": "CSV",
+      "host": "localhost",
+      "port": 2222,
+      "credentialRef": "e2e",
+      "remotePath": "/upload/geographic_addresses_19102026_v1_single_record.csv",
+      "hasHeader": true,
+      "delimiter": ","
+    }
+  }
+}

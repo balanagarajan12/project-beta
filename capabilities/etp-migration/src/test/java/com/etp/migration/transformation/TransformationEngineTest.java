@@ -57,13 +57,63 @@ class TransformationEngineTest {
 
 	@Test
 	void concatJoinsConfiguredFields() {
-		MigrationMappingRule rule = rule(TransformationType.CONCAT, null, "full");
+		MigrationMappingRule rule = rule(TransformationType.CONCAT, "street_name,city", "full");
 		rule.setConfiguration(Map.of(
 				"sourceFields", List.of("addr1", "city", "state", "zip"),
 				"separator", ", "));
 		Map<String, Object> target = new HashMap<>();
 		engine.apply(rule, source(), target);
 		assertThat(target.get("full")).isEqualTo("123 Main St, salem, TN, 636001");
+	}
+
+	@Test
+	void concatSplitsACommaSeparatedSourceField() {
+		MigrationMappingRule rule = rule(TransformationType.CONCAT, "street_name,city", "name");
+		Map<String, Object> target = new HashMap<>();
+
+		engine.apply(rule, address(), target);
+
+		assertThat(target.get("name")).isEqualTo("MapleAustin");
+	}
+
+	@Test
+	void concatExpressionPreservesTheQuotedSeparator() {
+		MigrationMappingRule rule = rule(TransformationType.CONCAT, "street_name,city", "name");
+		rule.setTransformationExpression("street_name + ' - ' + city");
+		Map<String, Object> target = new HashMap<>();
+
+		engine.apply(rule, address(), target);
+
+		assertThat(target.get("name")).isEqualTo("Maple - Austin");
+	}
+
+	@Test
+	void concatExpressionPreservesOtherSeparators() {
+		Map<String, Object> slash = new HashMap<>();
+		MigrationMappingRule slashRule = rule(TransformationType.CONCAT, "street_name,city", "name");
+		slashRule.setTransformationExpression("street_name+'/'+city");
+		engine.apply(slashRule, address(), slash);
+		assertThat(slash.get("name")).isEqualTo("Maple/Austin");
+
+		Map<String, Object> comma = new HashMap<>();
+		MigrationMappingRule commaRule = rule(TransformationType.CONCAT, "street_name,city", "name");
+		commaRule.setTransformationExpression("street_name + ', ' + city");
+		engine.apply(commaRule, address(), comma);
+		assertThat(comma.get("name")).isEqualTo("Maple, Austin");
+	}
+
+	@Test
+	void concatExpressionKeepsAnEmptyField() {
+		MigrationMappingRule rule = rule(TransformationType.CONCAT, "street_name,city", "name");
+		rule.setTransformationExpression("street_name + ' - ' + city");
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("street_name", "Maple");
+		fields.put("city", null);
+		Map<String, Object> target = new HashMap<>();
+
+		engine.apply(rule, new SourceRecord(1L, fields), target);
+
+		assertThat(target.get("name")).isEqualTo("Maple - ");
 	}
 
 	@Test
@@ -116,6 +166,13 @@ class TransformationEngineTest {
 				.isEqualTo(MigrationErrorCodes.UNSUPPORTED_TRANSFORMATION);
 		assertThatThrownBy(() -> engine.apply(rule(TransformationType.CUSTOM, "city", "city"), source(), new HashMap<>()))
 				.isInstanceOf(TransformationException.class);
+	}
+
+	private static SourceRecord address() {
+		Map<String, Object> fields = new LinkedHashMap<>();
+		fields.put("street_name", "Maple");
+		fields.put("city", "Austin");
+		return new SourceRecord(1L, fields);
 	}
 
 	private static SourceRecord source() {

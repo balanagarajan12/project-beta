@@ -71,7 +71,7 @@ Promotion configuration remains inside **`definition.configuration.promotion`**.
 
 Entity objects accept `entity` or `name`. Both set to different values fails. `targetEntity` and `targetKey` are required. `sourceKey` may be JSON `null`, blank, or the literal string `null` (any case). Those are stored as no source key. They are not a column named `null`. `targetIdentity` is `PREFIX_SEQUENCE` (`prefix`, `sequenceLength`) or `PREFIX_SOURCE_VALUE` (`prefix` only).
 
-Field mappings: `sequenceNo`, `entity`, `sourceField`, `targetField`, `transformationType`, optional `transformationExpression`, `defaultValue`, `mandatory`, `enabled`. An empty `configuration` object may be omitted. Rules for one entity run in `sequenceNo` order.
+Field mappings: `sequenceNo`, `entity`, `sourceField`, `targetField`, `transformationType`, optional `transformationExpression`, `defaultValue`, `mandatory`, `enabled`. An empty `configuration` object may be omitted. Rules for one entity run in `sequenceNo` order. Per-type payloads and CONCAT expressions are in [TRANSFORMATIONS.md](TRANSFORMATIONS.md).
 
 Relationships: `parent`, `child`, `cardinality` (`ONE_TO_ONE`, `ONE_TO_MANY`, `MANY_TO_ONE`; `MANY_TO_MANY` is rejected), optional `keys` (`parentField`, `childField`), and optional `targetForeignKey`. `targetForeignKey.column` is the child column. `targetForeignKey.referencesColumn` is the parent column that is copied. It is not assumed to be `id`. Identifiers match `[A-Za-z_][A-Za-z0-9_]*`. A relationship needs `keys` or `targetForeignKey`.
 

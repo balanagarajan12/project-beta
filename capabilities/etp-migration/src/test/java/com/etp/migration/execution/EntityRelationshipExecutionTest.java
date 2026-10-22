@@ -333,6 +333,48 @@ class EntityRelationshipExecutionTest {
 	}
 
 	@Test
+	void resolvesTheSameKeylessParentForOneRecord() throws Exception {
+		AddressRun run = addressRows("one-address.csv", 1, 1000);
+
+		assertThat(run.result().failures()).isEmpty();
+		assertThat(run.result().plans()).hasSize(1);
+		assertAddressRows(run.result(), 1);
+
+		execute(run.mapping(), run.rules(), run.result().plans().get(0), csvPayloads(run), lookup(Map.of(
+				"AddressLocation", Map.of("1", "LOC-000000001"),
+				"ExternalIdentifier", Map.of("SRC-SFU-000001", "EXT-000000001"),
+				"GeographicAddress", Map.of("1", "ADDR-0000000001"))), 10);
+
+		Map<String, Object> external = payload("ExternalIdentifier", "SRC-SFU-000001");
+		assertThat(relationships(external)).singleElement().satisfies(link -> {
+			assertThat(link.get("parentEntity")).isEqualTo("AddressLocation");
+			assertThat(link.get("parentSourceIdentity")).isEqualTo("1");
+			assertThat(link.get("parentTargetIdentity")).isEqualTo("LOC-000000001");
+		});
+		assertThat(attributes(payload("AddressLocation", "1")).get("name")).isEqualTo("Maple - Austin");
+	}
+
+	@Test
+	void resolvesTheSameKeylessParentForManyRecordsInOneBatch() throws Exception {
+		AddressRun run = addressRows("many-addresses.csv", 3, 1000);
+
+		assertThat(run.result().failures()).isEmpty();
+		assertThat(run.result().plans()).hasSize(1);
+		assertThat(run.result().plans().get(0).workItems()).hasSize(9);
+		assertAddressRows(run.result(), 3);
+	}
+
+	@Test
+	void resolvesTheSameKeylessParentAcrossBatches() throws Exception {
+		AddressRun run = addressRows("batched-addresses.csv", 3, 2);
+
+		assertThat(run.result().failures()).isEmpty();
+		assertThat(run.result().plans()).hasSizeGreaterThan(1);
+		assertThat(run.result().plans()).allSatisfy(plan -> assertThat(plan.workItems()).hasSizeLessThanOrEqualTo(2));
+		assertAddressRows(run.result(), 3);
+	}
+
+	@Test
 	void reportsAMissingRelationshipParent() {
 		List<EntityRecord> records = List.of(
 				record("Location", "L001", 1, Map.of("location_id", "L001", "location_name", "Main")),
@@ -748,6 +790,81 @@ class EntityRelationshipExecutionTest {
 				.map(link -> (Map<String, Object>) link.get("targetForeignKey"))
 				.findFirst()
 				.orElseThrow();
+	}
+
+	private AddressRun addressRows(String file, int rows, int batchSize) throws Exception {
+		StringBuilder csv = new StringBuilder("source_address_id,street_name,city\n");
+		for (int row = 1; row <= rows; row++) {
+			csv.append("SRC-SFU-").append(String.format("%06d", row)).append(",Maple,Austin\n");
+		}
+		write(file, csv.toString());
+		EntityRelationshipMapping mapping = mapping(
+				"AddressLocation",
+				List.of(
+						new EntityDefinition("AddressLocation", "location", null, "id"),
+						new EntityDefinition("ExternalIdentifier", "external_identifier", "source_address_id", "id"),
+						new EntityDefinition("GeographicAddress", "geographic_address", null, "id")),
+				List.of(
+						new RelationshipDefinition(
+								"AddressLocation",
+								"ExternalIdentifier",
+								RelationshipCardinality.ONE_TO_MANY,
+								List.of(),
+								new TargetForeignKey("entity_id", "id")),
+						foreignKey("AddressLocation", "GeographicAddress", "location_id", "id")));
+		MigrationMappingRule name = rule("AddressLocation", 1, "street_name,city", "name", TransformationType.CONCAT, false);
+		name.setTransformationExpression("street_name + ' - ' + city");
+		MigrationMappingRule street = rule("GeographicAddress", 2, "street_name", "street_name", TransformationType.DIRECT, false);
+		MigrationMappingRule external = rule("ExternalIdentifier", 3, "source_address_id", "external_id", TransformationType.DIRECT, false);
+		List<MigrationMappingRule> rules = List.of(name, street, external);
+		Map<String, Object> source = singleConfig(file);
+		List<ExecutionBatchPlan> plans = new ArrayList<>();
+		List<EntityItemFailure> failures = new ArrayList<>();
+		planSource.consume(source, mapping, rules, batchSize, plans::add, failures::add);
+		return new AddressRun(new RunResult(plans, failures), mapping, rules, source);
+	}
+
+	private static void assertAddressRows(RunResult result, int rows) {
+		List<ExecutionWorkItem> items = result.plans().stream().flatMap(plan -> plan.workItems().stream()).toList();
+		assertThat(items).hasSize(rows * 3);
+		for (int row = 1; row <= rows; row++) {
+			long recordNumber = row;
+			String ordinal = Long.toString(recordNumber);
+			String external = String.format("SRC-SFU-%06d", recordNumber);
+			assertThat(items).anySatisfy(item -> {
+				assertThat(item.entityName()).isEqualTo("AddressLocation");
+				assertThat(item.sourceIdentity()).isEqualTo(ordinal);
+				assertThat(item.sourceRecordNumber()).isEqualTo(recordNumber);
+				assertThat(item.rootIdentity()).isEqualTo(ordinal);
+			});
+			assertThat(items).anySatisfy(item -> {
+				assertThat(item.entityName()).isEqualTo("ExternalIdentifier");
+				assertThat(item.sourceIdentity()).isEqualTo(external);
+				assertThat(item.sourceRecordNumber()).isEqualTo(recordNumber);
+				assertThat(item.rootEntity()).isEqualTo("AddressLocation");
+				assertThat(item.rootIdentity()).isEqualTo(ordinal);
+				assertThat(item.parents()).containsExactly(new WorkItemParent("AddressLocation", ordinal));
+			});
+			assertThat(items).anySatisfy(item -> {
+				assertThat(item.entityName()).isEqualTo("GeographicAddress");
+				assertThat(item.sourceIdentity()).isEqualTo(ordinal);
+				assertThat(item.sourceRecordNumber()).isEqualTo(recordNumber);
+				assertThat(item.parents()).containsExactly(new WorkItemParent("AddressLocation", ordinal));
+			});
+		}
+	}
+
+	private Map<EntityIdentity, EntityRecord> csvPayloads(AddressRun run) {
+		EntityCsvAccess access = planSourceCsv();
+		var records = access.open(run.source(), run.mapping(), run.rules());
+		return records.matching(wanted(run.result().plans().get(0)));
+	}
+
+	private record AddressRun(
+			RunResult result,
+			EntityRelationshipMapping mapping,
+			List<MigrationMappingRule> rules,
+			Map<String, Object> source) {
 	}
 
 	private static EntityRelationshipMapping geometryModel(String geographicLocationSourceKey) {

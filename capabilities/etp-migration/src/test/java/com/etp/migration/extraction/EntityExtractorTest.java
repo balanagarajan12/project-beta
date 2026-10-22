@@ -92,6 +92,43 @@ class EntityExtractorTest {
 	}
 
 	@Test
+	void concatSourceFieldUsesEachColumnOfANullSourceKeyParent() {
+		EntityDefinition parent = new EntityDefinition("AddressLocation", "location", null, "id");
+		EntityDefinition child = new EntityDefinition("ExternalIdentifier", "external_identifier", "source_address_id", "id");
+		MigrationMappingRule name = rule(1, "street_name,city", "name");
+		name.setEntityName("AddressLocation");
+		name.setTransformationType(TransformationType.CONCAT);
+		MigrationMappingRule external = rule(2, "source_address_id", "external_id");
+		external.setEntityName("ExternalIdentifier");
+		EntityRelationshipMapping mapping = new EntityRelationshipMapping(
+				"AddressLocation",
+				List.of(parent, child),
+				List.of());
+
+		EntityExtraction present = extractor.extract(
+				row(1, Map.of("source_address_id", "SRC-SFU-000001", "street_name", "Maple", "city", "Austin")),
+				mapping,
+				List.of(name, external));
+
+		assertThat(present.failures()).isEmpty();
+		assertThat(identity(present, "AddressLocation")).isEqualTo("1");
+		assertThat(record(present, "AddressLocation").sourceRecordNumber()).isEqualTo(1L);
+		assertThat(record(present, "AddressLocation").fields())
+				.containsEntry("street_name", "Maple")
+				.containsEntry("city", "Austin")
+				.doesNotContainKey("street_name,city");
+		assertThat(identity(present, "ExternalIdentifier")).isEqualTo("SRC-SFU-000001");
+		assertThat(record(present, "ExternalIdentifier").sourceRecordNumber()).isEqualTo(1L);
+
+		EntityExtraction blank = extractor.extract(
+				row(1, Map.of("source_address_id", "SRC-SFU-000001", "street_name", " ", "city", "")),
+				mapping,
+				List.of(name, external));
+
+		assertThat(blank.records()).extracting(EntityRecord::entityName).containsExactly("ExternalIdentifier");
+	}
+
+	@Test
 	void nullSourceKeyUsesTheSourceRecordAndDoesNotReadANullField() {
 		EntityDefinition parent = new EntityDefinition("GeographicAddress", "geographic_address", "address_id", "location_id");
 		EntityDefinition child = new EntityDefinition("GeographicSubAddress", "geographic_sub_address", null, "id");
