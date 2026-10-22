@@ -47,7 +47,7 @@ etp-foundation/
 | Capability Registry REST API, lifecycle, inline JSON contracts, audit writes | Implemented |
 | Core UI shell, login, read-only capability list and details | Implemented. Write actions are on screen and disabled. Other shell routes are placeholders |
 | ETP IAM (`etp.iam`): login, client-credentials token, authorization check, Keycloak | Implemented |
-| Migration control plane, filesystem and single-file SFTP CSV, staging, reconciliation, promotion | Implemented |
+| Migration control plane, filesystem and single-file SFTP CSV, staging, reconciliation, promotion | Implemented. Execute, reconcile, promotion preparation, and promotion return HTTP 202 and finish in the background. One phase does not start the next. Repository Flyway is V1–V11; startup applies pending scripts. Core UI has no migration screens |
 | Export service `POST /api/v1/exports` | Implemented |
 | PostgreSQL, Kafka, and Redis local infrastructure (Compose) | Implemented as infrastructure, not as request-path services |
 | Application Registry APIs, composition, generated applications | Not implemented |

@@ -194,7 +194,7 @@ docker compose up -d
 mvn spring-boot:run
 ```
 
-Default port is 8082. The sample target URL in `.env.example` is the same database, schema `migration_staging`.
+Default port is 8082. That Maven goal publishes Swagger UI at `http://localhost:8082/swagger-ui/index.html` without a JWT. Business APIs still require a JWT. The sample target URL in `.env.example` is the same database, schema `migration_staging`.
 
 3. For local calls without a JWT, start with the `dev` profile. Outside `dev`, send `Authorization: Bearer <access token>` from IAM or Keycloak.
 
@@ -206,10 +206,10 @@ mvn spring-boot:run "-Dspring-boot.run.profiles=dev"
 
 1. `POST /api/v1/migration-configurations` (definition stays DRAFT).
 2. `POST /api/v1/migrations/{id}/activate`.
-3. `POST /api/v1/migrations/{id}/execute` to load staging.
-4. `POST /api/v1/migration-runs/{runId}/reconcile`.
-5. `POST /api/v1/migration-runs/{runId}/promotion/prepare`.
-6. `POST /api/v1/migration-runs/{runId}/promote`.
+3. `POST /api/v1/migrations/{id}/execute` returns 202 and a `runId` as soon as the run is stored. Poll `GET /api/v1/migration-runs/{runId}` until it finishes loading staging.
+4. `POST /api/v1/migration-runs/{runId}/reconcile` returns 202. Poll `GET /api/v1/migration-runs/{runId}/reconciliation`.
+5. `POST /api/v1/migration-runs/{runId}/promotion/prepare` returns 202. Poll `GET /api/v1/migration-runs/{runId}/promotion`.
+6. `POST /api/v1/migration-runs/{runId}/promote` returns 202. Poll the same promotion GET. A finished phase does not start the next one.
 
 Filesystem sources use a CSV under `etp.migration.storage.root` (default `./data/migration`). SFTP sources send `credentialRef`, not a password. Field-level JSON is in `capabilities/etp-migration/docs/API_GUIDE.md` and `capabilities/etp-migration/docs/USER_GUIDE.md`.
 

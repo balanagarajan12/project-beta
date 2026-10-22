@@ -140,6 +140,9 @@ Types: DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, LOOKUP, REGEX
 | total_records … rejected_records | BIGINT | NOT NULL default 0 | Aggregate counters |
 | total_batches / completed_batches / failed_batches | INTEGER | NOT NULL default 0 | |
 | error_message | VARCHAR(2000) | NULL | |
+| background_execution | BOOLEAN | NOT NULL default false | V6. True only after `POST /execute` accepts the run |
+| execution_worker_id | VARCHAR(200) | NULL | V6. Worker that currently owns background execution |
+| execution_lease_until | timestamptz | NULL | V6. Null or past means another worker may claim the run |
 | created_at / updated_at | timestamptz | NOT NULL | |
 
 **Status check:** CREATED, QUEUED, RUNNING, PAUSED, COMPLETED, COMPLETED_WITH_ERRORS, FAILED, CANCEL_REQUESTED, CANCELLED.
@@ -204,7 +207,7 @@ Types: DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, LOOKUP, REGEX
 | id | BIGINT IDENTITY | PK | |
 | migration_run_id | UUID | NOT NULL | FK CASCADE |
 | migration_batch_id | BIGINT | NULL | FK CASCADE |
-| stage | VARCHAR(50) | NOT NULL | EXTRACT, STANDARDIZE, TRANSFORM, ENRICH, VALIDATE, DEDUPLICATE, LOAD, RECONCILE |
+| stage | VARCHAR(50) | NOT NULL | EXTRACT, STANDARDIZE, TRANSFORM, ENRICH, VALIDATE, DEDUPLICATE, LOAD, RECONCILE, PROMOTE |
 | error_code / error_type | VARCHAR(100) | NULL | |
 | source_record_key / source_record_hash | VARCHAR(500) / VARCHAR(128) | NULL | |
 | target_entity_key / field_name | VARCHAR(500) | NULL | |
@@ -214,6 +217,14 @@ Types: DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, LOOKUP, REGEX
 | created_at | timestamptz | NOT NULL | |
 
 **Indexes:** run, batch, (run, stage), (run, source_record_key).
+
+`V11` adds `PROMOTE` to the stage check. Promotion execution and promotion preparation use that stage. A promotion-batch error keeps `migration_batch_id` as the execution batch and stores `promotionBatchId` in `error_details`. A phase-job error leaves the batch null and stores `phaseJobId` in `error_details`. `error_details` may also include `promotionId`, `location`, and `category`. Stack traces are logged and are not stored.
+
+Duplicate suppression is an application check inside the insert transaction, under PostgreSQL `READ COMMITTED`. The key is run, batch, stage, code, message, and source record key. A null batch means a phase or preparation error. A null source key means a batch or phase error rather than a record error. The check is not atomic across two transactions: both can see no row and both can insert. There is no unique index. PostgreSQL unique indexes treat nulls as distinct, so one index on those columns would not enforce this key. Partial indexes could, after a duplicate scan. That scan was not run against a live control plane. Existing rows may already repeat, so a constraint is not added here. A later successful attempt does not delete the earlier row. A second promotion of the same execution batch with the same message does not insert another row, because `promotionBatchId` is only in `error_details`. The first row keeps the first promotion batch id. Phase-job `attempt_count` and promotion-batch timestamps are the attempt history. Adding an attempt column would keep each attempt and would stop the current key from collapsing them.
+
+`migration_record.error_id` stays unused. The pipeline does not insert `migration_record` rows. A record error is traced by `migration_error.migration_run_id`, `migration_batch_id`, `stage`, and `source_record_key`. One record can have several of those rows. A single `error_id` cannot represent that.
+
+A reconciliation outcome of `FAILED` is stored on `migration_reconciliation`, including `details`. It does not insert `migration_error`. A thrown reconciliation or promotion exception inserts `migration_error` only after the phase job's owned failure update succeeds. `GET /api/v1/migration-runs/{runId}/reconciliation` copies `details` and redacts identity and message fields. The stored JSON is not rewritten. Field-level rules are in [API_GUIDE.md](API_GUIDE.md).
 
 ---
 
@@ -291,6 +302,29 @@ Types: DIRECT, TRIM, UPPERCASE, LOWERCASE, DEFAULT, CONCAT, SPLIT, LOOKUP, REGEX
 
 **Unique:** `(promotion_id, migration_batch_id)`.
 **Indexes:** promotion, run, batch.
+
+---
+
+### 3.13 `migration_phase_job` (V7)
+
+**Purpose:** Background job for reconciliation, promotion preparation, or promotion. Job status is `QUEUED`, `RUNNING`, `COMPLETED`, or `FAILED`. `outcome` stores the reconciliation outcome or the promotion status after the job finishes. Those are different facts.
+
+| Column | Type | Null | Notes |
+|--------|------|------|--------|
+| id | UUID | PK | Returned as `jobId` |
+| migration_run_id | UUID | NOT NULL | FK to `migration_run` |
+| phase | VARCHAR(40) | NOT NULL | `RECONCILIATION`, `PROMOTION_PREPARATION`, `PROMOTION` |
+| status | VARCHAR(20) | NOT NULL | Job status, not the reconciliation or promotion outcome |
+| scope | VARCHAR(40) | NULL | `BUSINESS_TARGET`, or null for staging |
+| promotion_id | UUID | NULL | Set when preparation or promotion finishes |
+| worker_id / lease_until | VARCHAR / timestamptz | NULL | Claim owner. Cleared when the worker releases the job |
+| attempt_count | INTEGER | NOT NULL | Incremented on each claim |
+| outcome | VARCHAR(40) | NULL | Reconciliation outcome or promotion status |
+| error_code / error_message | VARCHAR | NULL | Last failure while the job is `FAILED` |
+| requested_by | VARCHAR(100) | NULL | Authenticated actor captured when preparation is accepted |
+| created_at / started_at / progress_at / completed_at / updated_at | timestamptz | | Progress and recovery timestamps |
+
+**Indexes:** `(migration_run_id, phase, created_at DESC)`, `(status, lease_until)`. Unique partial index on `(migration_run_id, phase, scope)` while status is `QUEUED` or `RUNNING`.
 
 ---
 
@@ -390,7 +424,7 @@ This table is still operator DDL. It is not a Flyway migration. The control-plan
 
 `uam_migration_test.address` is an older **flat** illustration table. It is not an ETP control-plane table and is not created by V1–V5.
 
-The completed local canonical demonstration used schema **`uam`** on the target database (`localhost:55432` / `etp_migration`): `location`, `geographic_address`, `geographic_location`, `location_geometry`, and `geographic_sub_address`. Staging for that run is `migration_staging.uam_entity_stage` on the same target instance. The control plane stays on `localhost:55433`. Hosting `uam` on the existing local PostgreSQL instance was a workstation arrangement because a separate UAM container was not available. It is not a production UAM deployment. The column list used locally is `local/uam-target.sql`. In that script, `geographic_sub_address.private_street_name` and `private_street_number` are nullable. The script also drops `NOT NULL` when those columns already exist. That script does not replace a production UAM schema. Flyway does not manage it.
+The completed local canonical demonstration used schema **`uam`** on the target database (`localhost:55432` / `etp_migration`): `location`, `geographic_address`, `geographic_location`, `location_geometry`, and `geographic_sub_address`. Staging for that run is `migration_staging.uam_entity_stage` on the same target instance. Batch reads use `idx_uam_entity_stage_run_batch` on `(migration_run_id, migration_batch_id)`. Flyway V9 creates that index only when the table is in the control-plane database. The local staging script creates it on the staging database. The control plane stays on `localhost:55433`. Hosting `uam` on the existing local PostgreSQL instance was a workstation arrangement because a separate UAM container was not available. It is not a production UAM deployment. The column list used locally is `local/uam-target.sql`. In that script, `geographic_sub_address.private_street_name` and `private_street_number` are nullable. The script also drops `NOT NULL` when those columns already exist. That script does not replace a production UAM schema. Flyway does not manage it.
 
 Integration tests also use `promo_app.address` similarly for the flat contract.
 
@@ -436,6 +470,8 @@ Two prefixes do not share a row. A reservation locks the row, adds the requested
 | `src/main/resources/db/migration/V3__add_mapping_rule_entity_name.sql` | Nullable `migration_mapping_rule.entity_name` |
 | `src/main/resources/db/migration/V4__create_migration_identity_allocation.sql` | `(run, entity, source identity)` → formatted target id, so a retry reuses it |
 | `src/main/resources/db/migration/V5__create_target_identity_allocator.sql` | Atomic numeric range reservation, keyed by id prefix |
+| `src/main/resources/db/migration/V6__migration_run_execution_lease.sql` | Background execute flag and run lease |
+| `src/main/resources/db/migration/V7__migration_phase_job.sql` | Reconciliation and promotion jobs |
 
 `migration_identity_allocation` remembers which formatted id was given to a source identity in one run. `target_identity_allocator.current_value` is the last reserved number for that prefix. Configuration supplies `prefix` and `sequenceLength` only. It does not supply a start number. Entity staging uniqueness remains operator DDL. `migration_record` remains the optional unused lineage table from V1.
 
@@ -449,4 +485,4 @@ Two prefixes do not share a row. A reservation locks the row, adds the requested
 | `etp_migration` | Host **55432** | Local demonstration target: `migration_staging` and schema `uam`. Not a production UAM deployment |
 | `etp_migration_test` | Testcontainers `postgres:17`, ephemeral mapped port | `@SpringBootTest` / `@DataJpaTest` |
 
-Flyway V1–V5 run against whichever DataSource Spring is using. Tests do **not** isolate by truncating the demo database.
+Flyway V1–V11 are in the repository and run against whichever DataSource Spring is using. Startup applies only versions missing from that database's `flyway_schema_history`. V9 does not change the control-plane schema when the staging table is absent. V10 adds `uk_migration_promotion_open`, so one run has at most one `NOT_STARTED`, `READY`, or `PROMOTING` promotion. V11 adds `PROMOTE` to `ck_migration_error_stage`. This closure did not query the workstation control plane, so it does not claim V11 is already applied there. Tests do **not** isolate by truncating the demo database.

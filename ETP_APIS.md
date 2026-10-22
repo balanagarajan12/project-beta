@@ -126,7 +126,7 @@ Core UI calls login only. It does not call `/auth/token`.
 
 Process: `capabilities/etp-migration`. Default port **8082** (`ETP_MIGRATION_SERVER_PORT`).
 
-OpenAPI (`/v3/api-docs` and Swagger UI) is **off** unless profile `dev` is active or `ETP_MIGRATION_OPENAPI_ENABLED=true`.
+OpenAPI (`/v3/api-docs`, `/v3/api-docs.yaml`, and Swagger UI) is **off** unless profile `dev` is active, `ETP_MIGRATION_OPENAPI_ENABLED=true`, or the process was started with `mvn spring-boot:run` (that goal sets the property for the local process only).
 
 Authentication: JWT on `/api/v1/**` unless profile `dev` is active (`permitAll`). No role or scope is enforced inside this module. Issuer default: `http://localhost:8180/realms/etp`.
 
@@ -154,13 +154,15 @@ Commands are POST. Queries are GET. Nothing here auto-promotes.
 
 Composite body accepts `mapping` or `entityMappings`, and `rules` or `fieldMappings`. SFTP source configuration uses `credentialRef`. Do not send `password`, `privateKey`, or `passphrase`.
 
+`definition.configuration` accepts only `target` and `promotion`. Entity tables, relationships, and load order come from `entityMappings`. Column types and required timestamps come from the target catalog.
+
 `modelType` omitted means a single entity and `definition.targetEntity` is required. `modelType` `ENTITY_RELATIONSHIP` uses `rootEntity`, relationships, and optional canonical `target.mode` `UAM`.
 
 ### Runs
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/api/v1/migrations/{migrationId}/execute` | Create a run for an ACTIVE definition, prepare the source, and process eligible batches in the request. Does not reconcile or promote. HTTP 201 |
+| POST | `/api/v1/migrations/{migrationId}/execute` | Create a QUEUED run for an ACTIVE definition and accept it for background preparation and batch processing. HTTP 202 with `runId`, `status`, and `statusUrl`. Poll `GET /api/v1/migration-runs/{runId}`. Does not reconcile or promote |
 | POST | `/api/v1/migrations/{migrationId}/runs` | Create a QUEUED run only. Does not read the file |
 | GET | `/api/v1/migration-runs` | All runs. Optional `migrationDefinitionId`, `page`, `size` |
 | GET | `/api/v1/migrations/{migrationId}/runs` | Runs for one definition |
@@ -170,9 +172,9 @@ Composite body accepts `mapping` or `entityMappings`, and `rules` or `fieldMappi
 | POST | `/api/v1/migration-runs/{runId}/prepare` | Inspect the source and build batches |
 | POST | `/api/v1/migration-runs/{runId}/process-next-batch` | Process one claimed batch |
 | GET | `/api/v1/migration-runs/{runId}/batches` | Batches for the run |
-| GET | `/api/v1/migration-runs/{runId}/errors` | Paginated `migration_error` rows, including `errorDetails` |
-| POST | `/api/v1/migration-runs/{runId}/reconcile` | Reconcile staging (or business target when `verificationScope=BUSINESS_TARGET`) |
-| GET | `/api/v1/migration-runs/{runId}/reconciliation` | Read the reconciliation result |
+| GET | `/api/v1/migration-runs/{runId}/errors` | Paginated `migration_error` rows, including `errorDetails`. Promotion and phase failures use stage `PROMOTE` or `RECONCILE`. Responses omit stack traces and redact secret or row text in messages, source keys, and nested details. The stored row is not rewritten by the read |
+| POST | `/api/v1/migration-runs/{runId}/reconcile` | Accept a reconciliation job. HTTP 202 with `jobId`, `runId`, `phase`, `status`, and `statusUrl`. Default scope is staging. `verificationScope=BUSINESS_TARGET` verifies the business table. Poll `GET /api/v1/migration-runs/{runId}/reconciliation` or `GET /api/v1/migration-runs/{runId}/phase-jobs/{jobId}`. Job status `COMPLETED` is separate from reconciliation outcome `PASSED`, `PASSED_WITH_WARNINGS`, or `FAILED` |
+| GET | `/api/v1/migration-runs/{runId}/reconciliation` | Read the reconciliation result and the latest reconciliation job status. Returns the job while checks are still queued and no rows exist yet. Example source identities and reason text are redacted when they match the error redaction patterns. The stored document is not rewritten |
 
 Execute and run creation return 409 when the definition is not ACTIVE.
 
@@ -180,13 +182,17 @@ Execute and run creation return 409 when the definition is not ACTIVE.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/api/v1/migration-runs/{runId}/promotion/prepare` | Find eligible staged batches. Does not write business tables. HTTP 200 |
-| POST | `/api/v1/migration-runs/{runId}/promote` | Write a READY promotion into the configured PostgreSQL target |
-| GET | `/api/v1/migration-runs/{runId}/promotion` | Read promotion state. Does not change rows |
+| POST | `/api/v1/migration-runs/{runId}/promotion/prepare` | Accept promotion preparation. HTTP 202. `promotionId` is the promotion row created or reused in that transaction (`NOT_STARTED` until the worker marks it `READY`). It is not the `jobId`. Does not write business tables. A queued or running preparation is returned again. An existing READY or PROMOTED promotion is left unchanged. Poll `GET /api/v1/migration-runs/{runId}/promotion` |
+| POST | `/api/v1/migration-runs/{runId}/promote` | Accept promotion of an existing READY promotion into the configured PostgreSQL or UAM target. HTTP 202. `promotionId` is that existing promotion. Does not prepare one when none exists. A second call while the job is queued or running returns that job. An already PROMOTED promotion is not written again |
+| GET | `/api/v1/migration-runs/{runId}/promotion` | Read promotion status, live status counts in `batchCounts`, `errorCode`, `errorMessage`, and the latest preparation or promotion job status. `PARTIALLY_PROMOTED` uses `MIGRATION_PROMOTION_PARTIAL_FAILURE`. `PROMOTION_FAILED` uses `MIGRATION_PROMOTION_BATCH_FAILED`. A clean `PROMOTED` result has a null error summary. Job status `COMPLETED` is separate from the promotion status. Does not return the batch list and does not change rows. 404 until a promotion row exists |
+| GET | `/api/v1/migration-runs/{runId}/promotion/batches` | Paginated promotion batches. `page` defaults to 0, `size` defaults to 20 and is capped at 100. Optional `status` filters by promotion-batch status. Ordered by batch number. `durationMillis` is the latest completed attempt (`completedAt - startedAt`) and is null while `completedAt` is null. Does not load `source_locator`. 400 for an unknown status |
+| POST | `/api/v1/migration-runs/{runId}/control` | Pause or resume run execution. Body `{"action":"PAUSE"}` or `{"action":"RESUME"}`. Control state is separate from lifecycle status. A pause stops new batch claims after the current batch commits. Startup does not resume a paused run |
+| POST | `/api/v1/migration-runs/{runId}/promotion/control` | Pause or resume promotion independently of run control. Same request body. Does not repeat promoted batches |
+| GET | `/api/v1/migration-runs/{runId}/phase-jobs/{jobId}` | Read one persisted phase job. Does not start the phase |
 
 There is no `GET /api/v1/promotions/{promotionId}` and no PUT, PATCH, or DELETE for definitions.
 
-Order that matches the engine: configure → activate → execute (or create/prepare/process) → reconcile → prepare promotion → promote. A completed run means staging finished, not that business tables were loaded.
+Order that matches the engine: configure → activate → execute (or create/prepare/process) → reconcile → prepare promotion → promote. Each of those four long-running steps is an explicit HTTP call. Completing one does not start the next. A completed run means staging finished, not that business tables were loaded. Job status is `QUEUED`, `RUNNING`, `COMPLETED`, or `FAILED`. A failed job can be submitted again. `GET /api/v1/migration-runs/{runId}/phase-jobs/{jobId}` returns the persisted job and does not start work.
 
 ---
 

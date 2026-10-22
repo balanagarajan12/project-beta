@@ -43,7 +43,7 @@ flowchart LR
 | UUIDs | Path variables, JSON string |
 | Pagination | `page` default 0, `size` default 20, max 100 (`PagedResponse`) |
 | 201 Location | Resource URL as documented per endpoint |
-| JWT | Required on `/api/v1/**` except profile `dev`. Public: health; `/v3/api-docs/**` and Swagger UI only when OpenAPI is enabled (off by default outside `dev`). OpenAPI scheme **`bearer-jwt`**. No roles/scopes are enforced in this module. |
+| JWT | Required on `/api/v1/**` except profile `dev`. Public: health; `/v3/api-docs`, `/v3/api-docs.yaml`, `/v3/api-docs/**`, and Swagger UI only when OpenAPI is enabled (off for a packaged run; on for profile `dev` and for `mvn spring-boot:run`). OpenAPI scheme **`bearer-jwt`**. No roles/scopes are enforced in this module. |
 
 ---
 
@@ -75,15 +75,17 @@ Field mappings: `sequenceNo`, `entity`, `sourceField`, `targetField`, `transform
 
 Relationships: `parent`, `child`, `cardinality` (`ONE_TO_ONE`, `ONE_TO_MANY`, `MANY_TO_ONE`; `MANY_TO_MANY` is rejected), optional `keys` (`parentField`, `childField`), and optional `targetForeignKey`. `targetForeignKey.column` is the child column. `targetForeignKey.referencesColumn` is the parent column that is copied. It is not assumed to be `id`. Identifiers match `[A-Za-z_][A-Za-z0-9_]*`. A relationship needs `keys` or `targetForeignKey`.
 
-Canonical `definition.configuration` used by the UAM tests:
+`definition.configuration` accepts only `target` and `promotion`. A request that also sends `tables`, `loadOrder`, `foreignKeys`, `loadTimestampColumns`, or `columnTypes` fails with HTTP 400. Those concerns are derived:
 
-- `target.mode` `UAM`, `target.schema`, `target.stagingSchema`, `target.stagingTable`, `target.mergeStrategy` `NONE`
-- `tables`: entity name → physical table
-- `loadOrder`: optional. Omitted order is parent before child. A cycle is rejected. Independent names sort by name.
-- `foreignKeys`: `{entity, parent, column}` writes the parent target identity. Add `referencesColumn` to copy that parent column instead.
-- `loadTimestampColumns`: `{table, column}` fills a null or blank value during planning. A source timestamp already present is kept.
-- `columnTypes`: still accepted. Planning converts only `numeric` and `timestamptz`. The live PostgreSQL load then converts from `information_schema`. See [ARCHITECTURE.md](ARCHITECTURE.md) §29.
-- `promotion.enabled`
+- Target table: `entityMappings.configuration.entities[].targetEntity`
+- Foreign key: `relationships[].targetForeignKey` (`column` on the child, `referencesColumn` on the parent)
+- Load order: parent before child from that relationship graph. A cycle fails. Independent names sort by name.
+- Column types, nullability, defaults, and generated columns: the target database catalog at promotion
+- Required `timestamp` or `timestamptz` column with no default and no mapped value: one UTC instant for that promotion batch. A mapped value is kept. Any other required column with no value fails before insert.
+
+`target` holds `mode`, `schema`, `stagingSchema`, `stagingTable`, and `mergeStrategy` `NONE`. `mode` `UAM` is the canonical geographic demonstration. `mode` `POSTGRESQL` uses the same catalog-driven loader for any other relational schema. `connectionRef` selects the business-target database. `stagingConnectionRef` selects the staging database. When `stagingConnectionRef` is omitted, staging uses `connectionRef`, then the default PostgreSQL target datasource. Both names are server-side profiles under `etp.migration.postgresql.connections`. Do not send database passwords in the payload. `promotion.enabled` turns promotion on. Previously stored definitions may still contain the removed keys; promotion ignores them and reads the staged entity payload. New requests must not send them.
+
+`definition.targetType` `POSTGRESQL` selects the staging connector used by execute. `entityMappings.targetType` is stored with the mapping and does not select a connection. `configuration.target.mode` selects canonical promotion (`UAM` or `POSTGRESQL`) instead of the flat single-table promotion. One migration writes every entity to one target connection, so PostgreSQL foreign keys stay inside that database. A relationship that would need two databases is not supported.
 
 Filesystem source configuration: `provider` `FILE_SYSTEM`, `fileFormat` `CSV`, `objectKey`, `hasHeader`, `delimiter`. SFTP source configuration: `provider` `SFTP`, `fileFormat` `CSV`, `host`, `port`, `credentialRef`, `remotePath`, optional `hasHeader` and `delimiter`. Do not send `password`, `privateKey`, or `passphrase`.
 
@@ -107,19 +109,6 @@ The shape below is the fixture in `UamCanonicalLoadIntegrationTest`, shortened t
         "stagingTable": "uam_entity_stage",
         "mergeStrategy": "NONE"
       },
-      "tables": {
-        "AddressLocation": "location",
-        "GeographicAddress": "geographic_address"
-      },
-      "foreignKeys": [
-        {"entity": "GeographicAddress", "parent": "AddressLocation", "column": "location_id"}
-      ],
-      "loadTimestampColumns": [
-        {"table": "location", "column": "created_at"}
-      ],
-      "columnTypes": [
-        {"table": "location", "column": "created_at", "type": "timestamptz"}
-      ],
       "promotion": {"enabled": true}
     }
   },
@@ -285,24 +274,38 @@ No request body.
 
 ### POST `/api/v1/migrations/{migrationId}/execute`
 
-**Purpose:** Synchronous execution facade. Does **not** activate, reconcile, or promote.
+**Purpose:** Accept a migration for background execution. Does **not** activate, reconcile, or promote, and does **not** wait for inspection, preparation, or batches.
 
-Orchestration in `MigrationExecutionService.execute` (same HTTP thread; **not** `@Async`, no scheduler, no Kafka):
+The request thread:
 
-1. create run (definition must be ACTIVE). Status is QUEUED.
-2. source inspection / prepare (plan batches). A preparation failure records `migration_error` and sets that run FAILED.
-3. mark the run RUNNING, then `processNextBatch` until no eligible batch remains
-4. finalize the run when no batch is still in flight. An empty source completes as COMPLETED.
-5. return the final `MigrationRunResponse`
+1. Creates the run (definition must be ACTIVE) and commits it as QUEUED.
+2. Sets `background_execution` unless the idempotency key already names a terminal run.
+3. Submits the run to the background driver and returns.
 
-`POST .../runs` does not do steps 2–4. That run remains QUEUED until prepare and process are called for it.
+The driver claims the run, marks it RUNNING, then prepares and calls the existing batch worker until the run is idle, the lease is lost, or the process is shutting down. Lease renewal follows a byte, stage, or batch report. A live thread does not keep the lease. A preparation failure records `migration_error` and sets that unprepared run FAILED. An empty source completes as COMPLETED. COMPLETED means staging finished.
+
+`POST .../runs` does not set `background_execution`. That run stays QUEUED until prepare and process are called for it. Restart recovery does not start it.
 
 **Body:** optional `CreateMigrationRunRequest` (`idempotencyKey`, `sourceSnapshot`, `configurationSnapshot`). Empty/`{}` allowed.
 
-**201:** final `MigrationRunResponse`  
-Location: `/api/v1/migration-runs/{runId}`  
+**202:** acceptance snapshot, not the finished run.
+
+```json
+{
+  "id": "<run-id>",
+  "runId": "<run-id>",
+  "status": "QUEUED",
+  "message": "Migration execution accepted.",
+  "statusUrl": "/api/v1/migration-runs/<run-id>"
+}
+```
+
+Location is the same `statusUrl`. `status` is the run status at acceptance. A repeated idempotency key for a finished run returns 202 with that run's terminal status and message `Migration run already exists.` Poll `GET /api/v1/migration-runs/{runId}` for `totalBatches`, `completedBatches`, `failedBatches`, and the record counters. That GET does not start execution. Failures are `GET /api/v1/migration-runs/{runId}/errors`.
+
 **404:** definition missing  
 **409:** not ACTIVE (`DefinitionNotActiveException`)
+
+Background execution is limited by `etp.migration.execution.max-concurrent-runs` (default 1) and `etp.migration.execution.queue-capacity` (default 32). A full queue leaves the run QUEUED; recovery (`etp.migration.execution.recovery-interval-ms`, default 15000) submits it again. The run lease is `etp.migration.execution.lease-duration` (default `PT5M`). Batch parallelism is unchanged and is separate from how many runs execute at once.
 
 ### POST `/api/v1/migrations/{migrationId}/runs`
 
@@ -326,7 +329,7 @@ Claim and process **one** batch. Not a scheduler.
 
 ### GET `/api/v1/migration-runs/{runId}/errors`
 
-Paginated `migration_error` rows for the run, oldest first. `errorMessage` stays short. `errorDetails` is the stored JSON object (`errorCode`, `sqlState`, `exceptionType`, `message`, `rootCauseType`, `rootCauseMessage`, `phase`, `runId`, `batchId`, `targetEntity`, `retryable`, and PostgreSQL `relation` when the server reported one). Unknown fields are absent. Page defaults match the other list endpoints.
+Paginated `migration_error` rows for the run, oldest first. `errorMessage` stays short. `errorDetails` is a copy of the stored JSON object (`errorCode`, `sqlState`, `exceptionType`, `message`, `rootCauseType`, `rootCauseMessage`, `phase`, `runId`, `batchId`, `targetEntity`, `retryable`, `category`, `location`, and PostgreSQL `relation` when the server reported one). Nested maps and lists are walked. Promotion rows may also include `promotionId` and `promotionBatchId`. Phase rows may include `phaseJobId`. Unknown fields are absent. Stack traces are not returned. A message or nested value that quotes a secret or a row value is omitted or replaced with `Error details were redacted`. `sourceRecordKey` and `fieldName` stay as stored when they are ordinary identifiers, including a column name such as `password`. A key that contains assignment text, a quoted row, or multi-word secret material is returned as `redacted`. The read does not rewrite the stored row. Page defaults match the other list endpoints. Patterns that are not recognized include a high-entropy token with none of those substrings, a secret inside a number or a custom object, and a secret split across fields.
 
 **200:** `content[]` of error rows, plus `page`, `size`, `totalElements`, `totalPages`  
 **404:** run not found
@@ -385,22 +388,29 @@ Paged `MigrationBatchResponse`.
 | **STAGING** (default) | Omit the query parameter | Compare source snapshot / run counters / staging table |
 | **BUSINESS_TARGET** | `?verificationScope=BUSINESS_TARGET` | Compare **successfully promoted** batches to the promotion business table |
 
-Does **not** change run or promotion status. Upserts COUNT, CHECKSUM, TARGET, FULL.
+Does **not** change run or promotion status. The checks run after HTTP 202. Upserts COUNT, CHECKSUM, TARGET, FULL.
 
 Staging checksum comparison to the staging table is **not** implemented (`comparisonPerformed: false`).
 
 Business-target (PostgreSQL only): expected rows come from promotion batches in status `PROMOTED`; identity is `promotion.conflictKeys`; non-key `promotion.columns` are compared in SQL. Without `conflictKeys`, TARGET reports `MIGRATION_TARGET_IDENTITY_NOT_CONFIGURED`. Partial promotion reconciles only promoted batches.
 
-**200:** `MigrationReconciliationResponse` — `runId`, overall `status`, `reconciliation` bundle (`count`, `checksum`, `target`, `full` as `ReconciliationItemResponse`)  
+**202:** `PhaseAcceptanceResponse` — `jobId`, `runId`, `phase` `RECONCILIATION`, job `status` (`QUEUED`, `RUNNING`, `COMPLETED`, or `FAILED`), `outcome` when finished, `statusUrl`. A second call while that job is queued or running returns the same job. After it finishes, another call stores a new job and reconciles again. A target failure during the job is stored on the job. It is not an HTTP 500 from this POST. Validation failures (404, 409, 400) happen before a job is stored.
+
 **404:** run missing  
 **409:** active batches (`MIGRATION_RECONCILIATION_NOT_READY`)  
-**400:** business-target on non-PostgreSQL (`MIGRATION_PROMOTION_UNSUPPORTED_TARGET`)  
-**500:** unexpected / target infrastructure. A target-infrastructure 500 keeps its `code` (for example `MIGRATION_TARGET_DATABASE_CONNECTION_ERROR`), but its `message` is always `Target system operation failed (reference <uuid>)`. Operators can find the sanitized cause in the ERROR log line that carries the same `reference=`.  
+**400:** business-target on non-PostgreSQL (`MIGRATION_PROMOTION_UNSUPPORTED_TARGET`)
+
+Job `COMPLETED` means the checks finished. The reconciliation outcome is `PASSED`, `PASSED_WITH_WARNINGS`, or `FAILED` on the GET below. Those are not the same value.
 
 ### GET `/api/v1/migration-runs/{runId}/reconciliation`
 
-**200** persisted bundle  
-**404** run missing **or** no rows (`ReconciliationNotFoundException`: `Reconciliation not found for migration run {id}`)
+**200** persisted bundle plus `jobId` and `jobStatus` from the latest reconciliation job. While a job is queued and no rows exist yet, `status` and the bundle items are empty and `jobStatus` is `QUEUED` or `RUNNING`. `details.examples[].sourceIdentity` is returned as stored for an ordinary identifier. A value that carries assignment text, a quoted row, or multi-word secret material is returned as `redacted`. A `reason` or message field that matches the same patterns is replaced with `Error details were redacted`. The read does not rewrite the stored document. Counts, status, and entity names stay.  
+**404** run missing, or neither rows nor a reconciliation job (`Reconciliation not found for migration run {id}`)
+
+### GET `/api/v1/migration-runs/{runId}/phase-jobs/{jobId}`
+
+**200** `PhaseAcceptanceResponse` for that run and job. Does not start work.  
+**404** job missing or the job belongs to another run.
 
 ---
 
@@ -410,26 +420,26 @@ Business-target (PostgreSQL only): expected rows come from promotion batches in 
 
 **Body:** optional. `requestedBy` is accepted for compatibility but **ignored**; the stored `requestedBy` is the authenticated actor (token `sub`). A token that has no usable identity gets **403** `MIGRATION_AUDIT_IDENTITY_INVALID`.
 
-**200:** `PreparePromotionResponse` — `promotionId`, `runId`, `status`, `totalBatches`, `eligibleBatches`, `skippedBatches`, `totalRecords`, `eligibleRecords`, `skippedRecords`, `batches[]` (`batchId`, `executionStatus`, `promotionStatus`, `eligibleRecordCount`, `skippedRecordCount`)
+**202:** `PhaseAcceptanceResponse` with `phase` `PROMOTION_PREPARATION`. `jobId` is the phase job. `promotionId` is the promotion row: an existing `READY`, `PROMOTED`, or `NOT_STARTED` row, or a new `NOT_STARTED` row created in the same transaction as the job. It is never the job id. Eligibility is still filled in the background, which then sets the promotion to `READY`. The authenticated actor is stored on the job before the response, so a token with no usable identity is **403** and creates no job. A queued or running preparation is returned again. Another prepare while the promotion is `READY` or `PROMOTED` does not create a second promotion row.
 
 **400:** promotion missing/disabled/invalid, non-PostgreSQL  
 **404:** run missing  
 **409:** run not complete, active batches, no reconciliation, already PROMOTING  
 
-Does not write business rows. Idempotent return of existing READY/PROMOTED.
+Does not write business rows. The eligibility result is on `GET /api/v1/migration-runs/{runId}/promotion` after the job completes: `promotionId`, `runId`, `status`, `totalBatches`, `eligibleBatches`, `skippedBatches`, `totalRecords`, `eligibleRecords`, `skippedRecords`, and `batchCounts`. Batch rows, timestamps, and `durationMillis` are on `GET /api/v1/migration-runs/{runId}/promotion/batches`.
 
-Promotion statuses: `NOT_STARTED` (column default; prepare writes `READY`), `READY`, `PROMOTING`, `PROMOTED`, `PARTIALLY_PROMOTED`, `PROMOTION_FAILED`.
+Promotion statuses: `NOT_STARTED` (created when preparation is accepted; the worker then writes `READY`), `READY`, `PROMOTING`, `PROMOTED`, `PARTIALLY_PROMOTED`, `PROMOTION_FAILED`. At most one row per run may be `NOT_STARTED`, `READY`, or `PROMOTING`.
 
 Promotion batch statuses: `NOT_ELIGIBLE`, `ELIGIBLE`, `PROMOTING`, `PROMOTED`, `FAILED`.
 
 ### POST `/api/v1/migration-runs/{runId}/promote`
 
-No body. Requires READY (409 `MIGRATION_PROMOTION_NOT_READY` if none). Already **PROMOTED** returns the stored result without rewriting.
+No body. Requires a prepared promotion (409 `MIGRATION_PROMOTION_NOT_READY` if none). Does not prepare one. **202** `PhaseAcceptanceResponse` with `phase` `PROMOTION`. A second call while the job is queued or running returns that job. After completion, the promotion GET has the batch results. Already **PROMOTED** accepts a job that returns the stored result without rewriting. A `PROMOTING` promotion left by a dead worker is resumed from eligible and promoting batches. A failed promotion can be prepared again and then promoted.
 
 When definition `target.mode` is `UAM`, the call allocates mapping-level target identities and inserts the configured canonical tables in one transaction per eligible batch. A failure rolls that UAM transaction back. Stored identity allocations are reused on retry. `ON CONFLICT (id) DO NOTHING` leaves an existing primary key in place. Flat mode writes parameterized INSERT or UPSERT into `promotion.schema.table`. A failed flat batch does not roll back batches already committed (`PARTIALLY_PROMOTED` is possible). The completed local demonstration is [ARCHITECTURE.md](ARCHITECTURE.md) §28. It is not a production UAM deployment.
 
-**200:** `ExecutePromotionResponse`  
-**400 / 404 / 409** as annotated on `PromotionController`
+**202:** `PhaseAcceptanceResponse` with `phase` `PROMOTION`. `promotionId` is the existing `PROMOTING`, `PROMOTED`, or `READY` promotion, chosen in that order. It is never the job id. A missing promotion is rejected before a job is stored. The previous synchronous body is the promotion GET after `jobStatus` is `COMPLETED`.  
+**400 / 404 / 409** as annotated on `PromotionController`, before a job is stored.
 
 ---
 
@@ -439,7 +449,7 @@ When definition `target.mode` is `UAM`, the call allocates mapping-level target 
 
 **Purpose:** Persisted promotion + batches. **Never** creates/prepares/promotes.
 
-**200:** `ExecutePromotionResponse` — `promotionId`, `runId`, `status`, `totalBatches`, `eligibleBatches`, `promotedBatches`, `failedBatches`, `skippedBatches`, `totalRecords`, `promotedRecords`, `failedRecords`, `skippedRecords`, `batches[]` (`batchId`, `promotionStatus`, `eligibleRecordCount`, `promotedRecordCount`, `failedRecordCount`, `errorCode`, `errorMessage`)
+**200:** `ExecutePromotionResponse` — `promotionId`, `runId`, `status`, `totalBatches`, `eligibleBatches`, `promotedBatches`, `failedBatches`, `skippedBatches`, `totalRecords`, `eligibleRecords`, `promotedRecords`, `failedRecords`, `skippedRecords`, `errorCode`, `errorMessage`, `batches[]` (`batchId`, `promotionStatus`, `eligibleRecordCount`, `promotedRecordCount`, `failedRecordCount`, `errorCode`, `errorMessage`), plus `jobId` and `jobStatus` from the latest preparation or promotion job. `status` is the promotion status. `jobStatus` is the background job. `COMPLETED` on the job does not mean the promotion succeeded. `PARTIALLY_PROMOTED` carries `MIGRATION_PROMOTION_PARTIAL_FAILURE`. `PROMOTION_FAILED` carries `MIGRATION_PROMOTION_BATCH_FAILED`. A clean `PROMOTED` result has a null error summary. `eligibleRecords` is the sum of batch eligibility counts.
 
 **404:** `Migration run not found: {id}` or `Promotion not found for migration run {id}`
 
@@ -455,8 +465,8 @@ Latest promotion if multiple (`created_at` desc).
 |--------|------|------|
 | GET | `/actuator/health` | permitAll |
 | GET | `/actuator/health/**` | permitAll (probes) |
-| GET | `/v3/api-docs` and `/v3/api-docs/**` | permitAll when `ETP_MIGRATION_OPENAPI_ENABLED=true` (default in `dev`); otherwise JWT required and 404 |
-| GET | `/swagger-ui/**`, `/swagger-ui.html` | Same as above |
+| GET | `/v3/api-docs`, `/v3/api-docs.yaml`, and `/v3/api-docs/**` | permitAll when `ETP_MIGRATION_OPENAPI_ENABLED=true` (default in `dev`, and set by `mvn spring-boot:run`); otherwise JWT required and 404 |
+| GET | `/swagger-ui`, `/swagger-ui/**`, `/swagger-ui.html` | Same as above |
 
 Actuator exposure is **health only**. Migration APIs are **not** public.
 
@@ -490,21 +500,7 @@ Authorization: Bearer <JWT>
 {}
 ```
 
-**201** (field subset; counters depend on the source file):
-
-```json
-{
-  "runNumber": 1,
-  "status": "COMPLETED_WITH_ERRORS",
-  "successRecords": 7,
-  "validationFailures": 1,
-  "totalBatches": 3,
-  "completedBatches": 3,
-  "failedBatches": 0
-}
-```
-
-The local 8-row address demo uses `batchSize` 3 and expects this status. Identifiers (`id`, `migrationDefinitionId`) are created per instance — do not treat sample UUIDs as fixtures.
+**202** acceptance, then poll until the run detail shows the finished status. The local 8-row address demo uses `batchSize` 3 and finishes as **`COMPLETED_WITH_ERRORS`** with `successRecords` 7, `validationFailures` 1, and `totalBatches` 3. Identifiers are created per instance.
 
 ---
 
@@ -515,7 +511,21 @@ GET /api/v1/migration-runs/{runId}/promotion
 Authorization: Bearer <JWT>
 ```
 
-See [USER_GUIDE.md](USER_GUIDE.md) for response field names on `ExecutePromotionResponse`.
+The summary returns `promotionId`, `runId`, `status`, `errorCode`, `errorMessage`, `controlState`, the stored record counters, `batchCounts`, and `inFlightBatches`. `batches` is empty. `controlState` is independent of promotion status. `startedAt` is set when a batch begins processing. `completedAt` stays null while that attempt is running. `durationMillis` is `completedAt - startedAt` for the latest completed attempt and is null while the attempt is running. A retry overwrites both timestamps.
+
+```http
+POST /api/v1/migration-runs/{runId}/promotion/control
+Content-Type: application/json
+
+{"action": "PAUSE"}
+```
+
+`PAUSE` on a live worker stores `PAUSE_REQUESTED` and becomes `PAUSED` after the current batch commits. `RESUME` continues that job. Run control is `POST /api/v1/migration-runs/{runId}/control` and does not pause promotion.
+
+```http
+GET /api/v1/migration-runs/{runId}/promotion/batches?page=0&size=20&status=FAILED
+Authorization: Bearer <JWT>
+```
 
 ---
 

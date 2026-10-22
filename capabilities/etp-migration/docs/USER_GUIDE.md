@@ -47,7 +47,7 @@ cd capabilities\etp-migration
 docker compose up -d
 ```
 
-Flyway V1–V5 apply on application start. V4 and V5 are the control-plane identity tables. The local canonical demonstration uses port **55432** as the target database for staging and schema `uam`. That is a workstation arrangement, not the production UAM deployment.
+The repository contains Flyway V1–V11. Starting the application applies pending scripts to the database in `ETP_MIGRATION_DB_URL`. V4 and V5 are the control-plane identity tables. V11 allows `migration_error.stage` `PROMOTE`. This closure did not query `flyway_schema_history` on the workstation control plane, so it does not claim that database already has V11. The local canonical demonstration uses port **55432** as the target database for staging and schema `uam`. That is a workstation arrangement, not the production UAM deployment.
 
 Create staging (identifiers must match definition `configuration.target`):
 
@@ -130,7 +130,7 @@ Worker and retry log lines carry `run=<migrationRunId> batch=<migrationBatchId>`
 ... [nio-8082-exec-3] run=6f1c... batch=42 c.e.m.processing.MigrationBatchWorker : Batch processing failed runId=6f1c... batchId=42 attempt=1 errorCode=MIGRATION_SOURCE_READ_ERROR exceptionType=...
 ```
 
-Search the logs for a run ID to follow its batches. The failure line gives the error code only; read the batch `errorMessage` or the run errors API for the detail.
+Search the logs for a run ID to follow its batches. The failure line gives the error code only; read the batch `errorMessage` or `GET /api/v1/migration-runs/{runId}/errors` for the detail. That response redacts secret-bearing messages, source keys, and nested details. It does not rewrite the stored row. A later successful retry does not delete the earlier error row. Reconciliation example source identities are redacted on `GET .../reconciliation` the same way. See [API_GUIDE.md](API_GUIDE.md).
 
 ---
 
@@ -140,7 +140,7 @@ Search the logs for a run ID to follow its batches. The failure line gives the e
 - OpenAPI: http://localhost:8082/v3/api-docs
 - Configured path prefix: `springdoc.swagger-ui.path=/swagger-ui`
 
-Swagger UI and the OpenAPI JSON are **off by default**. The `dev` profile turns them on. In any other profile set `ETP_MIGRATION_OPENAPI_ENABLED=true` (property `etp.migration.openapi.enabled`) to turn them on. When they are on, they are public. When they are off, those paths need a JWT and then return 404.
+Swagger UI and the OpenAPI document are **off** for a packaged run. The `dev` profile turns them on, and so does `mvn spring-boot:run` (local process only). In any other launch, set `ETP_MIGRATION_OPENAPI_ENABLED=true` (property `etp.migration.openapi.enabled`). When they are on, `/v3/api-docs`, `/v3/api-docs.yaml`, `/swagger-ui`, `/swagger-ui/**`, and `/swagger-ui.html` are public. When they are off, those paths need a JWT and then return 404.
 
 OpenAPI declares scheme **`bearer-jwt`** and a security requirement on operations. After **Authorize** with a Keycloak JWT, Execute sends `Authorization: Bearer <JWT>` (and generated curl includes that header). Health probes are always public. No roles/scopes are defined in this module.
 
@@ -236,7 +236,7 @@ Content-Type: application/json
 
 **201** body: `CompositeMigrationConfigurationResponse` with `definition` (status **DRAFT**), `mapping`, `rules`, `sources`. Location header: `/api/v1/migrations/{definitionId}`.
 
-The body above is the flat illustration. An entity-relationship body uses `entityMappings` or `mapping`, `fieldMappings` or `rules`, `modelType` `ENTITY_RELATIONSHIP`, and canonical `target.mode` `UAM`. `columnTypes` may still list `numeric` and `timestamptz`. A live canonical load converts from the PostgreSQL catalog. See [API_GUIDE.md](API_GUIDE.md) and [ARCHITECTURE.md](ARCHITECTURE.md) §29. The procedure for that path is [migration-e2e-test-guide.md](migration-e2e-test-guide.md).
+The body above is the flat illustration. An entity-relationship body uses `entityMappings` or `mapping`, `fieldMappings` or `rules`, `modelType` `ENTITY_RELATIONSHIP`, and canonical `target.mode` `UAM`. `definition.configuration` contains `target` and `promotion` only. Tables, foreign keys, and load order come from the entity mapping. Column types and timestamps come from the target catalog. See [API_GUIDE.md](API_GUIDE.md) and [ARCHITECTURE.md](ARCHITECTURE.md) §29. The procedure for that path is [migration-e2e-test-guide.md](migration-e2e-test-guide.md).
 
 Stepwise APIs still work: `POST /api/v1/mappings`, `POST /api/v1/mappings/{id}/rules`, `POST /api/v1/migrations`, `POST /api/v1/migrations/{id}/sources`.
 
@@ -314,9 +314,9 @@ SFTP timeouts:
 | `etp.migration.source.sftp.connect-timeout` | `15s` | TCP connect and password authentication |
 | `etp.migration.source.sftp.idle-timeout` | `10m` | The wait for each SFTP response (stat, open, every read chunk), and how long the SSH session may carry no traffic before it is closed |
 
-`idle-timeout` must be positive; `0s` or a negative value stops the application at startup. It does not limit the total transfer time. A large file that keeps arriving runs to completion. A server that stops answering fails the read with `MIGRATION_SFTP_READ_FAILED` and the message `SFTP read timed out waiting for the server (etp.migration.source.sftp.idle-timeout)`. If a batch spends longer than the idle timeout without reading from the file (for example, a very slow target load), the session closes and the batch fails the same way. Raise the value rather than disabling it.
+`idle-timeout` must be positive; `0s` or a negative value stops the application at startup. It does not limit the total transfer time. A large file that keeps arriving runs to completion. A server that stops answering fails the read with `MIGRATION_SFTP_READ_FAILED` and the message `SFTP read timed out waiting for the server (etp.migration.source.sftp.idle-timeout)`. A flat batch that stops reading for longer than the idle timeout loses the session and fails the same way. An entity-relationship batch copies the remote file once and then reads the local copy, so a slow target load does not hold the SFTP session open. Raise the value rather than disabling it.
 
-Create the source through the API, activate, execute, reconcile, prepare promotion, and promote. SFTP does not need a database edit. The remote file is streamed. It is not loaded into memory. `layoutType=MULTI_FILE` remains a filesystem layout.
+Create the source through the API, activate, execute, reconcile, prepare promotion, and promote. SFTP does not need a database edit. The remote file is streamed. It is not loaded into memory. The entity-relationship pipeline keeps one local copy and a row-offset index under `etp-source-cache` inside `etp.migration.storage.root`. That directory is safe to delete when no migration is running; the next run downloads the file again. `layoutType=MULTI_FILE` remains a filesystem layout.
 
 ---
 
@@ -345,7 +345,9 @@ Execute and `POST .../runs` **require ACTIVE** (409 if DRAFT).
 `POST /api/v1/migrations/{migrationId}/execute`
 Optional body `CreateMigrationRunRequest`: `idempotencyKey`, snapshots.
 
-Synchronous (same request thread): create QUEUED run → prepare (inspect + batches) → process every eligible batch → **201** `MigrationRunResponse` with Location `/api/v1/migration-runs/{runId}`. There is no scheduler, Kafka trigger, or `@Async` worker.
+The call commits a QUEUED run and returns **202 Accepted** with `runId`, `status` `QUEUED`, `message` `Migration execution accepted.`, and `statusUrl`. Preparation and batch processing continue in the background. Poll `GET /api/v1/migration-runs/{runId}` until `COMPLETED`, `COMPLETED_WITH_ERRORS`, `FAILED`, or `CANCELLED`. The 202 body is acceptance, not completion.
+
+One background run is the default (`etp.migration.execution.max-concurrent-runs=1`). Up to 32 accepted runs wait (`etp.migration.execution.queue-capacity`). A full queue keeps the run QUEUED and a recovery pass every 15 seconds tries again. After a restart, runs accepted by execute resume when their lease is empty or expired (`etp.migration.execution.lease-duration`, default 5 minutes). A run created only by `POST .../runs` is not resumed.
 
 Does **not** reconcile or promote.
 
@@ -361,7 +363,7 @@ Equivalent stepwise:
 
 `GET /api/v1/migration-runs/{runId}`
 
-Useful fields: `status`, `totalRecords`, `successRecords`, `validationFailures`, `completedBatches`, `failedBatches`.
+Useful fields: `status`, `totalRecords`, `successRecords`, `validationFailures`, `completedBatches`, `failedBatches`. For an entity-relationship run, `totalRecords` is the number of logical work items. One CSV row can produce several. `source.sourceRowCount` on the run snapshot is the physical data-row count when the source is one positioned CSV.
 
 `COMPLETED` / `COMPLETED_WITH_ERRORS` = staging finished. List batches: `GET /api/v1/migration-runs/{runId}/batches?page=0&size=20`.
 
@@ -373,9 +375,9 @@ After all batches are terminal:
 
 `POST /api/v1/migration-runs/{runId}/reconcile`
 
-Default scope is **STAGING**. Returns COUNT, CHECKSUM, TARGET, FULL. Checksum comparison to staging is **not** performed (`comparisonPerformed: false` → typically PASSED_WITH_WARNINGS). Repeat overwrites the same four rows. Does not change run or promotion status.
+Returns HTTP 202 with a job id. Default scope is **STAGING**. The checks then store COUNT, CHECKSUM, TARGET, and FULL. Checksum comparison to staging is **not** performed (`comparisonPerformed: false` → typically PASSED_WITH_WARNINGS). Repeat after the job finishes overwrites the same four rows. Does not change run or promotion status. A finished reconciliation does not prepare promotion.
 
-Read: `GET /api/v1/migration-runs/{runId}/reconciliation` (404 if never reconciled).
+Read: `GET /api/v1/migration-runs/{runId}/reconciliation` (404 if never submitted). `jobStatus` is the background job. `status` is the reconciliation outcome. `GET /api/v1/migration-runs/{runId}/phase-jobs/{jobId}` reads one job.
 
 ---
 
@@ -384,7 +386,7 @@ Read: `GET /api/v1/migration-runs/{runId}/reconciliation` (404 if never reconcil
 `POST /api/v1/migration-runs/{runId}/promotion/prepare`
 The body is optional. A `requestedBy` field is still accepted but ignored: the promotion records the authenticated caller (see "Audit identity" in [ARCHITECTURE.md](ARCHITECTURE.md) §15).
 
-Requires PostgreSQL target, `promotion.enabled`, completed run, no active batches, existing reconciliation rows. Returns READY with eligible staging counts. Does not write the business table.
+Returns HTTP 202. Requires PostgreSQL target, `promotion.enabled`, completed run, no active batches, existing reconciliation rows. When the job completes, GET promotion shows READY and the eligible staging counts. Does not write the business table. A queued or running preparation is not started twice. READY and PROMOTED promotions are not replaced.
 
 ---
 
@@ -392,7 +394,7 @@ Requires PostgreSQL target, `promotion.enabled`, completed run, no active batche
 
 `GET /api/v1/migration-runs/{runId}/promotion`
 
-Read-only. 404 if no promotion exists (does **not** create one). 404 if run missing.
+Read-only. Includes `jobId` and `jobStatus` when a preparation or promotion job exists. 404 if no promotion exists (does **not** create one), including while preparation is still queued. Use the phase-job GET until the promotion row exists. 404 if run missing.
 
 ---
 
@@ -400,7 +402,7 @@ Read-only. 404 if no promotion exists (does **not** create one). 404 if run miss
 
 `POST /api/v1/migration-runs/{runId}/promote`
 
-Requires READY promotion. When `target.mode` is `UAM`, promotion allocates mapping-level target identities and loads the configured canonical tables in one transaction per eligible batch. A failure rolls that UAM transaction back. Identity allocations remain for a retry. An already `PROMOTED` promotion is returned without another load. Flat mode, used when canonical mode is not selected, writes INSERT/UPSERT into `promotion.schema.table`. A failed flat batch does not roll back batches already committed (`PARTIALLY_PROMOTED`).
+Returns HTTP 202. Requires a READY promotion and does not prepare one. When `target.mode` is `UAM`, promotion allocates mapping-level target identities and loads the configured canonical tables in one transaction per eligible batch. A failure rolls that UAM transaction back. Identity allocations remain for a retry. An already `PROMOTED` promotion is not loaded again. Flat mode, used when canonical mode is not selected, writes INSERT/UPSERT into `promotion.schema.table`. A failed flat batch does not roll back batches already committed (`PARTIALLY_PROMOTED`). Poll GET promotion for the result. A second call while the job is queued or running returns that job.
 
 ---
 
@@ -442,7 +444,7 @@ JSON error body (`ApiErrorResponse`): `timestamp`, `status`, `error`, `message`,
 | 409 | Duplicate name/version; not ACTIVE; run not QUEUED for prepare; no batch; promotion preconditions |
 | 500 | Inspection/target infrastructure failures. Target failures return `Target system operation failed (reference <uuid>)` with the specific `code`. Search the application log for `reference=<uuid>` to find the sanitized cause: SQLState, table, column and constraint. Stored batch and promotion-batch error messages use the same sanitized form. |
 
-Promotion `code` values include `MIGRATION_PROMOTION_*` constants in `MigrationErrorCodes`.
+Promotion `code` values include `MIGRATION_PROMOTION_*` constants in `MigrationErrorCodes`. `PARTIALLY_PROMOTED` uses `MIGRATION_PROMOTION_PARTIAL_FAILURE`. `PROMOTION_FAILED` after one or more failed batches uses `MIGRATION_PROMOTION_BATCH_FAILED`. A clean `PROMOTED` promotion clears that summary. The phase job can still be `COMPLETED`. Failed promotion batches stay failed until a new attempt is started; historical `migration_error` rows stay.
 
 ---
 
@@ -485,6 +487,7 @@ Then:
 POST /api/v1/migration-configurations
 POST /api/v1/migrations/{id}/activate
 POST /api/v1/migrations/{id}/execute
+GET  /api/v1/migration-runs/{runId}
 POST /api/v1/migration-runs/{runId}/reconcile
 POST /api/v1/migration-runs/{runId}/promotion/prepare
 GET  /api/v1/migration-runs/{runId}/promotion
@@ -494,7 +497,7 @@ POST /api/v1/migration-runs/{runId}/reconcile?verificationScope=BUSINESS_TARGET
 
 `{id}` and `{runId}` are created by those calls. Do not hard-code workstation UUIDs.
 
-GET promotion returns `ExecutePromotionResponse` (`promotionId`, `runId`, `status`, batch/record counters, `batches[]`). A fully successful demo promotion of seven staged rows is `PROMOTED` with `promotedRecords: 7`.
+GET promotion returns `ExecutePromotionResponse` (`promotionId`, `runId`, `status`, batch/record counters, `batchCounts`). A fully successful demo promotion of seven staged rows is `PROMOTED` with `promotedRecords: 7`. Individual batches are on `GET /api/v1/migration-runs/{runId}/promotion/batches`.
 
 **`uam_migration_test.address` is a local simulated business target, not production UAM.**
 

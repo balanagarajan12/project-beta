@@ -39,7 +39,7 @@ capabilities/etp-migration/
 
 ## 5. Current architecture (one paragraph)
 
-HTTP control plane persists definitions/mappings/sources/runs/batches. `MigrationExecutionService.execute` is **synchronous and not** one transaction: create ACTIVE-only run → inspect CSV → loop claim/process. An `ENTITY_RELATIONSHIP` worker extracts entities, resolves relationships, maps and validates, then `PostgreSqlTargetConnector` COPY to staging with null target identities. Reconciliation and promotion are separate POSTs. Canonical promotion (`target.mode=UAM`) allocates `mapping.entities[].targetIdentity` and loads configured UAM tables in one transaction per batch. GET promotion is read-only. The local demonstration used control-plane `localhost:55433` and target `localhost:55432`. Integration tests use Testcontainers `etp_migration_test`, not those ports.
+HTTP control plane persists definitions/mappings/sources/runs/batches. `POST /execute` stores a QUEUED run and returns HTTP 202. A background worker then inspects the CSV and processes batches. An `ENTITY_RELATIONSHIP` worker extracts entities, resolves relationships, maps and validates, then `PostgreSqlTargetConnector` COPY to staging with null target identities. Reconciliation, promotion preparation, and promotion are separate POSTs. Each stores a `migration_phase_job` and returns HTTP 202. Job status (`QUEUED`, `RUNNING`, `COMPLETED`, `FAILED`) is separate from the reconciliation outcome and the promotion status. Completing one phase does not start the next. Canonical promotion (`target.mode=UAM`) allocates `mapping.entities[].targetIdentity` and loads configured UAM tables in one transaction per batch. GET promotion is read-only. The local demonstration used control-plane `localhost:55433` and target `localhost:55432`. Integration tests use Testcontainers `etp_migration_test`, not those ports.
 
 ---
 
@@ -51,11 +51,11 @@ Definition, mapping, mapping rule, source, run, batch, artifact metadata, error,
 
 ## 7. Implementation status
 
-**Implemented:** Phases 0–10. Composite DRAFT config (`entityMappings`/`fieldMappings` and legacy `mapping`/`rules`), activate, execute, prepare/process-next-batch, cancel/retry, flat and entity-aware reconciliation, promotion, filesystem CSV and SFTP CSV, entity/relationship layouts, PostgreSQL BULK COPY, entity staging idempotency (`entity-v1:` key), in-memory scope and relationship parent indexes retained after Phase 10 measurement, per-entity `targetIdentity` format (`PREFIX_SEQUENCE`, `PREFIX_SOURCE_VALUE`) with PostgreSQL range allocation (`target_identity_allocator`) and retry reuse (`migration_identity_allocation`), canonical `UAM_POSTGRESQL` load with `information_schema` conversion, UAM REST **placeholder** SINGLE, JWT, `dev` permitAll, opt-in benchmark tests, Testcontainers isolation. The earlier full-suite count of 542 tests is not restated. Catalog-load results are in [migration-e2e-test-guide.md](migration-e2e-test-guide.md). Flyway **V5**.
+**Implemented:** Phases 0–10 plus later control-plane work. Composite DRAFT config (`entityMappings`/`fieldMappings` and legacy `mapping`/`rules`), activate, execute, prepare/process-next-batch, cancel/retry, flat and entity-aware reconciliation, promotion, filesystem CSV and SFTP CSV, entity/relationship layouts, PostgreSQL BULK COPY, entity staging idempotency (`entity-v1:` key), in-memory scope and relationship parent indexes retained after Phase 10 measurement, per-entity `targetIdentity` format (`PREFIX_SEQUENCE`, `PREFIX_SOURCE_VALUE`) with PostgreSQL range allocation (`target_identity_allocator`) and retry reuse (`migration_identity_allocation`), canonical `UAM_POSTGRESQL` load with `information_schema` conversion, UAM REST **placeholder** SINGLE, JWT, `dev` permitAll, opt-in benchmark tests, Testcontainers isolation. Background execute, reconcile, promotion preparation, and promotion return HTTP 202. Do not restate an old suite count as the current result. Catalog-load results are in [migration-e2e-test-guide.md](migration-e2e-test-guide.md). Repository Flyway is **V1–V11**. Column and error-redaction detail is in [DATABASE_MODEL.md](DATABASE_MODEL.md) and [API_GUIDE.md](API_GUIDE.md).
 
 **Demonstrated locally:** CSV → staging → reconciliation → promotion → schema `uam`, 110 physical rows expanded to 515 logical records, six entities, eight relationships including ONE_TO_MANY, promotion-time identity allocation, rollback/retry on an earlier attempt, and a clean PROMOTED run. See [ARCHITECTURE.md](ARCHITECTURE.md) §28. That demonstration is not 30M support and not a production UAM deployment.
 
-**Not implemented:** XLSX (roadmap Phases 11 and 12), enrichment, dedup, Kafka, scheduler, `@Async`, GUI, S3 and other object stores, multi-file SFTP, LOOKUP/CUSTOM at runtime, `migration_record` success lineage, a distributed id service, 10M/30M/50M proof, complete PostgreSQL type conversion (arrays, enums, domains, `bytea`, and other unrecognized `udt_name` values pass through). SFTP for one remote CSV is implemented. The UAM REST connector remains a SINGLE HTTP placeholder. The verified UAM tables are `varchar`, `text`, `timestamptz`, `numeric`, and `jsonb`. See [ARCHITECTURE.md](ARCHITECTURE.md) §29.
+**Not implemented:** XLSX (roadmap Phases 11 and 12), enrichment, record deduplication, Kafka, an external job scheduler, Spring `@Async`, a migration GUI, S3 and other object stores, multi-file SFTP, LOOKUP/CUSTOM at runtime, `migration_record` success lineage, a distributed id service, 10M/30M/50M proof, complete PostgreSQL type conversion (arrays, enums, domains, `bytea`, and other unrecognized `udt_name` values pass through). Accepted work is recovered in-process by `@Scheduled` methods on `MigrationExecutionCoordinator` and `MigrationPhaseCoordinator` (`etp.migration.execution.recovery-interval-ms`, default 15000). Default concurrent runs is 1 (`etp.migration.execution.max-concurrent-runs`). SFTP for one remote CSV is implemented. The UAM REST connector remains a SINGLE HTTP placeholder. The verified UAM tables are `varchar`, `text`, `timestamptz`, `numeric`, and `jsonb`. See [ARCHITECTURE.md](ARCHITECTURE.md) §29. Core UI has no migration screens.
 
 ---
 
@@ -83,14 +83,16 @@ See [API_GUIDE.md](API_GUIDE.md). Product path:
 - `POST /api/v1/migration-configurations`
 - `GET /api/v1/migrations/{migrationId}`
 - `POST /api/v1/migrations/{migrationId}/activate`
-- `POST /api/v1/migrations/{migrationId}/execute`
+- `POST /api/v1/migrations/{migrationId}/execute` — **202** after the QUEUED run commits. Background prepare and batches follow. Poll `GET /api/v1/migration-runs/{runId}`. `POST .../runs` stays stepwise and is not recovered.
 - `GET /api/v1/migration-runs` (optional `migrationDefinitionId`; keeps recency order. Nested `GET /migrations/{id}/runs` stays `createdAt` order)
 - `GET /api/v1/migration-runs/{runId}`
-- `POST /api/v1/migration-runs/{runId}/reconcile` (+ `verificationScope`)
-- `GET /api/v1/migration-runs/{runId}/reconciliation`
-- `POST /api/v1/migration-runs/{runId}/promotion/prepare`
+- `POST /api/v1/migration-runs/{runId}/reconcile` (+ `verificationScope`) — **202**. Poll the reconciliation GET or the phase-job GET.
+- `GET /api/v1/migration-runs/{runId}/reconciliation` — stored details, with identity and message redaction on the response
+- `POST /api/v1/migration-runs/{runId}/promotion/prepare` — **202**
 - `GET /api/v1/migration-runs/{runId}/promotion`
-- `POST /api/v1/migration-runs/{runId}/promote`
+- `POST /api/v1/migration-runs/{runId}/promote` — **202**
+- `GET /api/v1/migration-runs/{runId}/errors` — paginated `migration_error`, redacted on read
+- `GET /api/v1/migration-runs/{runId}/phase-jobs/{jobId}`
 
 Also: mappings/rules, sources, runs list/create, prepare, process-next-batch, cancel, retry, batches, actuator health.
 
@@ -98,26 +100,26 @@ Also: mappings/rules, sources, runs list/create, prepare, process-next-batch, ca
 
 ## 10. Database summary
 
-Flyway **V5** (V1–V5). V4 `migration_identity_allocation` stores `(run, entity, source identity)` → formatted target id so a retry reuses it. V5 `target_identity_allocator` reserves numeric ranges by prefix. `prefix` and `sequenceLength` are configuration; `current_value` is runtime state. Control tables `migration_*` including `migration_promotion` / `migration_promotion_batch` and nullable `migration_mapping_rule.entity_name`. Staging/business tables **not** in Flyway. Flat staging uniqueness is `(migration_run_id, migration_batch_id, source_record_number)`. Entity staging uniqueness is `(migration_run_id, idempotency_key)`. Do not call `uam_migration_test.address` a platform table. Do not treat `migration_record` as an identity store.
+Repository Flyway is **V1–V11**. V6 adds `migration_run.background_execution`, `execution_worker_id`, and `execution_lease_until` so an accepted execute survives restart without a second queue. V7 adds `migration_phase_job`. V8 adds run and promotion `control_state`. V9 creates the staging batch index only when that table is in the database Flyway is migrating. V10 allows one open promotion per run. V11 allows `migration_error.stage` `PROMOTE`. Startup applies pending versions only. The workstation control plane was not queried for this closure. V4 `migration_identity_allocation` stores `(run, entity, source identity)` → formatted target id so a retry reuses it. V5 `target_identity_allocator` reserves numeric ranges by prefix. `prefix` and `sequenceLength` are configuration; `current_value` is runtime state. Control tables `migration_*` including `migration_promotion` / `migration_promotion_batch` and nullable `migration_mapping_rule.entity_name`. Staging/business tables **not** in Flyway. Flat staging uniqueness is `(migration_run_id, migration_batch_id, source_record_number)`. Entity staging uniqueness is `(migration_run_id, idempotency_key)`. Do not call `uam_migration_test.address` a platform table. Do not treat `migration_record` as an identity store. `migration_record.error_id` is unused. Application-level error dedup is not a unique index, and a successful retry does not delete the earlier row. See [DATABASE_MODEL.md](DATABASE_MODEL.md).
 
 ---
 
 ## 11. Configuration model
 
-JSONB on definition: `target.mode`, `target.schema`, `stagingSchema`, `stagingTable`; canonical `tables`, `loadOrder`, `foreignKeys`, `loadTimestampColumns`, `columnTypes`, and `promotion.enabled`. Flat promotion still uses `promotion.schema/table/strategy/columns/conflictKeys`. Identity format is `mapping.entities[].targetIdentity` (`PREFIX_SEQUENCE` / prefix / `sequenceLength`). `definition.configuration.identity` is not read. Filesystem source JSON: `provider=FILE_SYSTEM`, `fileFormat=CSV`, `objectKey`, `hasHeader`. SFTP source JSON: `provider=SFTP`, `fileFormat=CSV`, `host`, `port`, `credentialRef`, `remotePath`, `hasHeader`, `delimiter`. The SFTP password is application configuration keyed by `credentialRef`, not a field on the migration definition. Local control-plane JDBC is **localhost:55433**. The demonstrated target JDBC is **localhost:55432**.
+JSONB on definition accepts only `target` (`mode`, `schema`, `stagingSchema`, `stagingTable`, `mergeStrategy`) and `promotion.enabled`. New requests that also send `tables`, `loadOrder`, `foreignKeys`, `loadTimestampColumns`, or `columnTypes` are rejected. Tables come from `entities[].targetEntity`. Foreign keys and load order come from `relationships`. Column types and required timestamps come from the target catalog. Flat promotion still uses `promotion.schema/table/strategy/columns/conflictKeys`. Identity format is `mapping.entities[].targetIdentity` (`PREFIX_SEQUENCE` / prefix / `sequenceLength`). `definition.configuration.identity` is not read. Filesystem source JSON: `provider=FILE_SYSTEM`, `fileFormat=CSV`, `objectKey`, `hasHeader`. SFTP source JSON: `provider=SFTP`, `fileFormat=CSV`, `host`, `port`, `credentialRef`, `remotePath`, `hasHeader`, `delimiter`. The SFTP password is application configuration keyed by `credentialRef`, not a field on the migration definition. Local control-plane JDBC is **localhost:55433**. The demonstrated target JDBC is **localhost:55432**.
 
 ---
 
 ## 12. Source connectors
 
-`CsvSourceConnector` (`FILE_SYSTEM` + CSV) and `SftpCsvSourceConnector` (`SFTP` + CSV) are the source-connector beans. Both stream records through `CsvRecordReader`. Registry uses the first `supports()` match. `sourceType` must be non-blank; `FILE` vs `FILE_SYSTEM` labels both work if the JSON is valid. `MultiFileEntitySource` opens configured per-entity filesystem CSVs through `CsvSourceConnector`. SFTP is a single remote CSV and does not use the multi-file layout. See [ARCHITECTURE.md](ARCHITECTURE.md) §8.
+`CsvSourceConnector` (`FILE_SYSTEM` + CSV) and `SftpCsvSourceConnector` (`SFTP` + CSV) are the source-connector beans. Both stream records through `CsvRecordReader`. Registry uses the first `supports()` match. `sourceType` must be non-blank; `FILE` vs `FILE_SYSTEM` labels both work if the JSON is valid. `MultiFileEntitySource` opens configured per-entity filesystem CSVs through `CsvSourceConnector`. SFTP is a single remote CSV and does not use the multi-file layout. Entity-relationship runs copy that remote file once (`SftpSourceCache`) and later batches seek to the stored source record numbers. A later process reuses the copy only when remote size, modification time, and the local SHA-256 still match. `migration_run.total_records` for this mode is the logical work-item count. `source.sourceRowCount` is the physical CSV row count. See [ARCHITECTURE.md](ARCHITECTURE.md) §8.
 
 ---
 
 ## 13. Target connectors
 
 - `PostgreSqlTargetConnector` (`POSTGRESQL`): BULK COPY into staging. It does not load canonical UAM tables. Definition `targetType` stays `POSTGRESQL` for the canonical demonstration.
-- `UamPostgreSqlTargetConnector`: canonical PostgreSQL UAM load used by promotion when `target.mode=UAM`. `UamCanonicalRows` plans rows. `UamTargetColumns` reads `information_schema` and converts. `columnTypes` remains a planning fallback for `numeric` and `timestamptz` only. Local schema `uam` on port 55432. Not a production UAM deployment. See [ARCHITECTURE.md](ARCHITECTURE.md) §29.
+- `UamPostgreSqlTargetConnector`: canonical PostgreSQL UAM load used by promotion when `target.mode=UAM`. `UamCanonicalRows` plans rows from staged `targetEntity` and `targetForeignKey`. `UamTargetColumns` reads `information_schema` and converts. A required timestamp with no default and no mapped value uses one UTC instant per load. Local schema `uam` on port 55432. Not a production UAM deployment. See [ARCHITECTURE.md](ARCHITECTURE.md) §29.
 - `UamTargetConnector` (`UAM`): REST SINGLE HTTP POST. Retained. Promotion does not use it.
 - Older flat stand-in: `uam_migration_test.address`.
 
@@ -131,13 +133,13 @@ JSONB on definition: `target.mode`, `target.schema`, `stagingSchema`, `stagingTa
 
 ## 15. Reconciliation
 
-User-invoked. Default **STAGING**. Checksum **not** compared to staging (`comparisonPerformed=false`). `verificationScope=BUSINESS_TARGET` uses `conflictKeys` + **promoted** batches only; no `conflictKeys` → `MIGRATION_TARGET_IDENTITY_NOT_CONFIGURED`. Does not change run/promotion status.
+User-invoked. Returns HTTP 202 and finishes in the background. Default **STAGING**. Checksum **not** compared to staging (`comparisonPerformed=false`). `verificationScope=BUSINESS_TARGET` uses `conflictKeys` + **promoted** batches only; no `conflictKeys` → `MIGRATION_TARGET_IDENTITY_NOT_CONFIGURED`. Does not change run/promotion status. A `FAILED` reconciliation outcome stays on `migration_reconciliation` and does not insert `migration_error`. The GET redacts secret-bearing example identities. It does not rewrite the stored details.
 
 ---
 
 ## 16. Promotion
 
-Prepare READY from staging counts (no business writes). Canonical promote allocates identities, then inserts configured UAM tables in one transaction per eligible batch. Failure rolls that UAM transaction back and keeps `migration_identity_allocation` for retry. Staging rows stay. `ON CONFLICT (<targetKey>) DO NOTHING` skips an existing key. UAM fixtures use `id`. Omitting that first column fails before the statement is built. Flat promote remains INSERT/UPSERT; a failed flat batch does not roll back earlier batches (`PARTIALLY_PROMOTED`). Already `PROMOTED` returns the stored result. Missing promotion on GET = 404; missing promotion on POST promote = 409 `PROMOTION_NOT_READY`.
+Prepare and promote each return HTTP 202. Prepare sets READY from staging counts (no business writes). Canonical promote allocates identities, then inserts configured UAM tables in one transaction per eligible batch. Failure rolls that UAM transaction back and keeps `migration_identity_allocation` for retry. Staging rows stay. `ON CONFLICT (<targetKey>) DO NOTHING` skips an existing key. UAM fixtures use `id`. Omitting that first column fails before the statement is built. Flat promote remains INSERT/UPSERT; a failed flat batch does not roll back earlier batches (`PARTIALLY_PROMOTED`, code `MIGRATION_PROMOTION_PARTIAL_FAILURE`). All failed batches use `PROMOTION_FAILED` and `MIGRATION_PROMOTION_BATCH_FAILED`. A clean `PROMOTED` promotion clears that summary. The phase job can still be `COMPLETED`. Already `PROMOTED` returns the stored result. Missing promotion on GET = 404; missing promotion on POST promote = 409 `PROMOTION_NOT_READY`. Historical `migration_error` rows are not deleted when a later attempt succeeds.
 
 ---
 
@@ -157,7 +159,7 @@ DRAFT → ACTIVE → execute → inspect → plan → SKIP LOCKED claim → tran
 
 ## 20. Limitations
 
-Enrichment/dedup/Kafka/scheduler/GUI absent. Multi-worker run counters can under-count. Per-batch full-file SHA-256. `dev` security is permitAll on APIs. Flyway V1 comment “30M+” is not a measurement. Integration tests must not use the demo JDBC URL.
+Enrichment, record deduplication, Kafka, an external scheduler, and a migration GUI are absent. In-process recovery scheduling is present. Multi-worker run counters can under-count. Per-batch full-file SHA-256. `dev` security is permitAll on the migration APIs; other profiles require a JWT and do not check a role or a run. There is no tenant isolation in this module. Error redaction is pattern-based, not general secret detection. Application error dedup can miss a concurrent insert and can collapse a later promotion attempt that repeats the same message. Flyway V1 comment “30M+” is not a measurement. Integration tests must not use the demo JDBC URL. Do not claim V11 is applied on the workstation control plane without reading `flyway_schema_history`.
 
 ---
 

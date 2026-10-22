@@ -48,7 +48,7 @@ The UI talks to HTTP APIs only. It does not open PostgreSQL.
 | Module | Stack |
 |--------|--------|
 | `capabilities/etp-iam` | Java 21, Spring Boot 4.1.0, PostgreSQL 17 (`etp_iam`), Keycloak, Flyway V1–V2 |
-| `capabilities/etp-migration` | Java 21, Spring Boot 4.1.0, PostgreSQL 17 (`etp_migration`), Flyway V1–V5, Apache Commons CSV |
+| `capabilities/etp-migration` | Java 21, Spring Boot 4.1.0, PostgreSQL 17 (`etp_migration`), Flyway V1–V11 in the repository, Apache Commons CSV |
 | `capabilities/etp-exports` | Java 21, Spring Boot 4.0.0, Apache POI. No database |
 | `capabilities/postgresql` | PostgreSQL 17 image and a capability contract. Not a Java service |
 | `capabilities/kafka` | Apache Kafka 3.8.1, KRaft, single local broker |
